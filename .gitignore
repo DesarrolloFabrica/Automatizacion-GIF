@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+outputs/*.docx
+outputs/*.json
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
