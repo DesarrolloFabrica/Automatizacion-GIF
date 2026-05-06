@@ -84,3 +84,46 @@ python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --max-
 ## Nota de seguridad
 
 Si una API key fue compartida en un chat o documento, conviene revocarla y crear una nueva desde el panel de OpenAI. Este proyecto espera la key desde `OPENAI_API_KEY` para evitar dejar secretos guardados en archivos.
+
+## Generador de documentos académicos (ACA, PRESENTACIÓN, FORO)
+
+Flujo independiente del generador de guiones. Toma exactamente 5 archivos fuente (`.pdf`, `.docx` o `.txt`) desde la carpeta `inputs/`, los analiza con OpenAI usando un prompt maestro y produce 3 documentos `.docx` listos para entrega institucional. La estructura de cada documento está definida en el prompt y en el código; no requiere plantillas externas.
+
+### Uso rápido (recomendado)
+
+1. Coloca exactamente 5 archivos en `inputs/`.
+2. Ejecuta:
+
+```powershell
+python generate_documentos_academicos.py
+```
+
+El script infiere automáticamente la asignatura y el programa del contenido de los archivos. Los resultados quedan en `outputs/documentos_academicos/`.
+
+### Uso con parámetros explícitos
+
+```powershell
+python generate_documentos_academicos.py --input-dir "inputs" --output-dir "outputs\documentos_academicos" --subject "Macroeconomía" --program "Administración Deportiva"
+```
+
+Para revisar lectura y prompt sin consumir API:
+
+```powershell
+python generate_documentos_academicos.py --dry-run
+```
+
+### Estructura de carpetas
+
+- `inputs/`: coloca aquí los 5 archivos fuente (`.pdf`, `.docx` o `.txt`).
+- `outputs/documentos_academicos/`: aquí se guardan los `.docx` generados.
+- `prompts/system_prompt_documentos_academicos.md`: prompt maestro editable.
+
+### Salida esperada
+
+Tres archivos en `outputs/documentos_academicos/`:
+
+- `ACA_ASIGNATURA_PROGRAMA.docx`
+- `PRESENTACION_ASIGNATURA_PROGRAMA.docx`
+- `FORO_ASIGNATURA_PROGRAMA.docx`
+
+Todos en Arial 12, títulos Arial 14 negrita, fuente negra, viñetas donde corresponde.
