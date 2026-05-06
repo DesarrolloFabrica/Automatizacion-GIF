@@ -1,4 +1,6 @@
 .env
+credentials.json
+token_drive.json
 __pycache__/
 *.pyc
 outputs/*.docx

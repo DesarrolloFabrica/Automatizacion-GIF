@@ -5,7 +5,7 @@ Este proyecto toma un sílabo en Word (`.docx`) o PDF (`.pdf`), identifica la in
 ## Archivos principales
 
 - `generate_guiones.py`: script principal para extraer el sílabo y generar los documentos.
-- `prompts/system_prompt_guion_academico.md`: prompt maestro editable.
+- `prompts/`: carpeta de prompts por nivel academico (`pregrado.md`, `especializacion.md`, `diplomado.md`, `maestria.md`).
 - `notebooks/generador_guiones.ipynb`: flujo en Jupyter para el equipo.
 - `outputs/`: carpeta donde quedan los `.docx` generados.
 
@@ -34,10 +34,33 @@ También puedes probar un PDF:
 python generate_guiones.py --syllabus "Mi Silabo.pdf" --dry-run
 ```
 
+Por defecto el script usa `--nivel auto`: intenta detectar si el silabo corresponde a pregrado, especializacion, diplomado o maestria, y carga el prompt de `prompts/<nivel>.md`.
+
+Si quieres elegir el prompt manualmente, usa `--nivel`:
+
+```powershell
+python generate_guiones.py --syllabus "Silabo Especializacion.docx" --nivel especializacion --dry-run
+python generate_guiones.py --syllabus "Silabo Diplomado.pdf" --nivel diplomado --dry-run
+python generate_guiones.py --syllabus "Silabo Maestria.docx" --nivel maestria --dry-run
+python generate_guiones.py --syllabus "Silabo Pregrado.docx" --nivel pregrado --dry-run
+```
+
+Tambien puedes usar un prompt externo puntual con `--prompt`:
+
+```powershell
+python generate_guiones.py --syllabus "Mi Silabo.docx" --nivel especializacion --prompt "prompts/especializacion.md"
+```
+
 ## Generación real
 
 ```powershell
 python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --semester "Semestre N°1" --subject "Habilidades Comunicativas"
+```
+
+Ejemplo para especializacion:
+
+```powershell
+python generate_guiones.py --syllabus "Silabo Especializacion.docx" --nivel especializacion
 ```
 
 Si el PDF o el sílabo tiene un formato difícil y no detecta los cinco temas, puedes forzarlos manualmente:
@@ -50,7 +73,7 @@ El generador crea cada documento largo por secciones. Para cada tema hace varias
 
 Además, el script valida la extensión mínima de cada sección. Si una sección queda corta, solicita automáticamente una ampliación antes de ensamblar el `.docx`.
 
-La bibliografía debe incluir entre 20 y 30 referencias de 2021 en adelante. El generador filtra la bibliografía del sílabo para priorizar fuentes posteriores a 2020 y reescribe la sección si detecta referencias de 2020 o anteriores.
+La bibliografía se ajusta al nivel seleccionado: pregrado usa 20 a 30 referencias, especializacion 30 a 40, diplomado 15 a 25 y maestria 40 a 55. El generador filtra la bibliografía del sílabo para priorizar fuentes posteriores a 2020 y reescribe la sección si detecta referencias de 2020 o anteriores.
 
 El script genera un archivo por cada tema detectado. Para este sílabo, los temas esperados son:
 
@@ -79,6 +102,114 @@ Cada documento queda diseñado para aproximarse a 20 a 30 páginas, dependiendo 
 
 ```powershell
 python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --max-tokens 6000
+```
+
+## Flujo 2: generar TXT desde guiones ya creados
+
+Este flujo usa como entrada los guiones `.docx` que ya tengas generados y produce varios archivos `.txt` nuevos usando un prompt específico.
+
+Carpeta de entrada:
+
+```text
+entrada_guiones_txt
+```
+
+Carpeta de salida:
+
+```text
+salidas_txt
+```
+
+Coloca en `entrada_guiones_txt` los 4 o 5 guiones `.docx` ya creados. Luego crea el prompt específico en:
+
+```text
+prompts/txt_desde_guiones.md
+```
+
+Prueba sin consumir API:
+
+```powershell
+python generate_txt_from_guiones.py --dry-run
+```
+
+Generación real:
+
+```powershell
+python generate_txt_from_guiones.py
+```
+
+Por defecto genera estos 4 TXT:
+
+```text
+PDA.txt
+QUIZ 1.txt
+QUIZ 2.txt
+QUIZ 3.txt
+```
+
+Si quieres indicar otros nombres o enfoques para los 4 TXT:
+
+```powershell
+python generate_txt_from_guiones.py --titles "Guion 1; Guion 2; Guion 3; Guion 4"
+```
+
+También puedes cambiar la cantidad:
+
+```powershell
+python generate_txt_from_guiones.py --count 5
+```
+
+## Flujo 3: generar TXT leyendo desde Google Drive
+
+Este flujo usa OAuth con el correo que tiene acceso a la carpeta de Drive. La primera vez abre el navegador para iniciar sesión y autorizar permisos. Luego guarda el acceso en `token_drive.json`.
+
+Archivos necesarios:
+
+```text
+credentials.json
+```
+
+Ese archivo es el OAuth Client JSON descargado desde Google Cloud. Déjalo en la raíz del proyecto, junto a `generate_txt_from_drive.py`.
+
+El script lee únicamente archivos Word `.docx` desde una carpeta de Drive por ID, ignora otros formatos como `.mpr`, crea o reutiliza una subcarpeta llamada `contenido complementario`, y sube allí los TXT generados.
+
+El ID de carpeta sale de la URL de Drive. Ejemplo:
+
+```text
+https://drive.google.com/drive/folders/ID_DE_LA_CARPETA
+```
+
+Prueba sin consumir OpenAI ni subir resultados:
+
+```powershell
+python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --dry-run
+```
+
+Generación real:
+
+```powershell
+python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA"
+```
+
+Por defecto genera o actualiza estos archivos en la subcarpeta `contenido complementario`:
+
+```text
+PDA.txt
+QUIZ 1.txt
+QUIZ 2.txt
+QUIZ 3.txt
+```
+
+Si el programa o la asignatura no se detectan bien desde los Word, indícalos manualmente:
+
+```powershell
+python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --programa "ADMINISTRACIÓN DEPORTIVA" --asignatura "Macroeconomía"
+```
+
+Con nombres/enfoques personalizados:
+
+```powershell
+python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --titles "PDA; Quiz 1; Quiz 2; Quiz 3"
 ```
 
 ## Nota de seguridad
