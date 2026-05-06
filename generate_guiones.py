@@ -3,6 +3,7 @@ import json
 import os
 import re
 import textwrap
+import unicodedata
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable, List
@@ -22,7 +23,12 @@ except ImportError:  # pragma: no cover
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_PROMPT_PATH = BASE_DIR / "prompts" / "system_prompt_guion_academico.md"
+PROMPT_PATHS = {
+    "pregrado": BASE_DIR / "prompts" / "pregrado.md",
+    "especializacion": BASE_DIR / "prompts" / "especializacion.md",
+    "diplomado": BASE_DIR / "prompts" / "diplomado.md",
+    "maestria": BASE_DIR / "prompts" / "maestria.md",
+}
 
 
 SECTION_PLAN = [
@@ -85,6 +91,157 @@ SECTION_PLAN = [
 ]
 
 
+SECTION_PLANS_BY_LEVEL = {
+    "pregrado": SECTION_PLAN,
+    "especializacion": [
+        {
+            "key": "introduccion",
+            "title": "INTRODUCCION",
+            "target_words": "1.800 a 2.500 palabras",
+            "min_words": 1500,
+            "instruction": "Redacta solo la introduccion. Plantea el problema desde una perspectiva de posgrado profesional, con rigor conceptual y conexion con la practica avanzada.",
+        },
+        {
+            "key": "capitulos_1",
+            "title": "CAPITULOS TEORICO-APLICADOS",
+            "target_words": "2.500 a 3.500 palabras",
+            "min_words": 2000,
+            "instruction": "Redacta la primera mitad de los capitulos teorico-aplicados. Desarrolla fundamentos, autores, categorias y relacion con problemas profesionales avanzados.",
+        },
+        {
+            "key": "capitulos_2",
+            "title": "CAPITULOS TEORICO-APLICADOS",
+            "target_words": "2.500 a 3.500 palabras",
+            "min_words": 2000,
+            "instruction": "Redacta la segunda mitad de los capitulos teorico-aplicados. Profundiza en aplicacion, tensiones, criterios de decision y contexto colombiano o regional.",
+        },
+        {
+            "key": "analisis_1",
+            "title": "ANALISIS CRITICOS",
+            "target_words": "1.500 a 2.000 palabras",
+            "min_words": 1200,
+            "instruction": "Redacta el primer analisis critico con una tesis clara, soporte bibliografico y lectura profesional avanzada.",
+        },
+        {
+            "key": "analisis_2",
+            "title": "ANALISIS CRITICOS",
+            "target_words": "1.500 a 2.000 palabras",
+            "min_words": 1200,
+            "instruction": "Redacta el segundo analisis critico. Contrasta enfoques, identifica implicaciones profesionales y evita repetir el analisis anterior.",
+        },
+        {
+            "key": "analisis_3",
+            "title": "ANALISIS CRITICOS",
+            "target_words": "1.500 a 2.000 palabras",
+            "min_words": 1200,
+            "instruction": "Redacta el tercer analisis critico. Integra una tension etica, institucional, normativa o metodologica propia del nivel de especializacion.",
+        },
+        {
+            "key": "conclusiones",
+            "title": "CONCLUSIONES",
+            "target_words": "1.200 a 1.600 palabras",
+            "min_words": 900,
+            "instruction": "Redacta solo las conclusiones. Sintetiza aportes conceptuales, implicaciones profesionales avanzadas y cierre argumentativo.",
+        },
+        {
+            "key": "bibliografia",
+            "title": "BIBLIOGRAFIA",
+            "target_words": "30 a 40 referencias posteriores a 2020",
+            "min_words": 350,
+            "instruction": "Redacta unicamente la bibliografia en APA 7. Incluye entre 30 y 40 referencias reales y pertinentes, publicadas de 2021 en adelante.",
+        },
+    ],
+    "diplomado": [
+        {
+            "key": "introduccion",
+            "title": "INTRODUCCION",
+            "target_words": "1.200 a 1.800 palabras",
+            "min_words": 1000,
+            "instruction": "Redacta solo la introduccion. Contextualiza desde un problema profesional concreto, la utilidad practica y las competencias del diplomado.",
+        },
+        {
+            "key": "modulos_1",
+            "title": "MODULOS TEMATICOS",
+            "target_words": "2.000 a 2.800 palabras",
+            "min_words": 1600,
+            "instruction": "Redacta los primeros modulos tematicos con orientacion a competencias, herramientas aplicables, criterios de decision y transferencia al contexto laboral.",
+        },
+        {
+            "key": "modulos_2",
+            "title": "MODULOS TEMATICOS",
+            "target_words": "2.000 a 2.800 palabras",
+            "min_words": 1600,
+            "instruction": "Redacta los modulos tematicos restantes. Integra escenarios profesionales, errores frecuentes, protocolos o metodologias utiles.",
+        },
+        {
+            "key": "casos",
+            "title": "CASOS DE APLICACION PROFESIONAL",
+            "target_words": "3.000 a 4.500 palabras",
+            "min_words": 2400,
+            "instruction": "Redacta tres casos de aplicacion profesional con escenario, analisis, ruta de intervencion, tension profesional y lecciones transferibles.",
+        },
+        {
+            "key": "conclusiones",
+            "title": "CONCLUSIONES",
+            "target_words": "800 a 1.200 palabras",
+            "min_words": 650,
+            "instruction": "Redacta solo las conclusiones. Sintetiza competencias profesionales, orientaciones practicas y tendencias de actualizacion continua.",
+        },
+        {
+            "key": "bibliografia",
+            "title": "BIBLIOGRAFIA",
+            "target_words": "15 a 25 referencias posteriores a 2020",
+            "min_words": 220,
+            "instruction": "Redacta unicamente la bibliografia en APA 7. Incluye entre 15 y 25 referencias reales, priorizando normas, guias y fuentes aplicadas recientes.",
+        },
+    ],
+    "maestria": [
+        {
+            "key": "introduccion",
+            "title": "INTRODUCCION",
+            "target_words": "2.500 a 3.500 palabras",
+            "min_words": 2000,
+            "instruction": "Redacta solo la introduccion. Construye el tema como problema intelectual, con estado de la cuestion, posicionamiento teorico y hoja de ruta argumentativa.",
+        },
+        {
+            "key": "capitulos_1",
+            "title": "CAPITULOS DE DESARROLLO",
+            "target_words": "3.000 a 4.000 palabras",
+            "min_words": 2400,
+            "instruction": "Redacta los primeros capitulos de desarrollo con estructura investigativa: problema, revision critica, analisis, implicaciones, condiciones de validez y sintesis.",
+        },
+        {
+            "key": "capitulos_2",
+            "title": "CAPITULOS DE DESARROLLO",
+            "target_words": "3.000 a 4.000 palabras",
+            "min_words": 2400,
+            "instruction": "Redacta los capitulos de desarrollo restantes. Profundiza en debates, genealogia conceptual, evidencia, limitaciones y aporte al argumento general.",
+        },
+        {
+            "key": "discusiones",
+            "title": "DISCUSIONES TEORICAS",
+            "target_words": "5.000 a 7.000 palabras",
+            "min_words": 3500,
+            "instruction": "Redacta tres discusiones teoricas con tesis propia: una teorica, una metodologica y una aplicada o de politica.",
+        },
+        {
+            "key": "conclusiones",
+            "title": "CONCLUSIONES",
+            "target_words": "1.800 a 2.500 palabras",
+            "min_words": 1400,
+            "instruction": "Redacta solo las conclusiones. Integra contribuciones, limitaciones, agenda de investigacion y cierre intelectualmente denso.",
+        },
+        {
+            "key": "bibliografia",
+            "title": "BIBLIOGRAFIA",
+            "target_words": "40 a 55 referencias posteriores a 2020",
+            "min_words": 450,
+            "instruction": "Redacta unicamente la bibliografia en APA 7. Incluye entre 40 y 55 referencias reales y pertinentes.",
+        },
+    ],
+}
+
+
 @dataclass
 class CoursePlan:
     asignatura: str
@@ -99,6 +256,7 @@ class CoursePlan:
     pregunta_problema: str
     temas: List[str]
     bibliografia_silabo: List[str]
+    nivel: str = "pregrado"
 
 
 def clean_text(value: str) -> str:
@@ -115,6 +273,52 @@ def slugify(value: str) -> str:
     value = re.sub(r"ñ", "n", value)
     value = re.sub(r"[^a-z0-9]+", "-", value)
     return value.strip("-") or "documento"
+
+
+def normalize_for_matching(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    value = value.lower()
+    value = value.replace("Ã¡", "a").replace("Ã©", "e").replace("Ã­", "i").replace("Ã³", "o").replace("Ãº", "u")
+    value = value.replace("Ã±", "n").replace("Ã", "i").replace("Ã‰", "e").replace("Ã“", "o")
+    return re.sub(r"\s+", " ", value)
+
+
+def detect_academic_level(plan: CoursePlan, syllabus_text: str, requested_level: str) -> str:
+    if requested_level != "auto":
+        return requested_level
+
+    haystack = normalize_for_matching(
+        " ".join(
+            [
+                plan.programa,
+                plan.asignatura,
+                plan.escuela,
+                plan.semestre,
+                syllabus_text[:12000],
+            ]
+        )
+    )
+    checks = [
+        ("maestria", ["maestria", "magister", "master"]),
+        ("especializacion", ["especializacion", "especialista", "posgrado", "postgrado"]),
+        ("diplomado", ["diplomado", "educacion continua", "formacion continua"]),
+        ("pregrado", ["pregrado", "profesional universitario", "universitario", "semestre"]),
+    ]
+    for level, markers in checks:
+        if any(marker in haystack for marker in markers):
+            return level
+    return "pregrado"
+
+
+def resolve_prompt_path(level: str, prompt_override: str = "") -> Path:
+    if prompt_override:
+        return Path(prompt_override)
+    return PROMPT_PATHS[level]
+
+
+def get_section_plan(level: str) -> List[dict]:
+    return SECTION_PLANS_BY_LEVEL[level]
 
 
 def iter_table_rows(doc: Document) -> Iterable[List[str]]:
@@ -165,6 +369,8 @@ def extract_course_plan(path: Path, subject_override: str = "", semester_overrid
 
     doc = Document(path)
     rows = list(iter_table_rows(doc))
+    if not rows:
+        return extract_course_plan_from_text(extract_docx_text(path), path, subject_override, semester_override, topics_override)
 
     def value_after(label: str) -> str:
         label_norm = label.lower()
@@ -420,10 +626,11 @@ def build_section_prompt(
     bibliography = format_recent_bibliography(plan.bibliografia_silabo)
     previous_note = previous_context[-2500:] if previous_context else "Aun no hay secciones redactadas."
     return f"""
-Vas a redactar una parte de un documento academico largo. Este documento completo debe quedar entre 20 y 30 paginas aproximadas, con estructura de guion editorial.
+Vas a redactar una parte de un documento academico largo de nivel {plan.nivel}. Usa el prompt del sistema correspondiente a ese nivel academico como regla principal de estilo, profundidad, estructura y bibliografia.
 
 Documento tematico {topic_index} de {total_topics}
 Tema central: {topic}
+Nivel academico seleccionado: {plan.nivel}
 Seccion a redactar ahora: {section["title"]}
 Extension obligatoria de esta respuesta: {section["target_words"]}
 
@@ -444,7 +651,8 @@ Silabo completo extraido:
 
 Reglas de salida para esta llamada:
 - Escribe solo el contenido de la seccion solicitada.
-- No repitas el encabezado CONTENIDO/ASIGNATURA/PROGRAMA/CICLO/SEMESTRE.
+- Respeta la estructura y el tono propios del nivel academico seleccionado.
+- No repitas el encabezado institucional.
 - No escribas el titulo principal de la seccion; el sistema lo agrega automaticamente.
 - No escribas explicaciones sobre el proceso.
 - No uses markdown, asteriscos, emojis ni listas esquematicas salvo en BIBLIOGRAFIA.
@@ -504,12 +712,22 @@ def format_recent_bibliography(items: List[str]) -> str:
     return "No se identifico bibliografia posterior a 2020 en el silabo. Complementa con fuentes academicas reales publicadas de 2021 en adelante."
 
 
+def min_references_for_level(level: str) -> int:
+    return {
+        "pregrado": 20,
+        "especializacion": 30,
+        "diplomado": 15,
+        "maestria": 40,
+    }[level]
+
+
 def build_expansion_prompt(plan: CoursePlan, topic: str, section: dict, current_text: str) -> str:
     return f"""
 La siguiente seccion quedo demasiado corta para un documento academico de 20 a 30 paginas.
 
 Tema: {topic}
 Asignatura: {plan.asignatura}
+Nivel academico: {plan.nivel}
 Seccion: {section["title"]}
 Minimo requerido para esta seccion: {section["min_words"]} palabras
 Palabras actuales aproximadas: {word_count(current_text)}
@@ -528,11 +746,13 @@ Reglas:
 
 
 def build_bibliography_rewrite_prompt(plan: CoursePlan, topic: str, current_text: str) -> str:
+    min_refs = min_references_for_level(plan.nivel)
     return f"""
 La bibliografia generada no cumple el requisito institucional.
 
 Tema: {topic}
 Asignatura: {plan.asignatura}
+Nivel academico: {plan.nivel}
 
 Bibliografia actual:
 {current_text[-6000:]}
@@ -540,7 +760,7 @@ Bibliografia actual:
 Reescribe la bibliografia completa.
 Reglas obligatorias:
 - Escribe únicamente BIBLIOGRAFIA en formato APA 7.
-- Incluye entre 20 y 30 referencias.
+- Incluye al menos {min_refs} referencias, respetando el rango definido en el prompt de sistema del nivel {plan.nivel}.
 - Todas las referencias deben ser posteriores a 2020, es decir, de 2021 en adelante.
 - No incluyas ninguna referencia de 2020, 2019, 2018 ni años anteriores.
 - Usa fuentes reales, reconocibles y pertinentes al tema.
@@ -561,9 +781,10 @@ def expand_if_short(
     temperature: float,
 ) -> str:
     if section["key"] == "bibliografia":
-        if recent_reference_count(section_text) >= 20 and not has_old_references(section_text):
+        min_refs = min_references_for_level(plan.nivel)
+        if recent_reference_count(section_text) >= min_refs and not has_old_references(section_text):
             return section_text
-        print("    La bibliografia no cumple 20 referencias posteriores a 2020; solicitando reescritura.")
+        print(f"    La bibliografia no cumple {min_refs} referencias posteriores a 2020; solicitando reescritura.")
         return generate_document(
             client=client,
             model=model,
@@ -601,13 +822,13 @@ def generate_long_document(
 ) -> str:
     header = (
         f"CONTENIDO: {topic}. ASIGNATURA: {plan.asignatura}. "
-        f"PROGRAMA: {plan.programa}. CICLO: {plan.ciclo}. SEMESTRE: {plan.semestre}."
+        f"PROGRAMA: {plan.programa}. NIVEL: {plan.nivel}. CICLO: {plan.ciclo}. SEMESTRE: {plan.semestre}."
     )
     blocks = [header]
     previous_context = ""
     used_main_titles = set()
 
-    for section in SECTION_PLAN:
+    for section in get_section_plan(plan.nivel):
         print(f"  - Generando {section['key']} ({section['target_words']})")
         prompt = build_section_prompt(
             plan=plan,
@@ -681,6 +902,12 @@ def is_generated_wrapper_line(line: str, title: str) -> bool:
             "INTRODUCCION",
             "EJES ARTICULADORES",
             "ENSAYOS DE PROFUNDIZACION",
+            "CAPITULOS TEORICO-APLICADOS",
+            "ANALISIS CRITICOS",
+            "MODULOS TEMATICOS",
+            "CASOS DE APLICACION PROFESIONAL",
+            "CAPITULOS DE DESARROLLO",
+            "DISCUSIONES TEORICAS",
             "CONCLUSIONES",
             "BIBLIOGRAFIA",
         }
@@ -717,11 +944,17 @@ def write_plan_json(plan: CoursePlan, output_dir: Path) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Genera 5 guiones académicos desde un sílabo DOCX o PDF.")
     parser.add_argument("--syllabus", required=True, help="Ruta al sílabo .docx o .pdf")
+    parser.add_argument(
+        "--nivel",
+        default="auto",
+        choices=["auto", "pregrado", "especializacion", "diplomado", "maestria"],
+        help="Nivel academico/prompt a usar. En auto intenta detectarlo desde el silabo.",
+    )
     parser.add_argument("--subject", default="", help="Nombre de la materia, si se quiere forzar")
     parser.add_argument("--semester", default="", help="Semestre, si se quiere forzar")
     parser.add_argument("--topics", default="", help="Cinco temas separados por punto y coma o barra vertical, si se quieren forzar")
     parser.add_argument("--output-dir", default="outputs", help="Carpeta de salida")
-    parser.add_argument("--prompt", default=str(DEFAULT_PROMPT_PATH), help="Ruta al prompt maestro")
+    parser.add_argument("--prompt", default="", help="Ruta a un prompt maestro personalizado. Si se omite, usa prompts/<nivel>.md")
     parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
     parser.add_argument("--max-tokens", type=int, default=4500, help="Maximo de tokens por seccion generada")
     parser.add_argument("--temperature", type=float, default=0.65, help="Creatividad de generación")
@@ -738,12 +971,16 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    plan = extract_course_plan(syllabus_path, args.subject, args.semester, args.topics)
     syllabus_text = extract_input_text(syllabus_path)
+    plan = extract_course_plan(syllabus_path, args.subject, args.semester, args.topics)
+    plan.nivel = detect_academic_level(plan, syllabus_text, args.nivel)
+    prompt_path = resolve_prompt_path(plan.nivel, args.prompt)
     plan_path = write_plan_json(plan, output_dir)
 
     print("Plan detectado:")
     print(json.dumps(asdict(plan), ensure_ascii=False, indent=2))
+    print(f"\nNivel seleccionado: {plan.nivel}")
+    print(f"Prompt seleccionado: {prompt_path}")
     print(f"\nPlan guardado en: {plan_path}")
 
     if args.dry_run:
@@ -756,7 +993,7 @@ def main() -> None:
         raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
 
     client = OpenAI()
-    system_prompt = load_system_prompt(Path(args.prompt))
+    system_prompt = load_system_prompt(prompt_path)
 
     for index, topic in enumerate(plan.temas, start=1):
         print(f"\nGenerando documento {index}/{len(plan.temas)}: {topic}")
