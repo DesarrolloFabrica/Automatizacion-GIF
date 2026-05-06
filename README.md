@@ -258,3 +258,65 @@ Tres archivos en `outputs/documentos_academicos/`:
 - `FORO_ASIGNATURA_PROGRAMA.docx`
 
 Todos en Arial 12, títulos Arial 14 negrita, fuente negra, viñetas donde corresponde.
+
+## Pipeline unificado desde Drive (TXT + ACA + PRESENTACIÓN + FORO)
+
+Este flujo combina los dos anteriores en un solo comando: descarga los 5 `.docx` desde una carpeta de Google Drive, genera los 4 TXT (PDA + QUIZ 1-3) y los 3 documentos académicos (ACA, PRESENTACIÓN, FORO), y sube todo a Drive dentro de la carpeta `contenido complementario/` que ya usa el flujo del compañero.
+
+Estructura final en Drive después de ejecutar:
+
+```text
+<carpeta fuente>/
+└── contenido complementario/
+    ├── txt/
+    │   ├── PDA.txt
+    │   ├── QUIZ 1.txt
+    │   ├── QUIZ 2.txt
+    │   └── QUIZ 3.txt
+    ├── ACA_<ASIGNATURA>_<PROGRAMA>.docx
+    ├── PRESENTACION_<ASIGNATURA>_<PROGRAMA>.docx
+    └── FORO_<ASIGNATURA>_<PROGRAMA>.docx
+```
+
+Los flujos individuales (`generate_txt_from_drive.py` y `generate_documentos_academicos.py`) siguen funcionando como hasta ahora; este orquestador los combina sin modificarlos.
+
+### Requisitos previos
+
+- `credentials.json` en la raíz (mismo OAuth que usa `generate_txt_from_drive.py`).
+- `OPENAI_API_KEY` configurada en `.env` o variables de entorno.
+- La primera ejecución pedirá autorización en el navegador y guardará `token_drive.json`.
+
+### Uso rápido
+
+```powershell
+python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA"
+```
+
+El script infiere asignatura y programa del contenido de los archivos.
+
+### Con overrides
+
+```powershell
+python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --asignatura "Salud Pública" --programa "Tecnología en Regencia de Farmacia"
+```
+
+### Modo prueba (no llama a OpenAI ni sube archivos)
+
+```powershell
+python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --dry-run
+```
+
+Esto autentica con Drive, descarga las fuentes a un directorio temporal, crea las carpetas `contenido complementario/` y `contenido complementario/txt/` si no existen y muestra el manifest detectado.
+
+### Solo TXT o solo DOCX
+
+Si quieres regenerar solo una fase, usa los flags de salto:
+
+```powershell
+python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --skip-docx
+python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --skip-txt
+```
+
+### Validación automática
+
+Después de generar los DOCX el orquestador ejecuta `validate_blocks` (la misma del flujo académico): comprueba secciones obligatorias, regla de "al menos 5 compañeros" en el FORO, mínimo 3 referencias APA en el FORO, mínimo 6 en la BIBLIOGRAFÍA del ACA, presencia de los 4 ejes en el RESUMEN DE CONTENIDOS, los 3 CTA en la PRESENTACIÓN y ausencia de la palabra "Bloom" en el ACA. Si algo falla, los archivos igual se suben pero se imprime un bloque `ADVERTENCIAS DE VALIDACION` con detalle.
