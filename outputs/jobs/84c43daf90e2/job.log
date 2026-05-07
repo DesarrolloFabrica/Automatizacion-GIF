@@ -1,0 +1,128 @@
+Ejecutando comando: C:\dev\automatizacionGif\Automatizacion-GIF\backend_api\.venv\Scripts\python.exe C:\dev\automatizacionGif\Automatizacion-GIF\generate_guiones.py --syllabus C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\input\syllabus.docx --nivel especializacion --output-dir C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\generated
+Plan detectado:
+{
+  "asignatura": "Introducci�n a la Gesti�n de la Innovaci�n",
+  "programa": "ESPECIALIZACI�N EN GESTI�N DE LA INNOVACI�N DEL SISTEMA MODA",
+  "escuela": "ESCUELA DE DISE�O Y COMUNICACI�N",
+  "semestre": "Semestre N�1",
+  "ciclo": "",
+  "modalidad": "Virtual",
+  "creditos": "2",
+  "competencias": "Categoriza las distintas tendencias y modelos de innovaci�n en el sistema de moda, identificando sus caracter�sticas, ventajas y desaf�os, para aplicarlas en contextos espec�ficos de la industria",
+  "resultados_aprendizaje": "Dirige de manera cr�tica y fundamentada la implementaci�n de estrategias de innovaci�n en el sistema de moda, evaluando el impacto de estas en la sostenibilidad, competitividad y adaptabilidad de las empresas en el sector, para enfrentar los desaf�os del mercado en un entorno globalizado y digital.",
+  "pregunta_problema": "�C�mo pueden las marcas de moda equilibrar la necesidad de innovar con la implementaci�n de pr�cticas sostenibles y �ticas, considerando los costos y los cambios necesarios en la cadena de suministro?",
+  "temas": [
+    "Los Enfoques y tipo de innovaci�n",
+    "Las Fases de la innovaci�n",
+    "Los Actores de la innovaci�n",
+    "Los M�todos de innovaci�n",
+    "Elementos de la gesti�n de la innovaci�n y creatividad"
+  ],
+  "bibliografia_silabo": [
+    "Ar�nzazu Osorio Viviana Carolina (2018). Innovaci�n para la competitividad en la industria de alimentos en Colombia, Programa editorial Universidad del Valle. Colecci�n ciencias de la administraci�n, primera edici�n.",
+    "Edgett, Scott J. (2015). El modelo de proceso de idea a lanzamiento (Stage-Gate): Una visi�n integral.",
+    "Giraldo Mej�a Armando, Bravo Castillo Mario, Mendieta Cardona Claudia Patricia, Rojas L�pez Jos� Alberto (2018). Innovaci�n en la Pyme, Experiencias y aportes de investigaci�n.",
+    "L�pez Aguilar Iv�n Diego (2015). Modelo para la medici�n de la innovaci�n, piloto en din�mica de sistemas en empresas colombianas, Universidad Cat�lica de Colombia Maestr�a en Ingenier�a Industrial. Bogot�",
+    "Mart�nez Moreno Edurne, Agirre Olaia, Navascu�s Maribel, Gomes Olga, con la colaboraci�n especial de Sabino Ayestaran y la colaboraci�n de Marian Albaina y Lorena Jim�nez (2018). El reto de liderar equipos de innovaci�n en pymes, Bilbao, Universidad del Pa�s Vasco / Euskal Herriko Unibertsitatea, Agitalpen Zerbitzua, Servicio Editorial D.L.",
+    "Mendoza Guerra Jos� M. (2018). Los dilemas de la Pymes, Bogot� Ediciones de la U.",
+    "Morr�n Salmeron, A. y Ruiz, A. (2019). Las dificultades del sector manufacturero mundial. Actividad y crecimiento. Recuperado de https://www.caixabankresearch.com/lasdificultades-del-sector-manufacturero-mundial.",
+    "OCDE & Eurostat. (2018). Manual de Oslo 2018: Gu�a para la recogida e interpretaci�n de datos sobre Innovaci�n (4 ed.)",
+    "OMPI; Cornell University & INSEAD (2019). The global innovation index 2019: Creating healthy lives � The future of medical innovation (12 ed.), Ithaca, Fontainebleau, and Geneva.",
+    "Restrepo, C. (2015). Conferencia: Creando un modelo de innovaci�n en una multinacional colombiana. Medell�n: Universidad EAFIT. Recuperado el 16 de Octubre de 2020, de https://acortar.link/kfoYU",
+    "Robayo A, Paula V. (2016). La innovaci�n como proceso y su gesti�n en la organizaci�n: una aplicaci�n para el sector gr�fico colombiano. Suma de Negocios 7. 125 � 140.",
+    "Sociedad de la Innovaci�n - SDLI. (2019). Diagn�stico del modelo de innovaci�n de la Cl�nica Somer S.A. Barcelona",
+    "Vargas, Simon. (18 de julio de 2018). Democratizar el conocimiento en la era de la informaci�n.",
+    "Villalobos, Susana (30 de enero de 2020). El Futuro de los Consultores: 7 Tendencias claves para el 2020."
+  ],
+  "nivel": "especializacion"
+}
+Nivel seleccionado: especializacion
+Prompt seleccionado: C:\dev\automatizacionGif\Automatizacion-GIF\prompts\especializacion.md
+Plan guardado en: C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\generated\plan_curso.json
+Generando documento 1/5: Los Enfoques y tipo de innovaci�n
+  - Generando introduccion (1.800 a 2.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_1 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_2 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_1 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_2 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_3 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando conclusiones (1.200 a 1.600 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando bibliografia (30 a 40 referencias posteriores a 2020)
+Guardado: C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\generated\G1_los-enfoques-y-tipo-de-innovacion.docx (11408 palabras aprox.; 25.4 paginas estimadas)
+Generando documento 2/5: Las Fases de la innovaci�n
+  - Generando introduccion (1.800 a 2.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_1 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_2 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_1 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_2 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_3 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando conclusiones (1.200 a 1.600 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando bibliografia (30 a 40 referencias posteriores a 2020)
+Guardado: C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\generated\G2_las-fases-de-la-innovacion.docx (11786 palabras aprox.; 26.2 paginas estimadas)
+Generando documento 3/5: Los Actores de la innovaci�n
+  - Generando introduccion (1.800 a 2.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_1 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_2 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_1 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_2 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_3 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando conclusiones (1.200 a 1.600 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando bibliografia (30 a 40 referencias posteriores a 2020)
+Guardado: C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\generated\G3_los-actores-de-la-innovacion.docx (11494 palabras aprox.; 25.5 paginas estimadas)
+Generando documento 4/5: Los M�todos de innovaci�n
+  - Generando introduccion (1.800 a 2.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_1 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_2 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_1 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_2 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_3 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando conclusiones (1.200 a 1.600 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando bibliografia (30 a 40 referencias posteriores a 2020)
+Guardado: C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\generated\G4_los-metodos-de-innovacion.docx (11344 palabras aprox.; 25.2 paginas estimadas)
+Generando documento 5/5: Elementos de la gesti�n de la innovaci�n y creatividad
+  - Generando introduccion (1.800 a 2.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_1 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando capitulos_2 (2.500 a 3.500 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_1 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_2 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando analisis_3 (1.500 a 2.000 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando conclusiones (1.200 a 1.600 palabras)
+    La seccion quedo corta; solicitando ampliacion.
+  - Generando bibliografia (30 a 40 referencias posteriores a 2020)
+    La bibliografia no cumple 30 referencias posteriores a 2020; solicitando reescritura.
+Guardado: C:\dev\automatizacionGif\Automatizacion-GIF\outputs\jobs\84c43daf90e2\generated\G5_elementos-de-la-gestion-de-la-innovacion-y-creatividad.docx (11168 palabras aprox.; 24.8 paginas estimadas)
+Proceso finalizado con código: 0
