@@ -3,7 +3,22 @@ credentials.json
 token_drive.json
 __pycache__/
 *.pyc
-outputs/*.docx
-outputs/*.json
+.venv/
+frontend/node_modules/
+frontend/dist/
 .ipynb_checkpoints/
 notebooks/.ipynb_checkpoints/
+
+# Generated outputs
+outputs/*.docx
+outputs/*.json
+outputs/documentos_academicos/*.docx
+outputs/jobs/
+
+# Job working directories
+jobs/*
+!jobs/.gitkeep
+
+# Sample syllabus
+samples/syllabus/*
+!samples/syllabus/.gitkeep

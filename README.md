@@ -2,12 +2,48 @@
 
 Este proyecto toma un sílabo en Word (`.docx`) o PDF (`.pdf`), identifica la información principal de la asignatura, divide el curso en cinco temas y genera cinco documentos base con una estructura homogénea tipo guion editorial.
 
+## Estructura del proyecto
+
+```
+Automatizacion-GIF/
+├── frontend/                    # React + Vite + TypeScript
+├── backend/                     # FastAPI API
+├── automation_engine/           # Motor de automatización Python
+│   ├── __init__.py
+│   ├── generate_guiones.py
+│   ├── generate_txt_from_drive.py
+│   ├── generate_txt_from_guiones.py
+│   ├── generate_documentos_academicos.py
+│   ├── generate_pipeline_drive.py
+│   └── repair_generated_docs.py
+├── prompts/                     # Prompts por nivel académico
+├── outputs/                     # Documentos generados
+├── inputs/                      # Archivos fuente para documentos académicos
+├── entrada_guiones_txt/         # Guiones de entrada para flujo TXT
+├── salidas_txt/                 # TXT generados desde guiones
+├── jobs/                        # Trabajos temporales del backend
+├── samples/syllabus/            # Sílabos de ejemplo
+├── notebooks/                   # Notebooks Jupyter
+├── docs/                        # Documentación
+├── generate_guiones.py          # Wrapper (compatibilidad CLI)
+├── generate_txt_from_drive.py   # Wrapper (compatibilidad CLI)
+├── generate_txt_from_guiones.py # Wrapper (compatibilidad CLI)
+├── generate_documentos_academicos.py # Wrapper (compatibilidad CLI)
+├── generate_pipeline_drive.py   # Wrapper (compatibilidad CLI)
+├── repair_generated_docs.py     # Wrapper (compatibilidad CLI)
+├── requirements.txt
+├── .env
+└── README.md
+```
+
 ## Archivos principales
 
-- `generate_guiones.py`: script principal para extraer el sílabo y generar los documentos.
+- `automation_engine/generate_guiones.py`: motor principal para extraer el sílabo y generar los documentos.
 - `prompts/`: carpeta de prompts por nivel academico (`pregrado.md`, `especializacion.md`, `diplomado.md`, `maestria.md`).
 - `notebooks/generador_guiones.ipynb`: flujo en Jupyter para el equipo.
 - `outputs/`: carpeta donde quedan los `.docx` generados.
+
+> Los wrappers en la raíz (`generate_guiones.py`, etc.) mantienen compatibilidad con comandos existentes. Internamente delegan a `automation_engine/`.
 
 ## Instalación
 
@@ -20,6 +56,34 @@ Configura la API key como variable de entorno. No la dejes escrita dentro del c�
 ```powershell
 $env:OPENAI_API_KEY="TU_API_KEY"
 $env:OPENAI_MODEL="gpt-4o"
+```
+
+## Cómo ejecutar
+
+### Backend API
+
+```powershell
+cd backend
+uvicorn main:app --reload --port 8000
+```
+
+### Frontend
+
+```powershell
+cd frontend
+npm run dev
+```
+
+### CLI antiguo (wrapper, compatibilidad)
+
+```powershell
+python generate_guiones.py --syllabus "samples/syllabus/archivo.docx" --nivel pregrado --output-dir outputs
+```
+
+### CLI nuevo (como módulo)
+
+```powershell
+python -m automation_engine.generate_guiones --syllabus "samples/syllabus/archivo.docx" --nivel pregrado --output-dir outputs
 ```
 
 ## Prueba sin consumir API

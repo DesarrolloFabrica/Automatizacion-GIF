@@ -17,7 +17,7 @@ from storage import PROJECT_ROOT, create_docs_zip, ensure_job_dirs, get_job_path
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from generate_guiones import extract_course_plan  # noqa: E402
+from automation_engine.generate_guiones import extract_course_plan  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -89,7 +89,8 @@ async def create_generation_job(
 
     command = [
         sys.executable,
-        str(PROJECT_ROOT / "generate_guiones.py"),
+        "-m",
+        "automation_engine.generate_guiones",
         "--syllabus",
         str(paths["input_dir"] / "syllabus.docx"),
         "--nivel",
