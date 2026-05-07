@@ -1,0 +1,211 @@
+:root {
+  font-family: 'Inter', 'Segoe UI', Roboto, sans-serif;
+  color: #1e293b;
+  background-color: #f5f4ef;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 3rem;
+}
+
+.page-header {
+  margin-bottom: 1.5rem;
+}
+
+.kicker {
+  margin: 0;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #475569;
+}
+
+h1 {
+  margin: 0.4rem 0 0.6rem;
+  font-size: clamp(1.8rem, 3vw, 2.5rem);
+  color: #0f172a;
+}
+
+h2 {
+  margin: 0;
+  color: #0f172a;
+}
+
+.subtitle,
+.card-description,
+.muted,
+.file-name {
+  margin: 0.5rem 0 0;
+  color: #475569;
+}
+
+.grid-layout {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.card,
+.action-card {
+  background: #fff;
+  border: 1px solid #dce3eb;
+  border-radius: 14px;
+  padding: 1rem;
+  margin-top: 1rem;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+}
+
+.file-input {
+  display: none;
+}
+
+.file-input-label,
+.primary-button,
+.secondary-button {
+  border: 0;
+  border-radius: 10px;
+  padding: 0.65rem 1rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.file-input-label,
+.secondary-button {
+  display: inline-block;
+  background: #f1f5f9;
+  color: #0f172a;
+  text-decoration: none;
+}
+
+.select-input {
+  margin-top: 0.7rem;
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 0.65rem;
+  font-size: 1rem;
+  color: #0f172a;
+  background: #fff;
+}
+
+.primary-button {
+  width: 100%;
+  background: #0f3a67;
+  color: #fff;
+}
+
+.primary-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.preview-grid {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-top: 0.8rem;
+}
+
+.label {
+  display: block;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+
+.granules-list,
+.progress-list,
+.results-list {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.granules-list li,
+.results-list li {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.65rem;
+}
+
+.granules-list li + li,
+.results-list li + li {
+  margin-top: 0.55rem;
+}
+
+.progress-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0;
+  color: #64748b;
+}
+
+.progress-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+
+.progress-item.is-completed,
+.progress-item.is-current {
+  color: #0f172a;
+}
+
+.progress-item.is-completed .progress-dot,
+.progress-item.is-current .progress-dot {
+  background: #0f3a67;
+}
+
+.progress-item.is-error .progress-dot {
+  background: #b91c1c;
+}
+
+.results-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.link-button {
+  text-align: center;
+}
+
+.logs-box {
+  margin-top: 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 0.75rem;
+}
+
+.logs-box pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 0.82rem;
+  color: #334155;
+  max-height: 220px;
+  overflow: auto;
+}
