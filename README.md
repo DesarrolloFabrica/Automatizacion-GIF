@@ -5,7 +5,7 @@ Este proyecto toma un sílabo en Word (`.docx`) o PDF (`.pdf`), identifica la in
 ## Estructura del proyecto
 
 ```
-Automatizacion-GIF/
+./
 ├── frontend/                    # React + Vite + TypeScript
 ├── backend/                     # FastAPI API
 ├── automation_engine/           # Motor de automatización Python
@@ -25,12 +25,6 @@ Automatizacion-GIF/
 ├── samples/syllabus/            # Sílabos de ejemplo
 ├── notebooks/                   # Notebooks Jupyter
 ├── docs/                        # Documentación
-├── generate_guiones.py          # Wrapper (compatibilidad CLI)
-├── generate_txt_from_drive.py   # Wrapper (compatibilidad CLI)
-├── generate_txt_from_guiones.py # Wrapper (compatibilidad CLI)
-├── generate_documentos_academicos.py # Wrapper (compatibilidad CLI)
-├── generate_pipeline_drive.py   # Wrapper (compatibilidad CLI)
-├── repair_generated_docs.py     # Wrapper (compatibilidad CLI)
 ├── requirements.txt
 ├── .env
 └── README.md
@@ -43,7 +37,7 @@ Automatizacion-GIF/
 - `notebooks/generador_guiones.ipynb`: flujo en Jupyter para el equipo.
 - `outputs/`: carpeta donde quedan los `.docx` generados.
 
-> Los wrappers en la raíz (`generate_guiones.py`, etc.) mantienen compatibilidad con comandos existentes. Internamente delegan a `automation_engine/`.
+> Ejecuta los scripts desde la raíz del repositorio usando `python -m automation_engine.<modulo>` (ver secciones siguientes).
 
 ## Instalación
 
@@ -74,13 +68,7 @@ cd frontend
 npm run dev
 ```
 
-### CLI antiguo (wrapper, compatibilidad)
-
-```powershell
-python generate_guiones.py --syllabus "samples/syllabus/archivo.docx" --nivel pregrado --output-dir outputs
-```
-
-### CLI nuevo (como módulo)
+### CLI (motor Python como módulo)
 
 ```powershell
 python -m automation_engine.generate_guiones --syllabus "samples/syllabus/archivo.docx" --nivel pregrado --output-dir outputs
@@ -89,13 +77,13 @@ python -m automation_engine.generate_guiones --syllabus "samples/syllabus/archiv
 ## Prueba sin consumir API
 
 ```powershell
-python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --dry-run
+python -m automation_engine.generate_guiones --syllabus "7. Habilidades Comunicativas.docx" --dry-run
 ```
 
 También puedes probar un PDF:
 
 ```powershell
-python generate_guiones.py --syllabus "Mi Silabo.pdf" --dry-run
+python -m automation_engine.generate_guiones --syllabus "Mi Silabo.pdf" --dry-run
 ```
 
 Por defecto el script usa `--nivel auto`: intenta detectar si el silabo corresponde a pregrado, especializacion, diplomado o maestria, y carga el prompt de `prompts/<nivel>.md`.
@@ -103,34 +91,34 @@ Por defecto el script usa `--nivel auto`: intenta detectar si el silabo correspo
 Si quieres elegir el prompt manualmente, usa `--nivel`:
 
 ```powershell
-python generate_guiones.py --syllabus "Silabo Especializacion.docx" --nivel especializacion --dry-run
-python generate_guiones.py --syllabus "Silabo Diplomado.pdf" --nivel diplomado --dry-run
-python generate_guiones.py --syllabus "Silabo Maestria.docx" --nivel maestria --dry-run
-python generate_guiones.py --syllabus "Silabo Pregrado.docx" --nivel pregrado --dry-run
+python -m automation_engine.generate_guiones --syllabus "Silabo Especializacion.docx" --nivel especializacion --dry-run
+python -m automation_engine.generate_guiones --syllabus "Silabo Diplomado.pdf" --nivel diplomado --dry-run
+python -m automation_engine.generate_guiones --syllabus "Silabo Maestria.docx" --nivel maestria --dry-run
+python -m automation_engine.generate_guiones --syllabus "Silabo Pregrado.docx" --nivel pregrado --dry-run
 ```
 
 Tambien puedes usar un prompt externo puntual con `--prompt`:
 
 ```powershell
-python generate_guiones.py --syllabus "Mi Silabo.docx" --nivel especializacion --prompt "prompts/especializacion.md"
+python -m automation_engine.generate_guiones --syllabus "Mi Silabo.docx" --nivel especializacion --prompt "prompts/especializacion.md"
 ```
 
 ## Generación real
 
 ```powershell
-python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --semester "Semestre N°1" --subject "Habilidades Comunicativas"
+python -m automation_engine.generate_guiones --syllabus "7. Habilidades Comunicativas.docx" --semester "Semestre N°1" --subject "Habilidades Comunicativas"
 ```
 
 Ejemplo para especializacion:
 
 ```powershell
-python generate_guiones.py --syllabus "Silabo Especializacion.docx" --nivel especializacion
+python -m automation_engine.generate_guiones --syllabus "Silabo Especializacion.docx" --nivel especializacion
 ```
 
 Si el PDF o el sílabo tiene un formato difícil y no detecta los cinco temas, puedes forzarlos manualmente:
 
 ```powershell
-python generate_guiones.py --syllabus "Mi Silabo.pdf" --subject "Nombre de la materia" --semester "Semestre N°2" --topics "Tema 1; Tema 2; Tema 3; Tema 4; Tema 5"
+python -m automation_engine.generate_guiones --syllabus "Mi Silabo.pdf" --subject "Nombre de la materia" --semester "Semestre N°2" --topics "Tema 1; Tema 2; Tema 3; Tema 4; Tema 5"
 ```
 
 El generador crea cada documento largo por secciones. Para cada tema hace varias llamadas a la API: introducción, ejes articuladores, tres ensayos de profundización, conclusiones y bibliografía. Esto evita que el modelo entregue documentos demasiado cortos.
@@ -165,7 +153,7 @@ G2_viabilidad-del-mercado-internacional.docx
 Cada documento queda diseñado para aproximarse a 20 a 30 páginas, dependiendo del interlineado y formato final de Word. Si un archivo sigue quedando corto, aumenta `--max-tokens` por sección:
 
 ```powershell
-python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --max-tokens 6000
+python -m automation_engine.generate_guiones --syllabus "7. Habilidades Comunicativas.docx" --max-tokens 6000
 ```
 
 ## Flujo 2: generar TXT desde guiones ya creados
@@ -193,13 +181,13 @@ prompts/txt_desde_guiones.md
 Prueba sin consumir API:
 
 ```powershell
-python generate_txt_from_guiones.py --dry-run
+python -m automation_engine.generate_txt_from_guiones --dry-run
 ```
 
 Generación real:
 
 ```powershell
-python generate_txt_from_guiones.py
+python -m automation_engine.generate_txt_from_guiones
 ```
 
 Por defecto genera estos 4 TXT:
@@ -214,13 +202,13 @@ QUIZ 3.txt
 Si quieres indicar otros nombres o enfoques para los 4 TXT:
 
 ```powershell
-python generate_txt_from_guiones.py --titles "Guion 1; Guion 2; Guion 3; Guion 4"
+python -m automation_engine.generate_txt_from_guiones --titles "Guion 1; Guion 2; Guion 3; Guion 4"
 ```
 
 También puedes cambiar la cantidad:
 
 ```powershell
-python generate_txt_from_guiones.py --count 5
+python -m automation_engine.generate_txt_from_guiones --count 5
 ```
 
 ## Flujo 3: generar TXT leyendo desde Google Drive
@@ -233,7 +221,7 @@ Archivos necesarios:
 credentials.json
 ```
 
-Ese archivo es el OAuth Client JSON descargado desde Google Cloud. Déjalo en la raíz del proyecto, junto a `generate_txt_from_drive.py`.
+Ese archivo es el OAuth Client JSON descargado desde Google Cloud. Déjalo en la raíz del proyecto.
 
 El script lee únicamente archivos Word `.docx` desde una carpeta de Drive por ID, ignora otros formatos como `.mpr`, crea o reutiliza una subcarpeta llamada `contenido complementario`, y sube allí los TXT generados.
 
@@ -246,13 +234,13 @@ https://drive.google.com/drive/folders/ID_DE_LA_CARPETA
 Prueba sin consumir OpenAI ni subir resultados:
 
 ```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --dry-run
+python -m automation_engine.generate_txt_from_drive --drive-folder-id "ID_DE_LA_CARPETA" --dry-run
 ```
 
 Generación real:
 
 ```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA"
+python -m automation_engine.generate_txt_from_drive --drive-folder-id "ID_DE_LA_CARPETA"
 ```
 
 Por defecto genera o actualiza estos archivos en la subcarpeta `contenido complementario`:
@@ -267,13 +255,13 @@ QUIZ 3.txt
 Si el programa o la asignatura no se detectan bien desde los Word, indícalos manualmente:
 
 ```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --programa "ADMINISTRACIÓN DEPORTIVA" --asignatura "Macroeconomía"
+python -m automation_engine.generate_txt_from_drive --drive-folder-id "ID_DE_LA_CARPETA" --programa "ADMINISTRACIÓN DEPORTIVA" --asignatura "Macroeconomía"
 ```
 
 Con nombres/enfoques personalizados:
 
 ```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --titles "PDA; Quiz 1; Quiz 2; Quiz 3"
+python -m automation_engine.generate_txt_from_drive --drive-folder-id "ID_DE_LA_CARPETA" --titles "PDA; Quiz 1; Quiz 2; Quiz 3"
 ```
 
 ## Nota de seguridad
@@ -290,7 +278,7 @@ Flujo independiente del generador de guiones. Toma exactamente 5 archivos fuente
 2. Ejecuta:
 
 ```powershell
-python generate_documentos_academicos.py
+python -m automation_engine.generate_documentos_academicos
 ```
 
 El script infiere automáticamente la asignatura y el programa del contenido de los archivos. Los resultados quedan en `outputs/documentos_academicos/`.
@@ -298,13 +286,13 @@ El script infiere automáticamente la asignatura y el programa del contenido de 
 ### Uso con parámetros explícitos
 
 ```powershell
-python generate_documentos_academicos.py --input-dir "inputs" --output-dir "outputs\documentos_academicos" --subject "Macroeconomía" --program "Administración Deportiva"
+python -m automation_engine.generate_documentos_academicos --input-dir "inputs" --output-dir "outputs\documentos_academicos" --subject "Macroeconomía" --program "Administración Deportiva"
 ```
 
 Para revisar lectura y prompt sin consumir API:
 
 ```powershell
-python generate_documentos_academicos.py --dry-run
+python -m automation_engine.generate_documentos_academicos --dry-run
 ```
 
 ### Estructura de carpetas
@@ -342,18 +330,18 @@ Estructura final en Drive después de ejecutar:
     └── FORO_<ASIGNATURA>_<PROGRAMA>.docx
 ```
 
-Los flujos individuales (`generate_txt_from_drive.py` y `generate_documentos_academicos.py`) siguen funcionando como hasta ahora; este orquestador los combina sin modificarlos.
+Los flujos individuales (`automation_engine.generate_txt_from_drive` y `automation_engine.generate_documentos_academicos`) siguen funcionando como hasta ahora; este orquestador los combina sin modificarlos.
 
 ### Requisitos previos
 
-- `credentials.json` en la raíz (mismo OAuth que usa `generate_txt_from_drive.py`).
+- `credentials.json` en la raíz (mismo OAuth que usa el flujo Drive).
 - `OPENAI_API_KEY` configurada en `.env` o variables de entorno.
 - La primera ejecución pedirá autorización en el navegador y guardará `token_drive.json`.
 
 ### Uso rápido
 
 ```powershell
-python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA"
+python -m automation_engine.generate_pipeline_drive --drive-folder-id "ID_DE_LA_CARPETA"
 ```
 
 El script infiere asignatura y programa del contenido de los archivos.
@@ -361,13 +349,13 @@ El script infiere asignatura y programa del contenido de los archivos.
 ### Con overrides
 
 ```powershell
-python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --asignatura "Salud Pública" --programa "Tecnología en Regencia de Farmacia"
+python -m automation_engine.generate_pipeline_drive --drive-folder-id "ID_DE_LA_CARPETA" --asignatura "Salud Pública" --programa "Tecnología en Regencia de Farmacia"
 ```
 
 ### Modo prueba (no llama a OpenAI ni sube archivos)
 
 ```powershell
-python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --dry-run
+python -m automation_engine.generate_pipeline_drive --drive-folder-id "ID_DE_LA_CARPETA" --dry-run
 ```
 
 Esto autentica con Drive, descarga las fuentes a un directorio temporal, crea las carpetas `contenido complementario/` y `contenido complementario/txt/` si no existen y muestra el manifest detectado.
@@ -377,8 +365,8 @@ Esto autentica con Drive, descarga las fuentes a un directorio temporal, crea la
 Si quieres regenerar solo una fase, usa los flags de salto:
 
 ```powershell
-python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --skip-docx
-python generate_pipeline_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --skip-txt
+python -m automation_engine.generate_pipeline_drive --drive-folder-id "ID_DE_LA_CARPETA" --skip-docx
+python -m automation_engine.generate_pipeline_drive --drive-folder-id "ID_DE_LA_CARPETA" --skip-txt
 ```
 
 ### Validación automática
