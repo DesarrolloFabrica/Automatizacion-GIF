@@ -5,8 +5,9 @@ import FileDropzone from '../components/FileDropzone'
 import GenerationProgress from '../components/GenerationProgress'
 import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
+import ScriptAudienceSelector from '../components/ScriptAudienceSelector'
 import { DEFAULT_MOCK_GRANULES, PIPELINE_STEPS } from '../data/mockGranules'
-import type { GenerationStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
+import type { GenerationStatus, JobStatusResponse, PromptType, ScriptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
@@ -24,7 +25,8 @@ const orderedStatuses: GenerationStatus[] = [
 function GranulesView({ onBack }: GranulesViewProps) {
   const apiBaseUrl = 'http://localhost:8000'
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [selectedPrompt, setSelectedPrompt] = useState<PromptType>('pregrado')
+  const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>('')
+  const [scriptType, setScriptType] = useState<ScriptType | ''>('')
   const [detectedGranules, setDetectedGranules] = useState(DEFAULT_MOCK_GRANULES)
   const [subjectName, setSubjectName] = useState('')
   const [isAnalyzingSyllabus, setIsAnalyzingSyllabus] = useState(false)
@@ -36,6 +38,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const [jobLogs, setJobLogs] = useState<string[]>([])
   const [generationMessage, setGenerationMessage] = useState('La generación puede tardar aproximadamente 20 minutos.')
   const pollRef = useRef<number | null>(null)
+  const canUploadSyllabus = Boolean(selectedPrompt && scriptType)
 
   const currentStepIndex = useMemo(
     () => orderedStatuses.findIndex((step) => step === status),
@@ -58,6 +61,9 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setSubjectName('')
     setPreviewMessage('')
     setGenerationMessage('La generación puede tardar aproximadamente 20 minutos.')
+    setSelectedFile(null)
+    setDetectedGranules(DEFAULT_MOCK_GRANULES)
+    setIsAnalyzingSyllabus(false)
     clearPolling()
   }
 
@@ -99,7 +105,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
   }
 
   const handleGenerate = async () => {
-    if (!selectedFile || isGenerating) return
+    if (!selectedFile || !selectedPrompt || isGenerating) return
 
     setIsGenerating(true)
     setJobLogs([])
@@ -169,6 +175,16 @@ function GranulesView({ onBack }: GranulesViewProps) {
     resetForNewSyllabus()
   }
 
+  const handlePromptChange = (prompt: PromptType | '') => {
+    setSelectedPrompt(prompt)
+    handleReset()
+  }
+
+  const handleScriptTypeChange = (type: ScriptType | '') => {
+    setScriptType(type)
+    handleReset()
+  }
+
   useEffect(() => () => clearPolling(), [])
 
   return (
@@ -188,60 +204,77 @@ function GranulesView({ onBack }: GranulesViewProps) {
         </div>
 
         <section className="grid-layout">
-          <FileDropzone
-            selectedFile={selectedFile}
-            onFileSelected={async (file) => {
-              handleReset()
-              setSelectedFile(file)
-
-              if (!file) {
-                setDetectedGranules(DEFAULT_MOCK_GRANULES)
-                setPreviewMessage('')
-                return
-              }
-
-              if (!file.name.toLowerCase().endsWith('.docx')) {
-                setDetectedGranules([])
-                setPreviewMessage('El archivo debe ser .docx')
-                return
-              }
-
-              await analyzeSyllabusPreview(file)
-            }}
-          />
-          <PromptSelector selectedPrompt={selectedPrompt} onSelectPrompt={setSelectedPrompt} />
+          <PromptSelector selectedPrompt={selectedPrompt} onSelectPrompt={handlePromptChange} />
+          <ScriptAudienceSelector selectedType={scriptType} onSelectType={handleScriptTypeChange} />
         </section>
 
-        <DetectedGranulesPreview
-          fileName={selectedFile?.name ?? null}
-          subjectName={subjectName}
-          selectedPrompt={selectedPrompt}
-          granules={detectedGranules}
-          isAnalyzing={isAnalyzingSyllabus}
-          previewMessage={previewMessage}
-        />
+        {!canUploadSyllabus && (
+          <section className="action-card">
+            <p className="muted">Selecciona el tipo de prompt y el tipo de guion para continuar.</p>
+            <p className="card-description">Esta configuración define el enfoque con el que se prepararán los gránulos.</p>
+          </section>
+        )}
 
-        <section className="action-card">
-          <p className="muted">{generationMessage}</p>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={handleGenerate}
-            disabled={!selectedFile || isGenerating || isAnalyzingSyllabus}
-          >
-            {isGenerating ? 'Procesando...' : 'Generar gránulos'}
-          </button>
-        </section>
+        {canUploadSyllabus && (
+          <>
+            <FileDropzone
+              selectedFile={selectedFile}
+              onFileSelected={async (file) => {
+                handleReset()
+                setSelectedFile(file)
 
-        <GenerationProgress
-          status={status}
-          currentStepIndex={currentStepIndex}
-          steps={PIPELINE_STEPS}
-          hasError={status === 'error'}
-          logs={jobLogs}
-        />
+                if (!file) {
+                  setDetectedGranules(DEFAULT_MOCK_GRANULES)
+                  setPreviewMessage('')
+                  return
+                }
 
-        <ResultsPanel jobId={jobId} documents={generatedDocuments} isVisible={status === 'finalizado'} />
+                if (!file.name.toLowerCase().endsWith('.docx')) {
+                  setDetectedGranules([])
+                  setPreviewMessage('El archivo debe ser .docx')
+                  return
+                }
+
+                await analyzeSyllabusPreview(file)
+              }}
+            />
+
+            <DetectedGranulesPreview
+              fileName={selectedFile?.name ?? null}
+              subjectName={subjectName}
+              selectedPrompt={(selectedPrompt || 'pregrado') as PromptType}
+              granules={detectedGranules}
+              isAnalyzing={isAnalyzingSyllabus}
+              previewMessage={previewMessage}
+            />
+
+            <section className="action-card">
+              <p className="muted">{generationMessage}</p>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={handleGenerate}
+                disabled={!selectedFile || isGenerating || isAnalyzingSyllabus}
+              >
+                {isGenerating ? 'Procesando...' : 'Generar gránulos'}
+              </button>
+            </section>
+          </>
+        )}
+
+        {canUploadSyllabus && (
+          <>
+            <GenerationProgress
+              status={status}
+              currentStepIndex={currentStepIndex}
+              steps={PIPELINE_STEPS}
+              hasError={status === 'error'}
+              logs={jobLogs}
+            />
+
+            <ResultsPanel jobId={jobId} documents={generatedDocuments} isVisible={status === 'finalizado'} />
+          </>
+        )}
       </div>
     </div>
   )

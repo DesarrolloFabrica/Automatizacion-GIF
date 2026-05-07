@@ -1,4 +1,5 @@
 export type PromptType = 'pregrado' | 'especializacion' | 'maestria' | 'diplomado'
+export type ScriptType = 'analistas' | 'presentadoras'
 
 export type GenerationStatus =
   | 'pendiente'

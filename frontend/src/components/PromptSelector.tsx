@@ -1,8 +1,8 @@
 import type { PromptType } from '../types/granules'
 
 interface PromptSelectorProps {
-  selectedPrompt: PromptType
-  onSelectPrompt: (prompt: PromptType) => void
+  selectedPrompt: PromptType | ''
+  onSelectPrompt: (prompt: PromptType | '') => void
 }
 
 const promptOptions: Array<{ value: PromptType; label: string }> = [
@@ -21,9 +21,10 @@ function PromptSelector({ selectedPrompt, onSelectPrompt }: PromptSelectorProps)
       {/* Select controlado para reflejar siempre el estado actual en el preview. */}
       <select
         value={selectedPrompt}
-        onChange={(event) => onSelectPrompt(event.target.value as PromptType)}
+        onChange={(event) => onSelectPrompt(event.target.value as PromptType | '')}
         className="select-input"
       >
+        <option value="">Selecciona un tipo de prompt</option>
         {promptOptions.map((option) => (
           <option key={option.value} value={option.value}>
             {option.label}
