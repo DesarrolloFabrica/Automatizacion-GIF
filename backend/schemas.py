@@ -14,6 +14,12 @@ class JobStatusResponse(BaseModel):
     progressStep: str
     logs: list[str]
     files: list[str]
+    granulesStatus: str = "pending"
+    pipelineLocalStatus: str = "pending"
+    specializationMaterialsStatus: str = "pending"
+    currentPhase: str = "pending"
+    availableNextAction: str = "none"
+    phaseStatus: dict | None = None
 
 
 class PreviewTopic(BaseModel):

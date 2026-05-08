@@ -159,8 +159,12 @@ def run_subprocess_job(
     chain_command: list[str] | None = None,
     chain_commands: list[list[str]] | None = None,
     chain_labels: list[str] | None = None,
+    on_start: Callable[[str], None] | None = None,
+    on_complete: Callable[[str, bool], None] | None = None,
 ) -> None:
     set_job_running(job_id, initial_progress_step)
+    if on_start is not None:
+        on_start(job_id)
 
     try:
         if job_kind.startswith("granules"):
@@ -197,6 +201,9 @@ def run_subprocess_job(
                 append_log(job_id, f"Error en fase encadenada: {chain_exc}")
                 success = False
 
+        if on_complete is not None:
+            on_complete(job_id, success)
+
         if files_listing_fn is not None:
             set_job_finished(job_id, success=success, files_listing_fn=files_listing_fn)
         elif job_kind == "scripts":
@@ -204,6 +211,8 @@ def run_subprocess_job(
         else:
             set_job_finished(job_id, success=success)
     except Exception as exc:
+        if on_complete is not None:
+            on_complete(job_id, False)
         set_job_failed_with_message(job_id, f"Error al ejecutar el proceso: {exc}")
 
 
@@ -256,6 +265,8 @@ def start_job_thread(
     chain_command: list[str] | None = None,
     chain_commands: list[list[str]] | None = None,
     chain_labels: list[str] | None = None,
+    on_start: Callable[[str], None] | None = None,
+    on_complete: Callable[[str, bool], None] | None = None,
 ) -> None:
     kwargs: dict[str, Any] = {
         "initial_progress_step": initial_progress_step,
@@ -266,6 +277,8 @@ def start_job_thread(
         "chain_command": chain_command,
         "chain_commands": chain_commands,
         "chain_labels": chain_labels,
+        "on_start": on_start,
+        "on_complete": on_complete,
     }
     thread = threading.Thread(
         target=run_subprocess_job,

@@ -27,6 +27,7 @@ interface JobProgressPanelProps {
   isError: boolean
   generatedFilesCount: number
   totalMaterialsExpected?: number
+  backendCurrentPhase?: string
   onRetry: () => void
 }
 
@@ -58,6 +59,14 @@ function inferCurrentPhase(status: GenerationStatus, logs: string[]): string {
   if (latest.includes('guardado:') || latest.includes('generando documento') || status === 'generando gránulos' || status === 'generando documentos') return 'granules'
   if (latest.includes('summary guardado') || latest.includes('manifest guardado') || status === 'organizando archivos') return 'organizing'
   return 'syllabus'
+}
+
+function mapBackendPhase(backendCurrentPhase?: string): string | null {
+  if (backendCurrentPhase === 'completed') return 'package'
+  if (backendCurrentPhase === 'specializationMaterials') return 'materials'
+  if (backendCurrentPhase === 'pipelineLocal') return 'docx'
+  if (backendCurrentPhase === 'granules') return 'granules'
+  return null
 }
 
 function phaseIndex(key: string): number {
@@ -184,24 +193,30 @@ function JobProgressPanel({
   isError,
   generatedFilesCount,
   totalMaterialsExpected = 30,
+  backendCurrentPhase,
   onRetry,
 }: JobProgressPanelProps) {
   if (!isGenerating && status === 'pendiente' && logs.length === 0) return null
 
   const parsed = parseProgress(logs, granules)
-  const currentPhase = inferCurrentPhase(status, logs)
+  const currentPhase = mapBackendPhase(backendCurrentPhase) ?? inferCurrentPhase(status, logs)
   const latestLog = getLatestRelevantLog(logs)
   const progressPercent = calculateProgressPercent(currentPhase, parsed.materialsSaved, totalMaterialsExpected, isError)
   const currentMaterialName = parsed.currentMaterial ? MATERIAL_NAMES[parsed.currentMaterial] : ''
   const isCompleted = status === 'finalizado'
+  const completedTitle = currentPhase === 'package'
+    ? 'Paquete listo para descargar'
+    : currentPhase === 'docx'
+      ? 'TXT y DOCX académicos listos'
+      : 'Gránulos listos para revisar'
 
   return (
     <section className={`job-progress-panel ${isError ? 'is-error' : ''} ${isCompleted ? 'is-complete' : ''}`}>
       <div className="job-progress-header">
         <div>
           <span className="job-progress-kicker">ESTADO DEL JOB</span>
-          <h3>{isError ? 'La generación necesita revisión' : isCompleted ? 'Paquete listo para descargar' : 'Generando paquete académico'}</h3>
-          <p>{isError ? 'Se detuvo el proceso. Revisa el último log y vuelve a intentar.' : 'No cierres esta ventana mientras se generan los archivos.'}</p>
+          <h3>{isError ? 'La generación necesita revisión' : isCompleted ? completedTitle : 'Ejecutando fase seleccionada'}</h3>
+          <p>{isError ? 'Se detuvo el proceso. Revisa el último log y vuelve a intentar.' : isCompleted ? 'Revisa los resultados temporales y continúa con la siguiente fase cuando estés listo.' : 'No cierres esta ventana mientras se generan los archivos.'}</p>
         </div>
         <div className="job-progress-percent">{progressPercent}%</div>
       </div>

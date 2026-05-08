@@ -5,7 +5,7 @@ import FileDropzone from '../components/FileDropzone'
 import JobProgressPanel from '../components/JobProgressPanel'
 import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
-import type { GenerationStatus, GranuleMaterials, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
+import type { AvailableNextAction, GenerationStatus, GranuleMaterials, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
@@ -27,6 +27,9 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobLogs, setJobLogs] = useState<string[]>([])
   const [generationMessage, setGenerationMessage] = useState('La generación puede tardar aproximadamente 20 minutos.')
+  const [availableNextAction, setAvailableNextAction] = useState<AvailableNextAction>('generate_granules')
+  const [phaseStatus, setPhaseStatus] = useState<JobPhaseStatus | null>(null)
+  const [currentPhase, setCurrentPhase] = useState('pending')
   const pollRef = useRef<number | null>(null)
   const pipelineCardRef = useRef<HTMLElement | null>(null)
   const resultsPanelRef = useRef<HTMLElement | null>(null)
@@ -66,6 +69,9 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setIsGenerating(false)
     setJobLogs([])
     setJobId(null)
+    setAvailableNextAction('generate_granules')
+    setPhaseStatus(null)
+    setCurrentPhase('pending')
     setSubjectName('')
     setProgramName('')
     setPreviewMessage('')
@@ -102,6 +108,31 @@ function GranulesView({ onBack }: GranulesViewProps) {
       }
     }
 
+    return Array.from(granuleMap.values()).sort((a, b) => a.granuleCode.localeCompare(b.granuleCode))
+  }
+
+  const parseMaterialesFromFiles = (files: string[]): GranuleMaterials[] => {
+    const granuleMap = new Map<string, GranuleMaterials>()
+    for (const relativePath of files) {
+      if (!relativePath.startsWith('materiales_especializacion/')) continue
+      const parts = relativePath.split('/')
+      const folder = parts[1] ?? ''
+      const name = parts[2] ?? ''
+      const match = name.match(/^\d+_(G\d+)_/i) ?? folder.match(/^(G\d+)_/i)
+      if (!match || !name) continue
+      const granuleCode = match[1]
+      if (!granuleMap.has(granuleCode)) {
+        granuleMap.set(granuleCode, {
+          granuleCode,
+          granuleFolder: folder,
+          files: [],
+          totalMaterials: 0,
+        })
+      }
+      const granuleMat = granuleMap.get(granuleCode)!
+      granuleMat.files.push({ granule: granuleCode, name, relativePath })
+      granuleMat.totalMaterials = granuleMat.files.length
+    }
     return Array.from(granuleMap.values()).sort((a, b) => a.granuleCode.localeCompare(b.granuleCode))
   }
 
@@ -150,6 +181,50 @@ function GranulesView({ onBack }: GranulesViewProps) {
     }
   }
 
+  const applyJobStatus = (payload: JobStatusResponse) => {
+    setStatus(payload.progressStep)
+    setJobLogs(payload.logs ?? [])
+    setGeneratedDocuments(payload.files ?? [])
+    setPhaseStatus(payload.phaseStatus)
+    setAvailableNextAction(payload.availableNextAction)
+    setCurrentPhase(payload.currentPhase)
+
+    const filesFromStatus = payload.phaseStatus?.specializationMaterials.files ?? []
+    const parsedMateriales = parseMaterialesFromFiles(filesFromStatus)
+    setMaterialesByGranule(parsedMateriales.length > 0 ? parsedMateriales : parseMaterialesFromLogs(payload.logs ?? []))
+  }
+
+  const pollJobUntilIdle = (createdJobId: string) => {
+    clearPolling()
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const statusResponse = await fetch(`${apiBaseUrl}/api/jobs/${createdJobId}`)
+        if (!statusResponse.ok) return
+
+        const payload = (await statusResponse.json()) as JobStatusResponse
+        applyJobStatus(payload)
+
+        if (payload.status === 'completed') {
+          setStatus('finalizado')
+          setIsGenerating(false)
+          clearPolling()
+        }
+
+        if (payload.status === 'failed') {
+          setStatus('error')
+          setIsGenerating(false)
+          setGenerationMessage('La fase falló. Los resultados anteriores quedan disponibles y puedes reintentar.')
+          clearPolling()
+        }
+      } catch {
+        setStatus('error')
+        setIsGenerating(false)
+        setGenerationMessage('No fue posible consultar el estado del job.')
+        clearPolling()
+      }
+    }, 3000)
+  }
+
   const handleGenerate = async () => {
     if (!selectedFile || !selectedPrompt || isGenerating || detectedGranules.length === 0) return
 
@@ -158,9 +233,11 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setGeneratedDocuments([])
     setMaterialesByGranule([])
     setJobId(null)
+    setPhaseStatus(null)
+    setAvailableNextAction('none')
     setStatus('leyendo syllabus')
     setGenerationMessage(isEspecializacion
-      ? 'La generación puede tardar aproximadamente 30-45 minutos (gránulos + materiales de especialización).'
+      ? 'Fase 1: generando gránulos. Al finalizar podrás revisar resultados y continuar con TXT/DOCX académicos.'
       : 'La generación puede tardar aproximadamente 20 minutos.'
     )
     clearPolling()
@@ -183,47 +260,66 @@ function GranulesView({ onBack }: GranulesViewProps) {
       const createdJob = (await createResponse.json()) as { jobId: string; status: string }
       setJobId(createdJob.jobId)
       setStatus('pendiente')
-
-      pollRef.current = window.setInterval(async () => {
-        try {
-          const statusResponse = await fetch(`${apiBaseUrl}/api/jobs/${createdJob.jobId}`)
-          if (!statusResponse.ok) return
-
-          const payload = (await statusResponse.json()) as JobStatusResponse
-          setStatus(payload.progressStep)
-          setJobLogs(payload.logs ?? [])
-
-          if (isEspecializacion) {
-            const parsedMateriales = parseMaterialesFromLogs(payload.logs ?? [])
-            setMaterialesByGranule(parsedMateriales)
-          }
-
-          if (payload.status === 'completed') {
-            setGeneratedDocuments(payload.files ?? [])
-            setStatus('finalizado')
-            setIsGenerating(false)
-            clearPolling()
-          }
-
-          if (payload.status === 'failed') {
-            setStatus('error')
-            setIsGenerating(false)
-            setGenerationMessage('La generación falló. Revisa el log para ver el error real.')
-            clearPolling()
-          }
-        } catch {
-          setStatus('error')
-          setIsGenerating(false)
-          setGenerationMessage('No fue posible consultar el estado del job.')
-          clearPolling()
-        }
-      }, 4000)
+      pollJobUntilIdle(createdJob.jobId)
     } catch (error) {
       setStatus('error')
       setIsGenerating(false)
       const message = error instanceof Error ? error.message : 'Error iniciando la generación.'
       setGenerationMessage(message)
     }
+  }
+
+  const startExistingJobPhase = async (path: string, runningStatus: GenerationStatus, message: string) => {
+    if (!jobId || isGenerating) return
+    setIsGenerating(true)
+    setStatus(runningStatus)
+    setGenerationMessage(message)
+    setAvailableNextAction('none')
+    clearPolling()
+
+    try {
+      const response = await fetch(`${apiBaseUrl}${path}`, { method: 'POST' })
+      if (!response.ok) {
+        const payload = (await response.json()) as { detail?: string }
+        throw new Error(payload.detail ?? 'No se pudo iniciar la fase.')
+      }
+      pollJobUntilIdle(jobId)
+    } catch (error) {
+      setStatus('error')
+      setIsGenerating(false)
+      const message = error instanceof Error ? error.message : 'Error iniciando la fase.'
+      setGenerationMessage(message)
+    }
+  }
+
+  const handleGeneratePipelineLocal = () => {
+    if (!jobId) return
+    startExistingJobPhase(
+      `/api/jobs/${jobId}/pipeline-local`,
+      'generando txt',
+      'Fase 2: generando TXT y DOCX académicos con el pipeline local existente.',
+    )
+  }
+
+  const handleGenerateSpecializationMaterials = () => {
+    if (!jobId) return
+    startExistingJobPhase(
+      `/api/jobs/${jobId}/materiales-especializacion`,
+      'generando materiales especialización',
+      'Fase 3: generando materiales de Especialización por gránulo.',
+    )
+  }
+
+  const handleRetryCurrentPhase = () => {
+    if (phaseStatus?.specializationMaterials.status === 'failed') {
+      handleGenerateSpecializationMaterials()
+      return
+    }
+    if (phaseStatus?.pipelineLocal.status === 'failed') {
+      handleGeneratePipelineLocal()
+      return
+    }
+    handleGenerate()
   }
 
   const handleReset = () => {
@@ -337,7 +433,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
                   previewMessage={previewMessage}
                   generationMessage={generationMessage}
                   isGenerating={isGenerating}
-                  canGenerate={Boolean(selectedFile) && detectedGranules.length > 0}
+                  canGenerate={Boolean(selectedFile) && detectedGranules.length > 0 && !jobId}
                   onGenerate={handleGenerate}
                 />
                 <JobProgressPanel
@@ -348,7 +444,8 @@ function GranulesView({ onBack }: GranulesViewProps) {
                   isError={status === 'error'}
                   generatedFilesCount={generatedDocuments.length}
                   totalMaterialsExpected={30}
-                  onRetry={handleGenerate}
+                  backendCurrentPhase={currentPhase}
+                  onRetry={handleRetryCurrentPhase}
                 />
               </>
             )}
@@ -361,7 +458,12 @@ function GranulesView({ onBack }: GranulesViewProps) {
             jobId={jobId}
             documents={generatedDocuments}
             materialesByGranule={materialesByGranule}
-            isVisible={status === 'finalizado'}
+            isVisible={Boolean(jobId)}
+            phaseStatus={phaseStatus}
+            availableNextAction={availableNextAction}
+            isGenerating={isGenerating}
+            onGeneratePipelineLocal={handleGeneratePipelineLocal}
+            onGenerateSpecializationMaterials={handleGenerateSpecializationMaterials}
           />
         )}
       </div>

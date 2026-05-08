@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
-from jobs import create_job, get_job, start_job_thread
+from jobs import append_log, create_job, get_job, start_job_thread
 from schemas import (
     DetectedCourse,
     DriveUploadLink,
@@ -29,14 +29,22 @@ from storage import (
     create_docs_zip,
     create_full_outputs_zip,
     create_outputs_zip,
+    create_phase_zip,
     ensure_job_dirs,
+    get_available_next_action,
+    get_current_phase,
     get_job_paths,
+    init_phase_status,
     list_especializacion_files,
+    list_all_job_files,
     list_generated_docx,
     list_generated_files,
     list_pipeline_local_files,
+    read_phase_status,
+    refresh_phase_files,
     save_local_granules,
     save_syllabus_file,
+    update_phase_status,
 )
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -109,36 +117,70 @@ ESPECIALIZACION_PROGRESS_MAP = {
 
 
 def list_generated_docx_with_materiales(job_id: str) -> list[str]:
-    docx_files = list_generated_docx(job_id)
-    pipeline_files = [f"pipeline_local/{p.name}" for p in list_pipeline_local_files(job_id)]
-    mat_files = list_especializacion_files(job_id)
-    all_files = docx_files + pipeline_files + [f["name"] for f in mat_files]
-    return sorted(all_files)
+    return list_all_job_files(job_id)
 
 
-def _build_especializacion_chain_commands(job_id: str, paths: dict[str, Path]) -> list[list[str]]:
+def _build_pipeline_local_command(paths: dict[str, Path]) -> list[str]:
     return [
-        [
-            sys.executable,
-            "-m",
-            "automation_engine.generate_pipeline_local",
-            "--input-dir",
-            str(paths["generated_dir"]),
-            "--output-dir",
-            str(paths["pipeline_local_dir"]),
-        ],
-        [
-            sys.executable,
-            "-m",
-            "automation_engine.generate_materiales_especializacion",
-            "--job-id",
-            job_id,
-            "--generated-dir",
-            str(paths["generated_dir"]),
-            "--output-dir",
-            str(paths["materiales_dir"]),
-        ],
+        sys.executable,
+        "-m",
+        "automation_engine.generate_pipeline_local",
+        "--input-dir",
+        str(paths["generated_dir"]),
+        "--output-dir",
+        str(paths["pipeline_local_dir"]),
     ]
+
+
+def _build_materiales_command(job_id: str, paths: dict[str, Path]) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "automation_engine.generate_materiales_especializacion",
+        "--job-id",
+        job_id,
+        "--generated-dir",
+        str(paths["generated_dir"]),
+        "--output-dir",
+        str(paths["materiales_dir"]),
+    ]
+
+
+def _phase_start_callback(phase_key: str):
+    def _callback(job_id: str) -> None:
+        labels = {
+            "granules": "=== FASE 1: GENERACIÓN DE GRÁNULOS ===",
+            "pipelineLocal": "=== FASE 2: PIPELINE LOCAL TXT/DOCX ===",
+            "specializationMaterials": "=== FASE 3: MATERIALES DE ESPECIALIZACIÓN ===",
+        }
+        if phase_key != "granules":
+            append_log(job_id, labels[phase_key])
+        update_phase_status(job_id, phase_key, status="running")
+
+    return _callback
+
+
+def _phase_complete_callback(phase_key: str, files_fn):
+    def _callback(job_id: str, success: bool) -> None:
+        refresh_phase_files(job_id)
+        update_phase_status(job_id, phase_key, status="completed" if success else "failed", files=files_fn(job_id))
+
+    return _callback
+
+
+def _ensure_job_exists(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return job
+
+
+def _ensure_not_running(job_id: str) -> None:
+    job = _ensure_job_exists(job_id)
+    phase_status = read_phase_status(job_id)
+    phases = [phase_status["granules"], phase_status["pipelineLocal"], phase_status["specializationMaterials"]]
+    if job.status == "running" or any(phase["status"] == "running" for phase in phases):
+        raise HTTPException(status_code=409, detail="Ya hay una fase en ejecución para este job.")
 
 
 def extract_drive_folder_id(value: str) -> str:
@@ -268,6 +310,7 @@ async def create_generation_job(
     job_kind = "granules_especializacion" if is_especializacion else "granules"
 
     create_job(job_id=job_id, log_path=paths["log_path"], generated_dir=paths["generated_dir"], job_kind=job_kind)
+    init_phase_status(job_id)
 
     command = [
         sys.executable,
@@ -298,11 +341,8 @@ async def create_generation_job(
         parse_drive_uploads=False,
         job_kind=job_kind,
         files_listing_fn=files_listing_fn,
-        chain_commands=_build_especializacion_chain_commands(job_id, paths) if is_especializacion else None,
-        chain_labels=[
-            "=== FASE 2: PIPELINE LOCAL TXT/DOCX ===",
-            "=== FASE 3: MATERIALES DE ESPECIALIZACIÓN ===",
-        ] if is_especializacion else None,
+        on_start=_phase_start_callback("granules") if is_especializacion else None,
+        on_complete=_phase_complete_callback("granules", lambda j: list_generated_docx(j)) if is_especializacion else None,
     )
 
     return JobCreateResponse(jobId=job_id, status="queued")
@@ -314,13 +354,86 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     if not job:
         raise HTTPException(status_code=404, detail="Job no encontrado.")
 
+    phase_status = refresh_phase_files(job_id) if job.job_kind == "granules_especializacion" else read_phase_status(job_id)
+    files = list_all_job_files(job_id) if job.job_kind == "granules_especializacion" else job.files
+
     return JobStatusResponse(
         jobId=job.job_id,
         status=job.status,
         progressStep=job.progress_step,
         logs=job.logs,
-        files=job.files,
+        files=files,
+        granulesStatus=phase_status["granules"]["status"],
+        pipelineLocalStatus=phase_status["pipelineLocal"]["status"],
+        specializationMaterialsStatus=phase_status["specializationMaterials"]["status"],
+        currentPhase=get_current_phase(phase_status),
+        availableNextAction=get_available_next_action(phase_status, job.status),
+        phaseStatus=phase_status,
     )
+
+
+@app.post("/api/jobs/{job_id}/pipeline-local", response_model=JobCreateResponse)
+def start_pipeline_local_phase(job_id: str) -> JobCreateResponse:
+    validate_required_api_key()
+    _ensure_not_running(job_id)
+    job = _ensure_job_exists(job_id)
+    if job.job_kind != "granules_especializacion":
+        raise HTTPException(status_code=400, detail="Este endpoint solo aplica para jobs de Especialización.")
+
+    paths = get_job_paths(job_id)
+    if len(list_generated_docx(job_id)) == 0:
+        raise HTTPException(status_code=400, detail="No hay gránulos generados. Ejecuta primero la Fase 1.")
+
+    phase_status = read_phase_status(job_id)
+    if phase_status["granules"]["status"] != "completed":
+        raise HTTPException(status_code=400, detail="La Fase 1 debe estar completada antes de generar TXT/DOCX académicos.")
+
+    start_job_thread(
+        job_id=job_id,
+        command=_build_pipeline_local_command(paths),
+        cwd=PROJECT_ROOT,
+        env_vars=os.environ.copy(),
+        initial_progress_step="generando txt",
+        progress_map=ESPECIALIZACION_PROGRESS_MAP,
+        parse_drive_uploads=False,
+        job_kind="especializacion_phase",
+        files_listing_fn=lambda j: list_all_job_files(j),
+        on_start=_phase_start_callback("pipelineLocal"),
+        on_complete=_phase_complete_callback("pipelineLocal", lambda j: [f"pipeline_local/{p.name}" for p in list_pipeline_local_files(j)]),
+    )
+    return JobCreateResponse(jobId=job_id, status="queued")
+
+
+@app.post("/api/jobs/{job_id}/materiales-especializacion", response_model=JobCreateResponse)
+def start_materiales_especializacion_phase(job_id: str) -> JobCreateResponse:
+    validate_required_api_key()
+    _ensure_not_running(job_id)
+    job = _ensure_job_exists(job_id)
+    if job.job_kind != "granules_especializacion":
+        raise HTTPException(status_code=400, detail="Este endpoint solo aplica para jobs de Especialización.")
+
+    paths = get_job_paths(job_id)
+    if len(list_generated_docx(job_id)) == 0:
+        raise HTTPException(status_code=400, detail="No hay gránulos generados. Ejecuta primero la Fase 1.")
+
+    phase_status = read_phase_status(job_id)
+    if phase_status["pipelineLocal"]["status"] != "completed":
+        raise HTTPException(status_code=400, detail="La Fase 2 debe estar completada antes de generar materiales de Especialización.")
+
+    start_job_thread(
+        job_id=job_id,
+        command=_build_materiales_command(job_id, paths),
+        cwd=PROJECT_ROOT,
+        env_vars=os.environ.copy(),
+        initial_progress_step="generando materiales especialización",
+        progress_map=ESPECIALIZACION_PROGRESS_MAP,
+        parse_drive_uploads=False,
+        job_kind="especializacion_phase",
+        files_listing_fn=lambda j: list_all_job_files(j),
+        on_start=_phase_start_callback("specializationMaterials"),
+        on_complete=_phase_complete_callback("specializationMaterials", lambda j: [f["relative_path"] for f in list_especializacion_files(j)]),
+    )
+    return JobCreateResponse(jobId=job_id, status="queued")
 
 
 @app.get("/api/jobs/{job_id}/files/{filename}")
@@ -332,11 +445,18 @@ def download_generated_file(job_id: str, filename: str) -> FileResponse:
     if not job:
         raise HTTPException(status_code=404, detail="Job no encontrado.")
 
-    file_path = get_job_paths(job_id)["generated_dir"] / filename
+    paths = get_job_paths(job_id)
+    file_path = paths["generated_dir"] / filename
+    if not file_path.exists() and (paths["pipeline_local_dir"] / filename).exists():
+        file_path = paths["pipeline_local_dir"] / filename
+    if not file_path.exists() and paths["materiales_dir"].exists():
+        matches = [path for path in paths["materiales_dir"].glob(f"*/{filename}") if path.is_file()]
+        if matches:
+            file_path = matches[0]
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Archivo no encontrado.")
 
-    return FileResponse(path=file_path, filename=filename, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    return FileResponse(path=file_path, filename=filename, media_type=detect_media_type(filename))
 
 
 @app.post("/api/scripts/jobs", response_model=ScriptsJobCreateResponse)
@@ -535,7 +655,8 @@ def download_all_generated_files(job_id: str) -> FileResponse:
     if not job:
         raise HTTPException(status_code=404, detail="Job no encontrado.")
 
-    if not job.files:
+    available_files = list_all_job_files(job_id) if job.job_kind == "granules_especializacion" else job.files
+    if not available_files:
         raise HTTPException(status_code=404, detail="No hay archivos para descargar.")
 
     if job.job_kind == "granules_especializacion":
@@ -544,3 +665,30 @@ def download_all_generated_files(job_id: str) -> FileResponse:
 
     zip_path = create_docs_zip(job_id)
     return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
+
+
+@app.get("/api/jobs/{job_id}/download/granules")
+def download_granules_phase(job_id: str) -> FileResponse:
+    _ensure_job_exists(job_id)
+    if not list_generated_docx(job_id):
+        raise HTTPException(status_code=404, detail="No hay gránulos para descargar.")
+    zip_path = create_phase_zip(job_id, "granules")
+    return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
+
+
+@app.get("/api/jobs/{job_id}/download/pipeline-local")
+def download_pipeline_local_phase(job_id: str) -> FileResponse:
+    _ensure_job_exists(job_id)
+    if not list_pipeline_local_files(job_id):
+        raise HTTPException(status_code=404, detail="No hay archivos TXT/DOCX académicos para descargar.")
+    zip_path = create_phase_zip(job_id, "pipeline_local")
+    return FileResponse(path=zip_path, filename=f"pipeline_local_{job_id}.zip", media_type="application/zip")
+
+
+@app.get("/api/jobs/{job_id}/download/materiales-especializacion")
+def download_materiales_especializacion_phase(job_id: str) -> FileResponse:
+    _ensure_job_exists(job_id)
+    if not list_especializacion_files(job_id):
+        raise HTTPException(status_code=404, detail="No hay materiales de Especialización para descargar.")
+    zip_path = create_phase_zip(job_id, "materiales_especializacion")
+    return FileResponse(path=zip_path, filename=f"materiales_especializacion_{job_id}.zip", media_type="application/zip")

@@ -1,15 +1,30 @@
 import { forwardRef, useMemo } from 'react'
-import type { GranuleMaterials } from '../types/granules'
+import type { AvailableNextAction, GranuleMaterials, JobPhaseStatus } from '../types/granules'
 
 interface ResultsPanelProps {
   jobId: string | null
   documents: string[]
   materialesByGranule: GranuleMaterials[]
   isVisible: boolean
+  phaseStatus: JobPhaseStatus | null
+  availableNextAction: AvailableNextAction
+  isGenerating: boolean
+  onGeneratePipelineLocal: () => void
+  onGenerateSpecializationMaterials: () => void
 }
 
 const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function ResultsPanel(
-  { jobId, documents, materialesByGranule, isVisible },
+  {
+    jobId,
+    documents,
+    materialesByGranule,
+    isVisible,
+    phaseStatus,
+    availableNextAction,
+    isGenerating,
+    onGeneratePipelineLocal,
+    onGenerateSpecializationMaterials,
+  },
   ref,
 ) {
   const apiBase = 'http://localhost:8000'
@@ -25,6 +40,10 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
     return documents.filter((f) => f.startsWith('pipeline_local/'))
   }, [documents])
 
+  const granulesStatus = phaseStatus?.granules.status ?? 'pending'
+  const pipelineStatus = phaseStatus?.pipelineLocal.status ?? 'pending'
+  const materialsStatus = phaseStatus?.specializationMaterials.status ?? 'pending'
+
   return (
     <article ref={ref} className="card granule-card granules-results-scroll-target">
       <div className="granule-card-header">
@@ -34,7 +53,7 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
         <h2>Resultados temporales</h2>
         <p className="card-description">Archivos generados por el proceso actual.</p>
 
-        {!isVisible && <p className="empty-state">Los resultados aparecerán cuando la generación termine.</p>}
+        {!isVisible && <p className="empty-state">Los resultados temporales se actualizarán al terminar cada fase.</p>}
 
         {isVisible && (
           <>
@@ -58,6 +77,11 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
                     </li>
                   ))}
                 </ul>
+                {jobId && granuleFiles.length > 0 && (
+                  <a className="secondary-button link-button" href={`${apiBase}/api/jobs/${jobId}/download/granules`} target="_blank" rel="noreferrer">
+                    Descargar gránulos
+                  </a>
+                )}
               </section>
             )}
 
@@ -72,6 +96,11 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
                     </li>
                   ))}
                 </ul>
+                {jobId && academicFiles.length > 0 && (
+                  <a className="secondary-button link-button" href={`${apiBase}/api/jobs/${jobId}/download/pipeline-local`} target="_blank" rel="noreferrer">
+                    Descargar TXT/DOCX académicos
+                  </a>
+                )}
               </section>
             )}
 
@@ -98,7 +127,34 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
                     </ul>
                   </div>
                 ))}
+                {jobId && totalMateriales > 0 && (
+                  <a className="secondary-button link-button" href={`${apiBase}/api/jobs/${jobId}/download/materiales-especializacion`} target="_blank" rel="noreferrer">
+                    Descargar materiales de Especialización
+                  </a>
+                )}
               </section>
+            )}
+
+            {granulesStatus === 'completed' && pipelineStatus !== 'completed' && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={onGeneratePipelineLocal}
+                disabled={isGenerating || availableNextAction === 'none'}
+              >
+                Generar TXT y DOCX académicos
+              </button>
+            )}
+
+            {pipelineStatus === 'completed' && materialsStatus !== 'completed' && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={onGenerateSpecializationMaterials}
+                disabled={isGenerating || availableNextAction === 'none'}
+              >
+                Generar materiales de Especialización
+              </button>
             )}
 
             {(hasDocs || hasMateriales) && (

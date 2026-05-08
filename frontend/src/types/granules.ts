@@ -44,6 +44,28 @@ export interface SyllabusPreviewResponse {
 }
 
 export type BackendJobStatus = 'queued' | 'running' | 'completed' | 'failed'
+export type PhaseStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+export type AvailableNextAction =
+  | 'generate_granules'
+  | 'generate_pipeline_local'
+  | 'generate_specialization_materials'
+  | 'download_package'
+  | 'retry_current_phase'
+  | 'none'
+
+export interface PhaseStatusDetails {
+  status: PhaseStatus
+  startedAt: string | null
+  finishedAt: string | null
+  files: string[]
+}
+
+export interface JobPhaseStatus {
+  jobId: string
+  granules: PhaseStatusDetails
+  pipelineLocal: PhaseStatusDetails
+  specializationMaterials: PhaseStatusDetails
+}
 
 export interface JobStatusResponse {
   jobId: string
@@ -51,6 +73,12 @@ export interface JobStatusResponse {
   progressStep: GenerationStatus
   logs: string[]
   files: string[]
+  granulesStatus: PhaseStatus
+  pipelineLocalStatus: PhaseStatus
+  specializationMaterialsStatus: PhaseStatus
+  currentPhase: string
+  availableNextAction: AvailableNextAction
+  phaseStatus: JobPhaseStatus | null
 }
 
 export interface MaterialFile {
