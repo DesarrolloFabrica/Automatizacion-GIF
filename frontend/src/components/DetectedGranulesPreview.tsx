@@ -22,6 +22,37 @@ function formatPromptLabel(value: PromptType): string {
   return 'Diplomado'
 }
 
+function formatPreviewLabel(value: string | null | undefined, fallback: string): string {
+  const normalized = (value ?? '').replace(/\s+/g, ' ').trim()
+  return normalized || fallback
+}
+
+function PreviewMetricCard({
+  icon,
+  label,
+  value,
+  clamp = 2,
+}: {
+  icon: string
+  label: string
+  value: string | number
+  clamp?: 2 | 3
+}) {
+  const displayValue = String(value)
+
+  return (
+    <div className="preview-metric-card pipeline-metric-card" title={displayValue}>
+      <div className="pipeline-metric-top">
+        <div className="pipeline-metric-icon" aria-hidden="true">{icon}</div>
+        <span>{label}</span>
+      </div>
+      <div className={`pipeline-metric-copy pipeline-metric-copy--clamp-${clamp}`}>
+        <strong>{displayValue}</strong>
+      </div>
+    </div>
+  )
+}
+
 const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewProps>(function DetectedGranulesPreview(
   {
     fileName,
@@ -39,6 +70,38 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
   ref,
 ) {
   const hasError = previewMessage.toLowerCase().includes('error') || previewMessage.toLowerCase().includes('failed')
+  const previewMetrics = [
+    {
+      icon: '📄',
+      label: 'ARCHIVO CARGADO',
+      value: formatPreviewLabel(fileName, 'Pendiente por cargar'),
+      clamp: 2 as const,
+    },
+    {
+      icon: '🧠',
+      label: 'TIPO DE PROMPT',
+      value: formatPromptLabel(selectedPrompt),
+      clamp: 2 as const,
+    },
+    {
+      icon: '🎓',
+      label: 'ASIGNATURA DETECTADA',
+      value: formatPreviewLabel(subjectName, 'Sin detectar'),
+      clamp: 3 as const,
+    },
+    {
+      icon: '📚',
+      label: 'PROGRAMA DETECTADO',
+      value: formatPreviewLabel(programName, 'Sin detectar'),
+      clamp: 3 as const,
+    },
+    {
+      icon: '#',
+      label: 'TOTAL DE GRÁNULOS',
+      value: granules.length,
+      clamp: 2 as const,
+    },
+  ]
 
   return (
     <article ref={ref} className="card granule-card pipeline-preview-card granules-pipeline-scroll-target">
@@ -54,59 +117,15 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
       </div>
 
       <div className="preview-grid preview-metric-grid pipeline-metric-grid">
-        <div className="preview-metric-card pipeline-metric-card">
-          <div className="pipeline-metric-card-content">
-              <div className="pipeline-metric-top">
-              <div className="pipeline-metric-icon" aria-hidden="true">📄</div>
-              <span>ARCHIVO CARGADO</span>
-            </div>
-            <div className="pipeline-metric-copy fade-overflow">
-              <strong>{fileName ?? 'Pendiente por cargar'}</strong>
-            </div>
-          </div>
-        </div>
-        <div className="preview-metric-card pipeline-metric-card">
-          <div className="pipeline-metric-top">
-            <div className="pipeline-metric-icon" aria-hidden="true">🧠</div>
-            <span>TIPO DE PROMPT</span>
-          </div>
-          <div className="pipeline-metric-copy">
-            <strong>{formatPromptLabel(selectedPrompt)}</strong>
-          </div>
-        </div>
-        <div className="preview-metric-card pipeline-metric-card">
-          <div className="pipeline-metric-top">
-            <div className="pipeline-metric-icon" aria-hidden="true">
-              🎓
-            </div>
-            <span>ASIGNATURA DETECTADA</span>
-          </div>
-          <div className="pipeline-metric-copy fade-overflow">
-            <strong>{subjectName || 'Sin detectar'}</strong>
-          </div>
-        </div>
-        <div className="preview-metric-card pipeline-metric-card">
-          <div className="pipeline-metric-top">
-            <div className="pipeline-metric-icon" aria-hidden="true">
-              📚
-            </div>
-            <span>PROGRAMA DETECTADO</span>
-          </div>
-          <div className="pipeline-metric-copy fade-overflow">
-            <strong>{programName || 'Sin detectar'}</strong>
-          </div>
-        </div>
-        <div className="preview-metric-card pipeline-metric-card">
-          <div className="pipeline-metric-top">
-            <div className="pipeline-metric-icon" aria-hidden="true">
-              #
-            </div>
-            <span>TOTAL DE GRÁNULOS</span>
-          </div>
-          <div className="pipeline-metric-copy">
-            <strong>{granules.length}</strong>
-          </div>
-        </div>
+        {previewMetrics.map((metric) => (
+          <PreviewMetricCard
+            key={metric.label}
+            icon={metric.icon}
+            label={metric.label}
+            value={metric.value}
+            clamp={metric.clamp}
+          />
+        ))}
       </div>
 
       {previewMessage && <p className={`preview-alert ${hasError ? 'is-error' : 'is-info'}`}>{previewMessage}</p>}
@@ -136,11 +155,12 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
         <p className="muted">{generationMessage}</p>
         <button
           type="button"
-          className="primary-button"
+          className={`primary-button ${isGenerating ? 'is-loading' : ''}`}
           onClick={onGenerate}
           disabled={!canGenerate || isGenerating || isAnalyzing}
         >
-          {isGenerating ? 'Procesando...' : 'Generar gránulos'}
+          {isGenerating && <span className="button-spinner" aria-hidden="true" />}
+          {isGenerating ? 'Generando paquete...' : 'Generar gránulos'}
         </button>
       </section>
     </article>

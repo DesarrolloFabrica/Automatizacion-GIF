@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Iterable, List
 
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from pypdf import PdfReader
 
 try:
@@ -260,6 +262,388 @@ class CoursePlan:
     nivel: str = "pregrado"
 
 
+@dataclass
+class CourseInfo:
+    asignatura: str
+    programa: str
+    escuela: str
+    semestre: str
+    temas: List[str]
+
+
+@dataclass
+class SyllabusParseResult:
+    program: str
+    school: str
+    modality: str
+    coursesDetected: List[CourseInfo]
+    selectedCourse: CourseInfo | None
+
+
+FIELD_LABELS = {
+    "CODIGO",
+    "CODIGO CURSO",
+    "NOMBRE",
+    "ASIGNATURA",
+    "CURSO",
+    "SEMESTRE",
+    "SEMESTRE NIVEL",
+    "NIVEL",
+    "TIPO",
+    "COMPONENTE",
+    "CALIFICACION",
+    "MODALIDAD",
+    "MODALIDAD DEL PROGRAMA",
+    "CREDITOS",
+    "CREDITOS ACADEMICOS",
+    "PROGRAMA",
+    "ESCUELA",
+}
+
+PROGRAM_REJECTS = {
+    "PRESENCIAL",
+    "VIRTUAL",
+    "DISTANCIA",
+    "DUAL",
+    "HIBRIDO",
+    "HÍBRIDO",
+    "MODALIDAD DEL PROGRAMA",
+    "NOMBRE",
+    "PROGRAMA",
+    "ESCUELA",
+}
+
+TOPIC_REJECT_PHRASES = [
+    "PREGUNTA PROBLEMA",
+    "ESTRATEGIA DIDACTICA",
+    "DURACION",
+    "TOTAL HORAS",
+    "CREDITOS",
+    "TALLERES PRACTICOS",
+    "PREGUNTAS ORIENTADORAS",
+    "IMPLEMENTACION DE BASES DE DATOS",
+    "DESARROLLO DE SEMINARIO ALEMAN",
+]
+
+
+def detect_all_courses(path: Path) -> List[CourseInfo]:
+    if path.suffix.lower() == ".pdf":
+        text = extract_pdf_text(path)
+        return _detect_courses_from_text(text, path)
+
+    parsed = parse_syllabus_docx(path)
+    if parsed.coursesDetected:
+        return parsed.coursesDetected
+
+    plan = extract_course_plan_from_text(extract_docx_text(path), path)
+    return [CourseInfo(plan.asignatura, plan.programa, plan.escuela, plan.semestre, plan.temas)]
+
+
+def parse_syllabus_docx(path: Path) -> SyllabusParseResult:
+    doc = Document(path)
+    rows = extract_ordered_docx_rows(doc)
+    full_text = extract_docx_text(path)
+    program = detect_global_program(rows)
+    school = detect_global_field(rows, "Escuela")
+    modality = detect_global_modality(rows)
+
+    block_ranges = detect_course_block_ranges(rows)
+    if not block_ranges:
+        block_ranges = [(0, len(rows))]
+
+    courses: List[CourseInfo] = []
+    for start, end in block_ranges:
+        block_rows = rows[start:end]
+        block_text = "\n".join(" | ".join(cell for cell in row if clean_text(cell)) for row in block_rows)
+        subject = extract_value_from_block(block_rows, "Nombre", ["Nombre de la asignatura", "Nombre de la materia", "Asignatura", "Curso"])
+        subject = sanitize_subject(subject)
+        if not subject:
+            continue
+
+        semester = extract_value_from_block(block_rows, "Semestre", ["Semestre (Nivel)", "Nivel", "Semestre/Nivel"])
+        topics = extract_topics_from_course_block(block_rows, block_text)
+        if not topics:
+            topics = extract_topics_from_text_block(block_text)
+
+        course_program = program or detect_global_program(block_rows)
+        course_school = school or detect_global_field(block_rows, "Escuela")
+        courses.append(CourseInfo(
+            asignatura=subject,
+            programa=course_program,
+            escuela=course_school,
+            semestre=semester,
+            temas=topics[:5],
+        ))
+
+    selected = next((course for course in courses if course.temas), courses[0] if courses else None)
+    return SyllabusParseResult(
+        program=program,
+        school=school,
+        modality=modality,
+        coursesDetected=courses,
+        selectedCourse=selected,
+    )
+
+
+def extract_ordered_docx_rows(doc: Document) -> List[List[str]]:
+    ordered_rows: List[List[str]] = []
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith("}p"):
+            paragraph = Paragraph(child, doc)
+            text = clean_text(paragraph.text)
+            if text:
+                ordered_rows.append([text])
+        elif child.tag.endswith("}tbl"):
+            table = Table(child, doc)
+            for row in table.rows:
+                cells = [clean_text(cell.text) for cell in row.cells]
+                if any(cells):
+                    ordered_rows.append(cells)
+    return ordered_rows
+
+
+def detect_course_block_ranges(rows: List[List[str]]) -> List[tuple[int, int]]:
+    starts = []
+    for index, row in enumerate(rows):
+        row_norm = normalize_heading(" ".join(row))
+        if "1.1 IDENTIFICACION DEL CURSO" in row_norm or "IDENTIFICACION DEL CURSO" in row_norm:
+            if starts and index == starts[-1] + 1:
+                starts[-1] = index
+            else:
+                starts.append(index)
+
+    ranges = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(rows)
+        ranges.append((start, end))
+    return ranges
+
+
+def detect_global_program(rows: List[List[str]]) -> str:
+    for row_index, row in enumerate(rows):
+        for cell_index, cell in enumerate(row):
+            if normalize_label_token(cell) == "PROGRAMA":
+                candidates = collect_following_values(rows, row_index, cell_index)
+                for candidate in candidates:
+                    cleaned = clean_text(candidate)
+                    if is_valid_program_value(cleaned):
+                        return cleaned
+    return ""
+
+
+def detect_global_field(rows: List[List[str]], label: str) -> str:
+    label_norm = normalize_label_token(label)
+    for row_index, row in enumerate(rows):
+        for cell_index, cell in enumerate(row):
+            if normalize_label_token(cell) == label_norm:
+                for candidate in collect_following_values(rows, row_index, cell_index):
+                    candidate = clean_text(candidate)
+                    if candidate and normalize_heading(candidate) not in FIELD_LABELS:
+                        return candidate
+    return ""
+
+
+def detect_global_modality(rows: List[List[str]]) -> str:
+    for row in rows:
+        normalized = [normalize_heading(cell) for cell in row]
+        if any("MODALIDAD DEL PROGRAMA" in cell or cell == "MODALIDAD" for cell in normalized):
+            for cell in row:
+                if normalize_heading(cell) in {"PRESENCIAL", "VIRTUAL", "DISTANCIA", "DUAL", "HIBRIDO"}:
+                    return clean_text(cell)
+    return ""
+
+
+def collect_following_values(rows: List[List[str]], row_index: int, cell_index: int) -> List[str]:
+    values: List[str] = []
+    row = rows[row_index]
+    for value in row[cell_index + 1:]:
+        if clean_text(value):
+            values.append(value)
+    if row_index + 1 < len(rows):
+        for value in rows[row_index + 1]:
+            if clean_text(value):
+                values.append(value)
+    return values
+
+
+def is_valid_program_value(value: str) -> bool:
+    cleaned = clean_text(value)
+    normalized = normalize_heading(cleaned)
+    if not cleaned or normalized in PROGRAM_REJECTS or normalized in FIELD_LABELS:
+        return False
+    if any(word in normalized for word in ["ESPECIALIZACION", "PREGRADO", "MAESTRIA", "DIPLOMADO"]):
+        return True
+    meaningful_words = [word for word in re.findall(r"[A-ZÁÉÍÓÚÑa-záéíóúñ]+", cleaned) if len(word) > 2]
+    return len(meaningful_words) > 3
+
+
+def extract_value_from_block(rows: List[List[str]], label: str, aliases: List[str] | None = None) -> str:
+    labels = {normalize_label_token(label), *(normalize_label_token(alias) for alias in (aliases or []))}
+    for row_index, row in enumerate(rows):
+        for cell_index, cell in enumerate(row):
+            cell_norm = normalize_label_token(cell)
+            if cell_norm in labels:
+                candidates = collect_label_value_fragments(rows, row_index, cell_index)
+                value = join_value_fragments(candidates)
+                if value:
+                    return value
+    return ""
+
+
+def collect_label_value_fragments(rows: List[List[str]], row_index: int, cell_index: int) -> List[str]:
+    fragments: List[str] = []
+    row = rows[row_index]
+    for value in row[cell_index + 1:]:
+        cleaned = clean_text(value)
+        if not cleaned:
+            continue
+        if normalize_heading(cleaned) in FIELD_LABELS:
+            break
+        fragments.append(cleaned)
+    if fragments and not (len(fragments) == 1 and len(fragments[0]) == 1):
+        return fragments
+
+    for next_row in rows[row_index + 1: row_index + 3]:
+        for value in next_row:
+            cleaned = clean_text(value)
+            if not cleaned:
+                continue
+            if normalize_heading(cleaned) in FIELD_LABELS:
+                if fragments:
+                    return fragments
+                continue
+            fragments.append(cleaned)
+        if fragments:
+            break
+    return fragments
+
+
+def join_value_fragments(fragments: List[str]) -> str:
+    useful = []
+    seen = set()
+    for fragment in fragments:
+        if normalize_heading(fragment) in FIELD_LABELS:
+            continue
+        key = normalize_heading(fragment)
+        if key in seen:
+            continue
+        useful.append(fragment)
+        seen.add(key)
+    if not useful:
+        return ""
+    result = useful[0]
+    for fragment in useful[1:]:
+        if len(result) == 1 and fragment[:1].islower():
+            result += fragment
+        elif len(result) == 1 and fragment[:1].isalpha():
+            result += fragment
+        else:
+            result += " " + fragment
+    return clean_text(result)
+
+
+def sanitize_subject(value: str) -> str:
+    cleaned = clean_text(value)
+    normalized = normalize_heading(cleaned)
+    if not cleaned or normalized in FIELD_LABELS or normalized in PROGRAM_REJECTS:
+        return ""
+    if len(cleaned) == 1:
+        return ""
+    return cleaned
+
+
+def normalize_label_token(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", " ", normalize_heading(value)).strip()
+
+
+def extract_topics_from_course_block(rows: List[List[str]], block_text: str) -> List[str]:
+    start = None
+    for index, row in enumerate(rows):
+        if "ESTRUCTURA TEMATICA" in normalize_heading(" ".join(row)):
+            start = index
+            break
+    if start is None:
+        return []
+
+    content_index = None
+    topics: List[str] = []
+    for row in rows[start + 1:]:
+        row_norm = normalize_heading(" ".join(row))
+        if "ESTRATEGIA DIDACTICA" in row_norm and "CONTENIDOS" not in row_norm:
+            break
+        if "BIBLIOGRAFIA" in row_norm or "OBSERVACIONES" in row_norm:
+            break
+
+        normalized_cells = [normalize_heading(cell) for cell in row]
+        if any(cell == "CONTENIDOS" for cell in normalized_cells):
+            content_index = normalized_cells.index("CONTENIDOS")
+            continue
+
+        candidate = ""
+        if content_index is not None and content_index < len(row):
+            candidate = clean_text(row[content_index])
+        elif len(row) >= 2:
+            candidate = clean_text(row[1])
+        if is_valid_topic(candidate) and candidate not in topics:
+            topics.append(candidate)
+        if len(topics) == 5:
+            return topics
+
+    return topics[:5] if topics else extract_topics_from_text_block(block_text)
+
+
+def extract_topics_from_text_block(text: str) -> List[str]:
+    topics: List[str] = []
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    in_structure = False
+    content_mode = False
+    for line in lines:
+        normalized = normalize_heading(line)
+        if "ESTRUCTURA TEMATICA" in normalized:
+            in_structure = True
+            continue
+        if in_structure and "ESTRATEGIA DIDACTICA" in normalized and "CONTENIDOS" not in normalized:
+            break
+        if not in_structure:
+            continue
+        if "CONTENIDOS" in normalized:
+            content_mode = True
+            continue
+        if content_mode:
+            for candidate in split_topic_candidates(line):
+                candidate = clean_text(candidate)
+                if is_valid_topic(candidate) and candidate not in topics:
+                    topics.append(candidate)
+                if len(topics) == 5:
+                    return topics
+    return topics[:5]
+
+
+def is_valid_topic(value: str) -> bool:
+    cleaned = clean_text(value)
+    normalized = normalize_heading(cleaned)
+    if not cleaned or normalized in FIELD_LABELS:
+        return False
+    if any(phrase in normalized for phrase in TOPIC_REJECT_PHRASES):
+        return False
+    if cleaned.startswith("¿") or re.fullmatch(r"\d+", cleaned):
+        return False
+    if len(cleaned.split()) < 2 or len(cleaned.split()) > 14:
+        return False
+    return True
+
+
+def _detect_courses_from_text(text: str, path: Path) -> List[CourseInfo]:
+    plan = extract_course_plan_from_text(text, path)
+    return [CourseInfo(
+        asignatura=plan.asignatura,
+        programa=plan.programa,
+        escuela=plan.escuela,
+        semestre=plan.semestre,
+        temas=plan.temas,
+    )]
+
+
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
@@ -373,21 +757,50 @@ def extract_course_plan(path: Path, subject_override: str = "", semester_overrid
     if not rows:
         return extract_course_plan_from_text(extract_docx_text(path), path, subject_override, semester_override, topics_override)
 
-    def value_after(label: str) -> str:
-        label_norm = label.lower()
+    def cell_contains(cell_text: str, label: str) -> bool:
+        cell_norm = normalize_for_matching(cell_text)
+        label_norm = normalize_for_matching(label)
+        return label_norm in cell_norm
+
+    def value_after_flexible(label: str, aliases: List[str] | None = None) -> str:
+        all_labels = [label] + (aliases or [])
         for row in rows:
             for index, cell in enumerate(row):
-                if cell.lower() == label_norm and index + 1 < len(row):
-                    candidate = clean_text(row[index + 1])
-                    if candidate and candidate.lower() != label_norm:
-                        return candidate
+                if any(cell_contains(cell, lbl) for lbl in all_labels):
+                    if index + 1 < len(row):
+                        candidate = clean_text(row[index + 1])
+                        if candidate and not any(cell_contains(candidate, lbl) for lbl in all_labels):
+                            return candidate
+                    if row_index_of_cell(row, cell) + 1 < len(rows):
+                        next_row = rows[row_index_of_cell(row, cell) + 1]
+                        if next_row:
+                            candidate = clean_text(next_row[0])
+                            if candidate and len(candidate) > 1:
+                                return candidate
         return ""
 
-    escuela = value_after("Escuela")
-    programa = value_after("Programa")
-    asignatura = subject_override or value_after("Nombre")
-    semestre = semester_override or value_after("Semestre (Nivel)")
-    modalidad = value_after("Modalidad")
+    def row_index_of_cell(row: List[str], cell: str) -> int:
+        for i, r in enumerate(rows):
+            if r is row:
+                return i
+        return -1
+
+    def find_in_row_pattern(label: str, aliases: List[str] | None = None) -> str:
+        all_labels = [label] + (aliases or [])
+        for row in rows:
+            for index, cell in enumerate(row):
+                if any(cell_contains(cell, lbl) for lbl in all_labels):
+                    if index + 1 < len(row):
+                        val = clean_text(row[index + 1])
+                        if val and len(val) > 1:
+                            return val
+        return ""
+
+    escuela = find_in_row_pattern("Escuela")
+    programa = find_in_row_pattern("Programa", ["Programa académico", "Programa de"])
+    asignatura = subject_override or find_in_row_pattern("Nombre", ["Nombre de la asignatura", "Nombre de la materia", "Asignatura", "Curso"])
+    semestre = semester_override or find_in_row_pattern("Semestre", ["Semestre (Nivel)", "Nivel", "Semestre/Nivel"])
+    modalidad = find_in_row_pattern("Modalidad", ["Modalidad del programa"])
     creditos = ""
     competencias = ""
     resultados = ""
@@ -395,32 +808,53 @@ def extract_course_plan(path: Path, subject_override: str = "", semester_overrid
     temas: List[str] = []
 
     for row_index, row in enumerate(rows):
-        lowered = [cell.lower() for cell in row]
-        if row and row[0].lower() == "modalidad del programa" and len(row) >= 3 and row[2].upper() == "X":
-            modalidad = row[1]
-        if "competencias" in lowered and "resultados de aprendizaje" in lowered and row_index + 1 < len(rows):
+        lowered = [normalize_for_matching(cell) for cell in row]
+        row_text = " ".join(row).lower()
+
+        if row and any(cell_contains(row[0], "modalidad") for _ in [1]) and len(row) >= 3:
+            for ci, rc in enumerate(row):
+                if "modalidad" in normalize_for_matching(rc) and ci + 1 < len(row):
+                    if row[ci + 1].strip().upper() == "X" and ci + 2 < len(row):
+                        modalidad = row[ci + 1] if len(row[ci + 1]) > len(row[ci + 2]) else row[ci + 2]
+                    elif row[ci + 1].strip().upper() == "X":
+                        modalidad = row[ci] if ci > 0 else ""
+
+        if any("competencia" in c for c in lowered) and any("resultado" in c for c in lowered) and row_index + 1 < len(rows):
             next_row = rows[row_index + 1]
             if len(next_row) >= 2:
                 competencias = next_row[0]
                 resultados = next_row[1]
             continue
-        if len(row) >= 4 and row[0].startswith("¿") and row[1] and row[1].lower() not in {"contenidos", "total horas"}:
+
+        if len(row) >= 2 and row[0].strip().startswith("¿") and row[1] and normalize_for_matching(row[1]) not in {"contenidos", "total horas", ""}:
             pregunta = pregunta or row[0]
-            tema = row[1]
-            if tema not in temas:
+            tema = clean_text(row[1])
+            if tema and tema not in temas:
                 temas.append(tema)
-        if row and row[-1] and re.fullmatch(r"\d+", row[-1]) and (
-            any(cell in {"créditos", "creditos"} for cell in lowered) or len(row) >= 7
-        ):
-            creditos = row[-1]
+
+        if len(row) >= 3:
+            last_cell = clean_text(row[-1])
+            if re.fullmatch(r"\d+", last_cell) and any("credito" in c for c in lowered):
+                creditos = last_cell
 
     paragraphs = [clean_text(p.text) for p in doc.paragraphs if clean_text(p.text)]
     bibliography = extract_bibliography(paragraphs)
+
+    parsed = parse_syllabus_docx(path)
+    if parsed.selectedCourse:
+        asignatura = subject_override or parsed.selectedCourse.asignatura or asignatura
+        programa = parsed.program or parsed.selectedCourse.programa or programa
+        escuela = parsed.school or parsed.selectedCourse.escuela or escuela
+        semestre = semester_override or parsed.selectedCourse.semestre or semestre
+        if not topics_override and parsed.selectedCourse.temas:
+            temas = parsed.selectedCourse.temas[:5]
 
     if not asignatura:
         asignatura = path.stem
     if topics_override:
         temas = parse_topics_override(topics_override)
+    if not temas:
+        temas = extract_topics_from_table_rows(rows)
     if not temas:
         temas = infer_topics_from_text("\n".join(paragraphs))
     if len(temas) > 5:
@@ -485,6 +919,50 @@ def extract_course_plan_from_text(text: str, path: Path, subject_override: str =
         temas=temas,
         bibliografia_silabo=bibliography,
     )
+
+
+def extract_topics_from_table_rows(rows: List[List[str]]) -> List[str]:
+    topics: List[str] = []
+    in_structure = False
+    stop_markers = {
+        "ESTRATEGIA DIDACTICA",
+        "ESTRATEGIA DIDACTICA",
+        "MECANISMOS Y ESTRATEGIAS DE EVALUACION",
+        "MECANISMOS Y ESTRATEGIAS DE EVALUACION",
+        "BIBLIOGRAFIA",
+        "BIBLIOGRAFIA",
+        "OBSERVACIONES",
+        "OBSERVACIONES",
+    }
+
+    for row in rows:
+        if not row:
+            continue
+        first_cell = normalize_heading(row[0])
+        if "ESTRUCTURA TEMATICA" in first_cell or "ESTRUCTURA TEMATICA" in first_cell:
+            in_structure = True
+            continue
+        if in_structure and first_cell in stop_markers:
+            break
+        if not in_structure:
+            continue
+
+        for cell in row[1:]:
+            cleaned = clean_text(cell)
+            normalized = normalize_heading(cleaned)
+            if (
+                cleaned
+                and 2 <= len(cleaned.split()) <= 12
+                and normalized not in {"CONTENIDOS", "TOTAL HORAS", "PREGUNTA PROBLEMA", ""}
+                and not cleaned.startswith("¿")
+                and not re.fullmatch(r"\d+", cleaned)
+                and cleaned not in topics
+            ):
+                topics.append(cleaned)
+            if len(topics) == 5:
+                return topics
+
+    return topics[:5]
 
 
 def extract_bibliography(paragraphs: List[str]) -> List[str]:

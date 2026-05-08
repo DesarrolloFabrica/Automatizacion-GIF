@@ -5,11 +5,12 @@ interface PromptSelectorProps {
   onSelectPrompt: (prompt: PromptType | '') => void
 }
 
-const promptOptions: Array<{ value: PromptType; label: string }> = [
-  { value: 'pregrado', label: 'Pregrado' },
-  { value: 'especializacion', label: 'Especialización' },
-  { value: 'maestria', label: 'Maestría' },
-  { value: 'diplomado', label: 'Diplomado' },
+const promptOptions: Array<{ value: PromptType | ''; label: string; disabled: boolean }> = [
+  { value: '', label: 'Selecciona un tipo de prompt', disabled: false },
+  { value: 'especializacion', label: 'Especialización', disabled: false },
+  { value: 'pregrado', label: 'Pregrado — Próximamente', disabled: true },
+  { value: 'maestria', label: 'Maestría — Próximamente', disabled: true },
+  { value: 'diplomado', label: 'Diplomado — Próximamente', disabled: true },
 ]
 
 function PromptSelector({ selectedPrompt, onSelectPrompt }: PromptSelectorProps) {
@@ -30,9 +31,8 @@ function PromptSelector({ selectedPrompt, onSelectPrompt }: PromptSelectorProps)
         onChange={(event) => onSelectPrompt(event.target.value as PromptType | '')}
         className="config-choice-select"
       >
-        <option value="">Selecciona un tipo de prompt</option>
         {promptOptions.map((option) => (
-          <option key={option.value} value={option.value}>
+          <option key={option.value || 'placeholder'} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
         ))}

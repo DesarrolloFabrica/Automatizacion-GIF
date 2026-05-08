@@ -2,9 +2,10 @@
 import BackButton from '../components/BackButton'
 import DetectedGranulesPreview from '../components/DetectedGranulesPreview'
 import FileDropzone from '../components/FileDropzone'
+import JobProgressPanel from '../components/JobProgressPanel'
 import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
-import type { GenerationStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
+import type { GenerationStatus, GranuleMaterials, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
@@ -22,8 +23,9 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const [status, setStatus] = useState<GenerationStatus>('pendiente')
   const [isGenerating, setIsGenerating] = useState(false)
   const [generatedDocuments, setGeneratedDocuments] = useState<string[]>([])
+  const [materialesByGranule, setMaterialesByGranule] = useState<GranuleMaterials[]>([])
   const [jobId, setJobId] = useState<string | null>(null)
-  const [, setJobLogs] = useState<string[]>([])
+  const [jobLogs, setJobLogs] = useState<string[]>([])
   const [generationMessage, setGenerationMessage] = useState('La generación puede tardar aproximadamente 20 minutos.')
   const pollRef = useRef<number | null>(null)
   const pipelineCardRef = useRef<HTMLElement | null>(null)
@@ -32,6 +34,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const prevIsGeneratingRef = useRef(false)
   const canUploadSyllabus = Boolean(selectedPrompt)
   const hasSyllabus = Boolean(selectedFile)
+  const isEspecializacion = selectedPrompt === 'especializacion'
 
   const alignTopWithViewport = useCallback((el: HTMLElement | null) => {
     if (!el) return
@@ -59,6 +62,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const resetForNewSyllabus = () => {
     setStatus('pendiente')
     setGeneratedDocuments([])
+    setMaterialesByGranule([])
     setIsGenerating(false)
     setJobLogs([])
     setJobId(null)
@@ -70,6 +74,35 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setDetectedGranules([])
     setIsAnalyzingSyllabus(false)
     clearPolling()
+  }
+
+  const parseMaterialesFromLogs = (logs: string[]): GranuleMaterials[] => {
+    const granuleMap = new Map<string, GranuleMaterials>()
+
+    for (const line of logs) {
+      const match = line.match(/Material guardado:\s*(\d+)_(G\d+)_(.+?)_V\d+\.docx/i)
+      if (match) {
+        const [, nn, granuleCode, tema] = match
+        const folderName = `${granuleCode}_${tema}`
+        if (!granuleMap.has(granuleCode)) {
+          granuleMap.set(granuleCode, {
+            granuleCode,
+            granuleFolder: folderName,
+            files: [],
+            totalMaterials: 0,
+          })
+        }
+        const granuleMat = granuleMap.get(granuleCode)!
+        granuleMat.files.push({
+          granule: granuleCode,
+          name: `${nn}_${granuleCode}_${tema}_V01.docx`,
+          relativePath: `materiales_especializacion/${folderName}/${nn}_${granuleCode}_${tema}_V01.docx`,
+        })
+        granuleMat.totalMaterials = granuleMat.files.length
+      }
+    }
+
+    return Array.from(granuleMap.values()).sort((a, b) => a.granuleCode.localeCompare(b.granuleCode))
   }
 
   const analyzeSyllabusPreview = async (file: File) => {
@@ -92,12 +125,17 @@ function GranulesView({ onBack }: GranulesViewProps) {
       }
 
       const preview = payload as SyllabusPreviewResponse
-      setSubjectName(preview.subjectName || '')
-      setProgramName(preview.programName ?? '')
-      setDetectedGranules(preview.detectedTopics.map((topic) => ({ id: `G${topic.index}`, label: topic.title })))
+      const selectedCourse = preview.selectedCourse
+      const selectedTopics = selectedCourse?.temas?.length
+        ? selectedCourse.temas.map((title, index) => ({ index: index + 1, title }))
+        : preview.detectedTopics
 
-      if (preview.detectedTopics.length === 0) {
-        setPreviewMessage('No se encontraron contenidos en la estructura temática')
+      setSubjectName(selectedCourse?.asignatura || preview.subjectName || '')
+      setProgramName(preview.programName ?? '')
+      setDetectedGranules(selectedTopics.map((topic) => ({ id: `G${topic.index}`, label: topic.title })))
+
+      if (selectedTopics.length === 0) {
+        setPreviewMessage('No se encontraron contenidos en la estructura temática. Revisa que el syllabus tenga la sección 5. ESTRUCTURA TEMÁTICA con columna Contenidos.')
       } else {
         setPreviewMessage('')
       }
@@ -113,14 +151,18 @@ function GranulesView({ onBack }: GranulesViewProps) {
   }
 
   const handleGenerate = async () => {
-    if (!selectedFile || !selectedPrompt || isGenerating) return
+    if (!selectedFile || !selectedPrompt || isGenerating || detectedGranules.length === 0) return
 
     setIsGenerating(true)
     setJobLogs([])
     setGeneratedDocuments([])
+    setMaterialesByGranule([])
     setJobId(null)
     setStatus('leyendo syllabus')
-    setGenerationMessage('La generación puede tardar aproximadamente 20 minutos.')
+    setGenerationMessage(isEspecializacion
+      ? 'La generación puede tardar aproximadamente 30-45 minutos (gránulos + materiales de especialización).'
+      : 'La generación puede tardar aproximadamente 20 minutos.'
+    )
     clearPolling()
 
     try {
@@ -150,6 +192,11 @@ function GranulesView({ onBack }: GranulesViewProps) {
           const payload = (await statusResponse.json()) as JobStatusResponse
           setStatus(payload.progressStep)
           setJobLogs(payload.logs ?? [])
+
+          if (isEspecializacion) {
+            const parsedMateriales = parseMaterialesFromLogs(payload.logs ?? [])
+            setMaterialesByGranule(parsedMateriales)
+          }
 
           if (payload.status === 'completed') {
             setGeneratedDocuments(payload.files ?? [])
@@ -278,20 +325,32 @@ function GranulesView({ onBack }: GranulesViewProps) {
             />
 
             {hasSyllabus && (
-              <DetectedGranulesPreview
-                ref={pipelineCardRef}
-                fileName={selectedFile?.name ?? null}
-                subjectName={subjectName}
-                programName={programName}
-                selectedPrompt={(selectedPrompt || 'pregrado') as PromptType}
-                granules={detectedGranules}
-                isAnalyzing={isAnalyzingSyllabus}
-                previewMessage={previewMessage}
-                generationMessage={generationMessage}
-                isGenerating={isGenerating}
-                canGenerate={Boolean(selectedFile)}
-                onGenerate={handleGenerate}
-              />
+              <>
+                <DetectedGranulesPreview
+                  ref={pipelineCardRef}
+                  fileName={selectedFile?.name ?? null}
+                  subjectName={subjectName}
+                  programName={programName}
+                  selectedPrompt={(selectedPrompt || 'pregrado') as PromptType}
+                  granules={detectedGranules}
+                  isAnalyzing={isAnalyzingSyllabus}
+                  previewMessage={previewMessage}
+                  generationMessage={generationMessage}
+                  isGenerating={isGenerating}
+                  canGenerate={Boolean(selectedFile) && detectedGranules.length > 0}
+                  onGenerate={handleGenerate}
+                />
+                <JobProgressPanel
+                  status={status}
+                  logs={jobLogs}
+                  granules={detectedGranules}
+                  isGenerating={isGenerating}
+                  isError={status === 'error'}
+                  generatedFilesCount={generatedDocuments.length}
+                  totalMaterialsExpected={30}
+                  onRetry={handleGenerate}
+                />
+              </>
             )}
           </>
         )}
@@ -301,6 +360,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
             ref={resultsPanelRef}
             jobId={jobId}
             documents={generatedDocuments}
+            materialesByGranule={materialesByGranule}
             isVisible={status === 'finalizado'}
           />
         )}

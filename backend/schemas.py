@@ -21,11 +21,22 @@ class PreviewTopic(BaseModel):
     title: str
 
 
+class DetectedCourse(BaseModel):
+    asignatura: str
+    programa: str
+    escuela: str
+    semestre: str
+    temas: list[str]
+
+
 class SyllabusPreviewResponse(BaseModel):
     fileName: str
     subjectName: str
+    programName: str
     detectedTopics: list[PreviewTopic]
     totalGranules: int
+    coursesDetected: list[DetectedCourse] = []
+    selectedCourse: DetectedCourse | None = None
 
 
 class DriveUploadLink(BaseModel):
@@ -64,3 +75,25 @@ class ScriptsLocalJobStatusResponse(BaseModel):
     progressStep: str
     logs: list[str]
     files: list[LocalGeneratedFile]
+
+
+class MaterialFile(BaseModel):
+    granule: str
+    name: str
+    relativePath: str
+
+
+class GranuleMaterials(BaseModel):
+    granuleCode: str
+    granuleFolder: str
+    files: list[MaterialFile]
+    totalMaterials: int
+
+
+class EspecializacionJobStatusResponse(BaseModel):
+    jobId: str
+    status: str
+    progressStep: str
+    logs: list[str]
+    files: list[str]
+    granulesMaterials: list[GranuleMaterials]

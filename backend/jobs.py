@@ -156,35 +156,47 @@ def run_subprocess_job(
     parse_drive_uploads: bool = False,
     job_kind: str = "granules",
     files_listing_fn: Callable[[str], list[str]] | None = None,
+    chain_command: list[str] | None = None,
+    chain_commands: list[list[str]] | None = None,
+    chain_labels: list[str] | None = None,
 ) -> None:
     set_job_running(job_id, initial_progress_step)
-    append_log(job_id, f"Ejecutando comando: {' '.join(command)}")
 
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env_vars or os.environ.copy(),
+        if job_kind.startswith("granules"):
+            append_log(job_id, "=== FASE 1: GENERACIÓN DE GRÁNULOS ===")
+        return_code = _run_command_and_stream_logs(
+            job_id=job_id,
+            command=command,
+            cwd=cwd,
+            env_vars=env_vars,
+            progress_map=progress_map,
+            parse_drive_uploads=parse_drive_uploads,
         )
-
-        assert process.stdout is not None
-        for line in process.stdout:
-            append_log(job_id, line)
-            if parse_drive_uploads:
-                parsed = parse_drive_upload_line(line)
-                if parsed:
-                    with _LOCK:
-                        _JOBS[job_id].drive_links.append(parsed)
-            update_progress_from_log(job_id, line, progress_map)
-
-        return_code = process.wait()
-        append_log(job_id, f"Proceso finalizado con código: {return_code}")
         success = return_code == 0
+
+        commands_to_chain = chain_commands or ([chain_command] if chain_command else [])
+        labels = chain_labels or []
+        for index, chained in enumerate(commands_to_chain):
+            if not success:
+                break
+            label = labels[index] if index < len(labels) else f"FASE ENCADENADA {index + 2}"
+            append_log(job_id, label)
+            try:
+                chain_return = _run_command_and_stream_logs(
+                    job_id=job_id,
+                    command=chained,
+                    cwd=cwd,
+                    env_vars=env_vars,
+                    progress_map=progress_map,
+                    parse_drive_uploads=False,
+                )
+                append_log(job_id, f"Fase encadenada finalizada con código: {chain_return}")
+                success = chain_return == 0
+            except Exception as chain_exc:
+                append_log(job_id, f"Error en fase encadenada: {chain_exc}")
+                success = False
+
         if files_listing_fn is not None:
             set_job_finished(job_id, success=success, files_listing_fn=files_listing_fn)
         elif job_kind == "scripts":
@@ -193,6 +205,41 @@ def run_subprocess_job(
             set_job_finished(job_id, success=success)
     except Exception as exc:
         set_job_failed_with_message(job_id, f"Error al ejecutar el proceso: {exc}")
+
+
+def _run_command_and_stream_logs(
+    job_id: str,
+    command: list[str],
+    cwd: Path,
+    env_vars: dict[str, str] | None,
+    progress_map: dict[str, str] | None,
+    parse_drive_uploads: bool,
+) -> int:
+    append_log(job_id, f"Ejecutando comando: {' '.join(command)}")
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env_vars or os.environ.copy(),
+    )
+
+    assert process.stdout is not None
+    for line in process.stdout:
+        append_log(job_id, line)
+        if parse_drive_uploads:
+            parsed = parse_drive_upload_line(line)
+            if parsed:
+                with _LOCK:
+                    _JOBS[job_id].drive_links.append(parsed)
+        update_progress_from_log(job_id, line, progress_map)
+
+    return_code = process.wait()
+    append_log(job_id, f"Proceso finalizado con código: {return_code}")
+    return return_code
 
 
 def start_job_thread(
@@ -206,6 +253,9 @@ def start_job_thread(
     parse_drive_uploads: bool = False,
     job_kind: str = "granules",
     files_listing_fn: Callable[[str], list[str]] | None = None,
+    chain_command: list[str] | None = None,
+    chain_commands: list[list[str]] | None = None,
+    chain_labels: list[str] | None = None,
 ) -> None:
     kwargs: dict[str, Any] = {
         "initial_progress_step": initial_progress_step,
@@ -213,6 +263,9 @@ def start_job_thread(
         "parse_drive_uploads": parse_drive_uploads,
         "job_kind": job_kind,
         "files_listing_fn": files_listing_fn,
+        "chain_command": chain_command,
+        "chain_commands": chain_commands,
+        "chain_labels": chain_labels,
     }
     thread = threading.Thread(
         target=run_subprocess_job,

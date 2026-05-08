@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from jobs import create_job, get_job, start_job_thread
 from schemas import (
+    DetectedCourse,
     DriveUploadLink,
     JobCreateResponse,
     JobStatusResponse,
@@ -26,10 +27,14 @@ from schemas import (
 from storage import (
     PROJECT_ROOT,
     create_docs_zip,
+    create_full_outputs_zip,
     create_outputs_zip,
     ensure_job_dirs,
     get_job_paths,
+    list_especializacion_files,
+    list_generated_docx,
     list_generated_files,
+    list_pipeline_local_files,
     save_local_granules,
     save_syllabus_file,
 )
@@ -37,7 +42,7 @@ from storage import (
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from automation_engine.generate_guiones import extract_course_plan  # noqa: E402
+from automation_engine.generate_guiones import extract_course_plan, parse_syllabus_docx  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -69,6 +74,71 @@ SCRIPTS_LOCAL_PROGRESS_MAP = {
     "guardado:": "preparando descargas",
     "=== resumen ===": "finalizado",
 }
+
+GRANULES_PROGRESS_MAP = {
+    "plan detectado": "detectando estructura temática",
+    "prompt seleccionado": "preparando prompts",
+    "nivel seleccionado": "preparando prompts",
+    "generando documento": "generando documentos",
+    "guardado:": "generando gránulos",
+}
+
+ESPECIALIZACION_PROGRESS_MAP = {
+    "=== fase 1: generación de gránulos ===": "generando gránulos",
+    "=== fase 2: pipeline local txt/docx ===": "generando txt",
+    "=== fase 3: materiales de especialización ===": "generando materiales especialización",
+    "plan detectado": "detectando estructura temática",
+    "prompt seleccionado": "preparando prompts",
+    "nivel seleccionado": "preparando prompts",
+    "=== fase 1: generacion de txt ===": "generando txt",
+    "generando txt": "generando txt",
+    "=== fase 2: generacion de docx ===": "generando docx",
+    "llamando al modelo": "generando docx",
+    "=== fase: generacion de materiales": "generando materiales especialización",
+    "generando material:": "generando materiales especialización",
+    "material guardado:": "generando materiales especialización",
+    "error material": "generando materiales especialización",
+    "generando documento": "generando documentos",
+    "summary guardado:": "organizando archivos",
+    "manifest guardado:": "organizando archivos",
+    "errors guardado:": "organizando archivos",
+    "=== resumen ===": "finalizado",
+    "gránulos procesados:": "finalizado",
+    "materiales generados:": "finalizado",
+}
+
+
+def list_generated_docx_with_materiales(job_id: str) -> list[str]:
+    docx_files = list_generated_docx(job_id)
+    pipeline_files = [f"pipeline_local/{p.name}" for p in list_pipeline_local_files(job_id)]
+    mat_files = list_especializacion_files(job_id)
+    all_files = docx_files + pipeline_files + [f["name"] for f in mat_files]
+    return sorted(all_files)
+
+
+def _build_especializacion_chain_commands(job_id: str, paths: dict[str, Path]) -> list[list[str]]:
+    return [
+        [
+            sys.executable,
+            "-m",
+            "automation_engine.generate_pipeline_local",
+            "--input-dir",
+            str(paths["generated_dir"]),
+            "--output-dir",
+            str(paths["pipeline_local_dir"]),
+        ],
+        [
+            sys.executable,
+            "-m",
+            "automation_engine.generate_materiales_especializacion",
+            "--job-id",
+            job_id,
+            "--generated-dir",
+            str(paths["generated_dir"]),
+            "--output-dir",
+            str(paths["materiales_dir"]),
+        ],
+    ]
 
 
 def extract_drive_folder_id(value: str) -> str:
@@ -134,15 +204,47 @@ async def syllabus_preview(syllabus: UploadFile = File(...)) -> SyllabusPreviewR
 
     preview_id = f"preview_{uuid.uuid4().hex[:10]}"
     saved_path = save_syllabus_file(preview_id, syllabus.file)
-    plan = extract_course_plan(saved_path)
 
-    topics = [{"index": index, "title": topic} for index, topic in enumerate(plan.temas, start=1)]
+    parsed = parse_syllabus_docx(saved_path)
+    courses = parsed.coursesDetected
+    primary_course = parsed.selectedCourse if parsed.selectedCourse else extract_course_plan(saved_path)
+
+    print(f"[preview] Programa global detectado: {parsed.program or primary_course.programa or ''}")
+    print(f"[preview] Total coursesDetected: {len(courses)}")
+    for index, course in enumerate(courses, start=1):
+        first_topic = course.temas[0] if course.temas else ""
+        print(
+            f"[preview] Curso {index}: subject={course.asignatura} | "
+            f"semester={course.semestre} | topics_count={len(course.temas)} | first_topic={first_topic}"
+        )
+
+    topics = [{"index": index, "title": topic} for index, topic in enumerate(primary_course.temas, start=1)]
+
+    courses_detected = [
+        DetectedCourse(
+            asignatura=c.asignatura,
+            programa=c.programa,
+            escuela=c.escuela,
+            semestre=c.semestre,
+            temas=c.temas,
+        )
+        for c in courses
+    ]
 
     return SyllabusPreviewResponse(
         fileName=file_name,
-        subjectName=plan.asignatura or "",
+        subjectName=primary_course.asignatura or "",
+        programName=parsed.program or primary_course.programa or "",
         detectedTopics=topics,
         totalGranules=len(topics),
+        coursesDetected=courses_detected,
+        selectedCourse=DetectedCourse(
+            asignatura=primary_course.asignatura,
+            programa=parsed.program or primary_course.programa,
+            escuela=parsed.school or primary_course.escuela,
+            semestre=primary_course.semestre,
+            temas=primary_course.temas,
+        ),
     )
 
 
@@ -162,7 +264,10 @@ async def create_generation_job(
     paths = ensure_job_dirs(job_id)
     save_syllabus_file(job_id, syllabus.file)
 
-    create_job(job_id=job_id, log_path=paths["log_path"], generated_dir=paths["generated_dir"])
+    is_especializacion = nivel == "especializacion"
+    job_kind = "granules_especializacion" if is_especializacion else "granules"
+
+    create_job(job_id=job_id, log_path=paths["log_path"], generated_dir=paths["generated_dir"], job_kind=job_kind)
 
     command = [
         sys.executable,
@@ -175,7 +280,30 @@ async def create_generation_job(
         "--output-dir",
         str(paths["generated_dir"]),
     ]
-    start_job_thread(job_id=job_id, command=command, cwd=PROJECT_ROOT, env_vars=os.environ.copy())
+
+    if is_especializacion:
+        progress_map = ESPECIALIZACION_PROGRESS_MAP
+        files_listing_fn = lambda j: list_generated_docx_with_materiales(j)
+    else:
+        progress_map = GRANULES_PROGRESS_MAP
+        files_listing_fn = None
+
+    start_job_thread(
+        job_id=job_id,
+        command=command,
+        cwd=PROJECT_ROOT,
+        env_vars=os.environ.copy(),
+        initial_progress_step="leyendo syllabus",
+        progress_map=progress_map,
+        parse_drive_uploads=False,
+        job_kind=job_kind,
+        files_listing_fn=files_listing_fn,
+        chain_commands=_build_especializacion_chain_commands(job_id, paths) if is_especializacion else None,
+        chain_labels=[
+            "=== FASE 2: PIPELINE LOCAL TXT/DOCX ===",
+            "=== FASE 3: MATERIALES DE ESPECIALIZACIÓN ===",
+        ] if is_especializacion else None,
+    )
 
     return JobCreateResponse(jobId=job_id, status="queued")
 
@@ -409,6 +537,10 @@ def download_all_generated_files(job_id: str) -> FileResponse:
 
     if not job.files:
         raise HTTPException(status_code=404, detail="No hay archivos para descargar.")
+
+    if job.job_kind == "granules_especializacion":
+        zip_path = create_full_outputs_zip(job_id)
+        return FileResponse(path=zip_path, filename=f"granulos_y_materiales_{job_id}.zip", media_type="application/zip")
 
     zip_path = create_docs_zip(job_id)
     return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
