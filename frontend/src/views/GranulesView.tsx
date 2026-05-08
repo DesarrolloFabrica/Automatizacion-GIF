@@ -4,8 +4,7 @@ import DetectedGranulesPreview from '../components/DetectedGranulesPreview'
 import FileDropzone from '../components/FileDropzone'
 import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
-import ScriptAudienceSelector from '../components/ScriptAudienceSelector'
-import type { GenerationStatus, JobStatusResponse, PromptType, ScriptType, SyllabusPreviewResponse } from '../types/granules'
+import type { GenerationStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
@@ -15,9 +14,9 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const apiBaseUrl = 'http://localhost:8000'
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>('')
-  const [scriptType, setScriptType] = useState<ScriptType | ''>('')
   const [detectedGranules, setDetectedGranules] = useState<Array<{ id: string; label: string }>>([])
   const [subjectName, setSubjectName] = useState('')
+  const [programName, setProgramName] = useState('')
   const [isAnalyzingSyllabus, setIsAnalyzingSyllabus] = useState(false)
   const [previewMessage, setPreviewMessage] = useState('')
   const [status, setStatus] = useState<GenerationStatus>('pendiente')
@@ -31,7 +30,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const resultsPanelRef = useRef<HTMLElement | null>(null)
   const prevAnalyzingSyllabusRef = useRef(false)
   const prevIsGeneratingRef = useRef(false)
-  const canUploadSyllabus = Boolean(selectedPrompt && scriptType)
+  const canUploadSyllabus = Boolean(selectedPrompt)
   const hasSyllabus = Boolean(selectedFile)
 
   const alignTopWithViewport = useCallback((el: HTMLElement | null) => {
@@ -64,6 +63,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setJobLogs([])
     setJobId(null)
     setSubjectName('')
+    setProgramName('')
     setPreviewMessage('')
     setGenerationMessage('La generación puede tardar aproximadamente 20 minutos.')
     setSelectedFile(null)
@@ -93,6 +93,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
 
       const preview = payload as SyllabusPreviewResponse
       setSubjectName(preview.subjectName || '')
+      setProgramName(preview.programName ?? '')
       setDetectedGranules(preview.detectedTopics.map((topic) => ({ id: `G${topic.index}`, label: topic.title })))
 
       if (preview.detectedTopics.length === 0) {
@@ -104,6 +105,8 @@ function GranulesView({ onBack }: GranulesViewProps) {
       const message = error instanceof Error ? error.message : 'Error analizando syllabus.'
       setPreviewMessage(message)
       setDetectedGranules([])
+      setSubjectName('')
+      setProgramName('')
     } finally {
       setIsAnalyzingSyllabus(false)
     }
@@ -185,11 +188,6 @@ function GranulesView({ onBack }: GranulesViewProps) {
     handleReset()
   }
 
-  const handleScriptTypeChange = (type: ScriptType | '') => {
-    setScriptType(type)
-    handleReset()
-  }
-
   useEffect(() => () => clearPolling(), [])
 
   useEffect(() => {
@@ -244,13 +242,14 @@ function GranulesView({ onBack }: GranulesViewProps) {
 
         <section className="grid-layout granules-config-grid">
           <PromptSelector selectedPrompt={selectedPrompt} onSelectPrompt={handlePromptChange} />
-          <ScriptAudienceSelector selectedType={scriptType} onSelectType={handleScriptTypeChange} />
         </section>
 
         {!canUploadSyllabus && (
           <section className="action-card granule-card setup-card">
-            <p className="muted">Selecciona el tipo de prompt y el tipo de guion para continuar.</p>
-            <p className="card-description">Esta configuración define el enfoque con el que se prepararán los gránulos.</p>
+            <p className="muted">Selecciona el tipo de prompt (nivel académico) para continuar.</p>
+            <p className="card-description">
+              Esta configuración define el enfoque con el que se prepararán los gránulos a partir del syllabus.
+            </p>
           </section>
         )}
 
@@ -283,6 +282,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
                 ref={pipelineCardRef}
                 fileName={selectedFile?.name ?? null}
                 subjectName={subjectName}
+                programName={programName}
                 selectedPrompt={(selectedPrompt || 'pregrado') as PromptType}
                 granules={detectedGranules}
                 isAnalyzing={isAnalyzingSyllabus}

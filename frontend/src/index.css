@@ -218,8 +218,24 @@ body {
   margin: 0;
   font-size: clamp(2rem, 4vw, 3rem);
   font-weight: 800;
-  color: var(--text-title);
   line-height: 1.15;
+  color: var(--text-title);
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .home-title {
+    background-image: linear-gradient(
+      108deg,
+      var(--blue-institutional) 0%,
+      #1a136e 38%,
+      #6d28d9 72%,
+      #7e22ce 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
 }
 
 /* Flow cards grid */
@@ -1459,22 +1475,66 @@ h2 {
   margin-top: 4px;
 }
 
+/* Card base */
 .pipeline-metric-card {
+  position: relative;
+  z-index: 1;
+
   display: flex;
   flex-direction: column;
   gap: 10px;
+
+  min-height: 120px;
+  height: 120px;
+
   padding: 16px 16px 14px;
   border-radius: 22px;
   background: rgba(255,255,255,0.82);
   border: 1px solid rgba(140,160,190,0.14);
   box-shadow: 0 10px 24px rgba(20,40,90,0.04);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
-  min-height: 120px;
+
+  overflow: hidden;
+
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    height 0.25s ease;
 }
 
+/* Al hacer hover, la card deja de tener altura fija */
 .pipeline-metric-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 28px rgba(20,40,90,0.07);
+  z-index: 50;
+
+  height: auto;
+  min-height: 120px;
+  overflow: visible;
+
+  transform: translateY(-3px);
+  box-shadow: 0 18px 40px rgba(20,40,90,0.10);
+}
+
+/* Contenedor interno */
+.pipeline-metric-card-content {
+  overflow: hidden;
+}
+
+/* En hover, el contenido interno también se libera */
+.pipeline-metric-card:hover .pipeline-metric-card-content {
+  overflow: visible;
+}
+
+/* Quita cualquier recorte del texto */
+.pipeline-metric-card:hover .pipeline-metric-copy,
+.pipeline-metric-card:hover .fade-overflow {
+  max-height: none;
+  height: auto;
+  overflow: visible;
+  white-space: normal;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  -webkit-mask-image: none;
+  mask-image: none;
+  display: block;
 }
 
 .pipeline-metric-top {
@@ -1513,9 +1573,19 @@ h2 {
 }
 
 .fade-overflow {
-  position: relative;
-  max-height: 76px;
   overflow: hidden;
+
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0,0,0,1) 68%,
+    rgba(0,0,0,0)
+  );
+
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0,0,0,1) 68%,
+    rgba(0,0,0,0)
+  );
 }
 
 .fade-overflow::after {

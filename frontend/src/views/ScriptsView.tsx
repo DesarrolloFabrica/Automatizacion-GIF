@@ -361,6 +361,14 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
                     >
                       {isGenerating ? 'Generando materiales…' : 'Generar materiales'}
                     </button>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={handleGenerate}
+                      disabled={!formValid || isGenerating}
+                    >
+                      {isGenerating ? 'Generando materiales…' : 'Generar guion presentadoras'}
+                    </button>
                   </section>
                 </div>
               </div>
@@ -477,6 +485,15 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
                         disabled={!localFormValid || localIsGenerating}
                       >
                         {localIsGenerating ? 'Generando materiales…' : 'Generar materiales'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={handleGenerateLocal}
+                        disabled={!localFormValid || localIsGenerating}
+                      >
+                        {localIsGenerating ? 'Generando materiales…' : 'Generar guion presentadoras'}
                       </button>
                     </section>
                   </div>

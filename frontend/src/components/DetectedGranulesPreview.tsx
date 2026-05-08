@@ -4,6 +4,7 @@ import type { GranuleTopic, PromptType } from '../types/granules'
 interface DetectedGranulesPreviewProps {
   fileName: string | null
   subjectName: string
+  programName: string
   selectedPrompt: PromptType
   granules: GranuleTopic[]
   isAnalyzing: boolean
@@ -25,6 +26,7 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
   {
     fileName,
     subjectName,
+    programName,
     selectedPrompt,
     granules,
     isAnalyzing,
@@ -53,12 +55,14 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
 
       <div className="preview-grid preview-metric-grid pipeline-metric-grid">
         <div className="preview-metric-card pipeline-metric-card">
-          <div className="pipeline-metric-top">
-            <div className="pipeline-metric-icon" aria-hidden="true">📄</div>
-            <span>ARCHIVO CARGADO</span>
-          </div>
-          <div className="pipeline-metric-copy fade-overflow">
-            <strong>{fileName ?? 'Pendiente por cargar'}</strong>
+          <div className="pipeline-metric-card-content">
+              <div className="pipeline-metric-top">
+              <div className="pipeline-metric-icon" aria-hidden="true">📄</div>
+              <span>ARCHIVO CARGADO</span>
+            </div>
+            <div className="pipeline-metric-copy fade-overflow">
+              <strong>{fileName ?? 'Pendiente por cargar'}</strong>
+            </div>
           </div>
         </div>
         <div className="preview-metric-card pipeline-metric-card">
@@ -72,7 +76,9 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
         </div>
         <div className="preview-metric-card pipeline-metric-card">
           <div className="pipeline-metric-top">
-            <div className="pipeline-metric-icon" aria-hidden="true">🎓</div>
+            <div className="pipeline-metric-icon" aria-hidden="true">
+              🎓
+            </div>
             <span>ASIGNATURA DETECTADA</span>
           </div>
           <div className="pipeline-metric-copy fade-overflow">
@@ -81,7 +87,20 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
         </div>
         <div className="preview-metric-card pipeline-metric-card">
           <div className="pipeline-metric-top">
-            <div className="pipeline-metric-icon" aria-hidden="true">#</div>
+            <div className="pipeline-metric-icon" aria-hidden="true">
+              📚
+            </div>
+            <span>PROGRAMA DETECTADO</span>
+          </div>
+          <div className="pipeline-metric-copy fade-overflow">
+            <strong>{programName || 'Sin detectar'}</strong>
+          </div>
+        </div>
+        <div className="preview-metric-card pipeline-metric-card">
+          <div className="pipeline-metric-top">
+            <div className="pipeline-metric-icon" aria-hidden="true">
+              #
+            </div>
             <span>TOTAL DE GRÁNULOS</span>
           </div>
           <div className="pipeline-metric-copy">

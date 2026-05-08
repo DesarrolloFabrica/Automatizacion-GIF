@@ -23,6 +23,7 @@ export interface PreviewTopicResponse {
 export interface SyllabusPreviewResponse {
   fileName: string
   subjectName: string
+  programName: string
   detectedTopics: PreviewTopicResponse[]
   totalGranules: number
 }
