@@ -274,11 +274,6 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
 
   return (
     <div className="scripts-view">
-      <div className="scripts-view-bg">
-        <div className="bg-gradient-tl" />
-        <div className="bg-grid-pattern" />
-      </div>
-
       <div className="scripts-view-content">
         <div className="view-header">
           <BackButton onBack={onBack} />

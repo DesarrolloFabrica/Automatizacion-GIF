@@ -7,47 +7,11 @@ interface HomeViewProps {
 function HomeView({ onNavigate }: HomeViewProps) {
   return (
     <div className="home-view">
-      <div className="home-bg-decorations">
-        <div className="bg-gradient-tl" />
-        <div className="bg-gradient-br" />
-        <div className="bg-grid-pattern" />
-      </div>
-
       <div className="home-content">
         <header className="home-hero">
           <span className="home-badge">Automatización académica inteligente</span>
           <h1 className="home-title">Selecciona el flujo de trabajo</h1>
-          <p className="home-subtitle">
-            Genera materiales académicos estructurados desde syllabus o gránulos previamente creados.
-          </p>
         </header>
-
-        <div className="pipeline-visual">
-          <div className="pipeline-step">
-            <span className="pipeline-icon">📄</span>
-            <span className="pipeline-label">Syllabus</span>
-          </div>
-          <div className="pipeline-arrow">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M5 12h14" />
-              <path d="M12 5l7 7-7 7" />
-            </svg>
-          </div>
-          <div className="pipeline-step">
-            <span className="pipeline-icon">🔬</span>
-            <span className="pipeline-label">Gránulos</span>
-          </div>
-          <div className="pipeline-arrow">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M5 12h14" />
-              <path d="M12 5l7 7-7 7" />
-            </svg>
-          </div>
-          <div className="pipeline-step">
-            <span className="pipeline-icon">🎬</span>
-            <span className="pipeline-label">Guiones</span>
-          </div>
-        </div>
 
         <div className="flow-cards-grid">
           <FlowCard
@@ -69,7 +33,7 @@ function HomeView({ onNavigate }: HomeViewProps) {
               'Descarga individual o masiva',
             ]}
             ctaLabel="Iniciar creación de gránulos"
-            statusLabel="Disponible"
+            statusLabel="DISPONIBLE"
             statusVariant="available"
             onClick={() => onNavigate('granules')}
           />
@@ -89,7 +53,7 @@ function HomeView({ onNavigate }: HomeViewProps) {
               'Flujo académico coherente',
             ]}
             ctaLabel="Iniciar creación de guiones"
-            statusLabel="Vista inicial preparada"
+            statusLabel="VISTA INICIAL PREPARADA"
             statusVariant="preview"
             onClick={() => onNavigate('scripts')}
           />
@@ -103,30 +67,6 @@ function HomeView({ onNavigate }: HomeViewProps) {
           <span className="cap-chip">Moodle-ready</span>
           <span className="cap-chip">Flujo académico</span>
         </div>
-
-        <section className="home-how-it-works">
-          <h2 className="how-title">Cómo funciona</h2>
-          <p className="how-subtitle">
-            Primero convierte un syllabus en gránulos. Luego convierte cada gránulo en guiones instruccionales.
-          </p>
-          <div className="how-steps">
-            <div className="how-step">
-              <div className="how-step-number">1</div>
-              <h3 className="how-step-title">Carga</h3>
-              <p className="how-step-desc">Sube tu syllabus o gránulo en formato .docx</p>
-            </div>
-            <div className="how-step">
-              <div className="how-step-number">2</div>
-              <h3 className="how-step-title">Procesamiento IA</h3>
-              <p className="how-step-desc">El sistema analiza la estructura y prepara los prompts</p>
-            </div>
-            <div className="how-step">
-              <div className="how-step-number">3</div>
-              <h3 className="how-step-title">Documentos listos</h3>
-              <p className="how-step-desc">Descarga los documentos generados listos para usar</p>
-            </div>
-          </div>
-        </section>
 
         <footer className="home-footer">
           <p>Automatización académica inteligente — Plataforma de generación de materiales educativos</p>

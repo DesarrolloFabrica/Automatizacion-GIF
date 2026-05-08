@@ -14,15 +14,21 @@ const promptOptions: Array<{ value: PromptType; label: string }> = [
 
 function PromptSelector({ selectedPrompt, onSelectPrompt }: PromptSelectorProps) {
   return (
-    <article className="card">
-      <h2>Tipo de prompt</h2>
-      <p className="card-description">Selecciona el nivel académico para definir el prompt que se usará en la generación.</p>
+    <article className="config-choice-card config-choice-card--prompt">
+      <div className="config-choice-top">
+        <span className="config-choice-badge">CONFIGURACIÓN</span>
+        <span className="config-choice-step">Paso 1</span>
+      </div>
 
-      {/* Select controlado para reflejar siempre el estado actual en el preview. */}
+      <div className="config-choice-content">
+        <h2>Tipo de prompt</h2>
+        <p>Selecciona el nivel académico para definir el prompt que se usará en la generación.</p>
+      </div>
+
       <select
         value={selectedPrompt}
         onChange={(event) => onSelectPrompt(event.target.value as PromptType | '')}
-        className="select-input"
+        className="config-choice-select"
       >
         <option value="">Selecciona un tipo de prompt</option>
         {promptOptions.map((option) => (

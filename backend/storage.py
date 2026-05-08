@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
+import re
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -51,5 +52,47 @@ def create_docs_zip(job_id: str) -> Path:
     docx_files = sorted(paths["generated_dir"].glob("*.docx"))
     with ZipFile(paths["zip_path"], "w", compression=ZIP_DEFLATED) as zip_file:
         for file_path in docx_files:
+            zip_file.write(file_path, arcname=file_path.name)
+    return paths["zip_path"]
+
+
+def _safe_local_name(name: str) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", (name or "").strip())
+    cleaned = cleaned.replace("..", "_")
+    return cleaned or "granule.docx"
+
+
+def save_local_granules(job_id: str, upload_files) -> list[Path]:
+    paths = ensure_job_dirs(job_id)
+    saved_paths: list[Path] = []
+    for index, upload in enumerate(upload_files, start=1):
+        original = upload.filename or f"granule_{index}.docx"
+        target_name = _safe_local_name(original)
+        if not target_name.lower().endswith(".docx"):
+            target_name = f"{Path(target_name).stem}.docx"
+        target_path = paths["input_dir"] / target_name
+        with target_path.open("wb") as destination:
+            shutil.copyfileobj(upload.file, destination)
+        saved_paths.append(target_path)
+    return saved_paths
+
+
+def list_generated_files(job_id: str, suffixes: tuple[str, ...] = (".docx", ".txt")) -> list[Path]:
+    paths = get_job_paths(job_id)
+    generated_dir = paths["generated_dir"]
+    if not generated_dir.exists():
+        return []
+    normalized = tuple(s.lower() for s in suffixes)
+    return sorted(
+        [path for path in generated_dir.iterdir() if path.is_file() and path.suffix.lower() in normalized],
+        key=lambda item: item.name.lower(),
+    )
+
+
+def create_outputs_zip(job_id: str, suffixes: tuple[str, ...] = (".docx", ".txt")) -> Path:
+    paths = get_job_paths(job_id)
+    files = list_generated_files(job_id, suffixes=suffixes)
+    with ZipFile(paths["zip_path"], "w", compression=ZIP_DEFLATED) as zip_file:
+        for file_path in files:
             zip_file.write(file_path, arcname=file_path.name)
     return paths["zip_path"]

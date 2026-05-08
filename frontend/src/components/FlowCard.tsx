@@ -12,24 +12,37 @@ interface FlowCardProps {
 }
 
 function FlowCard({ icon, title, description, bullets, ctaLabel, statusLabel, statusVariant, onClick }: FlowCardProps) {
+  const flowKind = statusVariant === 'available' ? 'granules' : 'scripts'
+
   return (
-    <article className="flow-card" onClick={onClick}>
-      <div className="flow-card-header">
-        <div className={`flow-card-icon flow-card-icon--${statusVariant}`}>
+    <article className={`flow-card flow-card--${flowKind}`}>
+      <div className="flow-card-top">
+        <div className="flow-card-icon" aria-hidden>
           {icon}
         </div>
-        <span className={`status-chip status-chip--${statusVariant}`}>
-          {statusLabel}
-        </span>
+        <span className="flow-card-status">{statusLabel}</span>
       </div>
-      <h3 className="flow-card-title">{title}</h3>
-      <p className="flow-card-description">{description}</p>
-      <ul className="flow-card-bullets">
+
+      <div className="flow-card-copy">
+        <h2>{title}</h2>
+        <p>{description}</p>
+      </div>
+
+      <ul className="flow-card-features">
         {bullets.map((bullet) => (
-          <li key={bullet}>{bullet}</li>
+          <li key={bullet}>
+            <span className="flow-card-feature-icon" aria-hidden>
+              ✦
+            </span>
+            <span>{bullet}</span>
+          </li>
         ))}
       </ul>
-      <button type="button" className="flow-card-cta">
+
+      <button type="button" className="flow-card-button" onClick={onClick}>
+        <span className="flow-card-button-icon" aria-hidden>
+          →
+        </span>
         {ctaLabel}
       </button>
     </article>

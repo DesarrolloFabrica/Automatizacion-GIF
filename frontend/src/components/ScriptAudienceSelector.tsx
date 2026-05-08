@@ -20,11 +20,19 @@ const scriptTypeOptions: Array<{ value: ScriptType; label: string; description: 
 
 function ScriptAudienceSelector({ selectedType, onSelectType }: ScriptAudienceSelectorProps) {
   return (
-    <article className="card">
-      <h2>Tipo de guion</h2>
-      <p className="card-description">Define el estilo de preparación de los materiales.</p>
+    <article className="config-choice-card config-choice-card--script">
+      <div className="config-choice-top">
+        <span className="config-choice-badge">ENFOQUE</span>
+        <span className="config-choice-step">Paso 2</span>
+      </div>
+
+      <div className="config-choice-content">
+        <h2>Tipo de guion</h2>
+        <p>Selecciona el enfoque con el que se prepararán los gránulos.</p>
+      </div>
+
       <select
-        className="select-input"
+        className="config-choice-select"
         value={selectedType}
         onChange={(event) => onSelectType(event.target.value as ScriptType | '')}
       >
@@ -35,11 +43,6 @@ function ScriptAudienceSelector({ selectedType, onSelectType }: ScriptAudienceSe
           </option>
         ))}
       </select>
-      {selectedType && (
-        <p className="muted" style={{ marginTop: '0.75rem' }}>
-          {scriptTypeOptions.find((item) => item.value === selectedType)?.description}
-        </p>
-      )}
     </article>
   )
 }

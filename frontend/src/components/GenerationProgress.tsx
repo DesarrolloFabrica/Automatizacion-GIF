@@ -10,12 +10,16 @@ interface GenerationProgressProps {
 
 function GenerationProgress({ status, currentStepIndex, steps, hasError, logs }: GenerationProgressProps) {
   return (
-    <article className="card">
+    <article className="card granule-card">
+      <div className="granule-card-header">
+        <span className="granule-card-kicker">PROCESAMIENTO</span>
+      </div>
+      <div className="granule-card-body">
       <h2>Estado de procesamiento</h2>
       <p className="card-description">Seguimiento visual del flujo: leer, detectar, preparar, generar y finalizar.</p>
 
       {/* El timeline comunica en qué fase va la ejecución del pipeline. */}
-      <ol className="progress-list">
+      <ol className="progress-list progress-timeline">
         {steps.map((step, index) => {
           const isCompleted = index < currentStepIndex
           const isCurrent = step === status
@@ -38,12 +42,13 @@ function GenerationProgress({ status, currentStepIndex, steps, hasError, logs }:
       </ol>
 
       {/* Logs simples para monitorear el proceso real desde FastAPI polling. */}
-      <div className="logs-box">
+      <div className="logs-box logs-console">
         {logs.length === 0 ? (
           <p className="muted">Aún no hay logs de ejecución.</p>
         ) : (
           <pre>{logs.slice(-12).join('\n')}</pre>
         )}
+      </div>
       </div>
     </article>
   )

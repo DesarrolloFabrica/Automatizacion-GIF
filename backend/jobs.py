@@ -1,16 +1,37 @@
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-import os
 from pathlib import Path
+from typing import Any, Callable
 
 from storage import list_generated_docx
 
 
 MAX_LOG_LINES = 1000
+
+SUBIDO_PATTERN = re.compile(r"Subido:\s*(.+?)\s*->\s*(.+)", re.IGNORECASE)
+
+
+def parse_drive_upload_line(line: str) -> dict[str, str] | None:
+    """Parsea líneas tipo 'Subido: archivo.docx -> https://...' del pipeline Drive."""
+    match = SUBIDO_PATTERN.search(line)
+    if not match:
+        return None
+    name = match.group(1).strip()
+    link = match.group(2).strip()
+    lower = name.lower()
+    if lower.endswith(".txt"):
+        kind = "txt"
+    elif lower.endswith(".docx"):
+        kind = "docx"
+    else:
+        kind = "unknown"
+    return {"name": name, "link": link, "kind": kind}
 
 
 @dataclass
@@ -20,8 +41,10 @@ class JobRecord:
     progress_step: str
     log_path: Path
     generated_dir: Path
+    job_kind: str = "granules"
     logs: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
+    drive_links: list[dict[str, str]] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     finished_at: str | None = None
 
@@ -30,13 +53,14 @@ _JOBS: dict[str, JobRecord] = {}
 _LOCK = threading.Lock()
 
 
-def create_job(job_id: str, log_path: Path, generated_dir: Path) -> JobRecord:
+def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str = "granules") -> JobRecord:
     record = JobRecord(
         job_id=job_id,
         status="queued",
         progress_step="pendiente",
         log_path=log_path,
         generated_dir=generated_dir,
+        job_kind=job_kind,
     )
     with _LOCK:
         _JOBS[job_id] = record
@@ -64,10 +88,18 @@ def append_log(job_id: str, line: str) -> None:
         handle.write(f"{line}\n")
 
 
-def update_progress_from_log(job_id: str, line: str) -> None:
+def update_progress_from_log(job_id: str, line: str, progress_map: dict[str, str] | None = None) -> None:
     normalized = line.lower()
-    progress_step = None
 
+    if progress_map:
+        for pattern, step in progress_map.items():
+            if pattern in normalized:
+                with _LOCK:
+                    _JOBS[job_id].progress_step = step
+                return
+        return
+
+    progress_step = None
     if "plan detectado" in normalized:
         progress_step = "detectando estructura temática"
     elif "prompt seleccionado" in normalized or "nivel seleccionado" in normalized:
@@ -82,29 +114,50 @@ def update_progress_from_log(job_id: str, line: str) -> None:
         _JOBS[job_id].progress_step = progress_step
 
 
-def set_job_running(job_id: str) -> None:
+def set_job_running(job_id: str, initial_progress_step: str = "leyendo syllabus") -> None:
     with _LOCK:
         record = _JOBS[job_id]
         record.status = "running"
-        record.progress_step = "leyendo syllabus"
+        record.progress_step = initial_progress_step
 
 
-def set_job_finished(job_id: str, success: bool) -> None:
+def set_job_finished(job_id: str, success: bool, files_listing_fn: Callable[[str], list[str]] | None = None) -> None:
     with _LOCK:
         record = _JOBS[job_id]
         record.status = "completed" if success else "failed"
         record.progress_step = "finalizado" if success else "error"
-        record.files = list_generated_docx(job_id)
+        if files_listing_fn is not None:
+            record.files = files_listing_fn(job_id)
+        elif record.job_kind == "granules":
+            record.files = list_generated_docx(job_id)
+        else:
+            record.files = []
         record.finished_at = datetime.utcnow().isoformat()
 
 
 def set_job_failed_with_message(job_id: str, message: str) -> None:
     append_log(job_id, message)
-    set_job_finished(job_id, success=False)
+    with _LOCK:
+        kind = _JOBS[job_id].job_kind
+    if kind == "granules":
+        set_job_finished(job_id, success=False)
+    else:
+        set_job_finished(job_id, success=False, files_listing_fn=lambda _: [])
 
 
-def run_generate_guiones(job_id: str, command: list[str], cwd: Path, env_vars: dict[str, str] | None = None) -> None:
-    set_job_running(job_id)
+def run_subprocess_job(
+    job_id: str,
+    command: list[str],
+    cwd: Path,
+    env_vars: dict[str, str] | None = None,
+    *,
+    initial_progress_step: str = "leyendo syllabus",
+    progress_map: dict[str, str] | None = None,
+    parse_drive_uploads: bool = False,
+    job_kind: str = "granules",
+    files_listing_fn: Callable[[str], list[str]] | None = None,
+) -> None:
+    set_job_running(job_id, initial_progress_step)
     append_log(job_id, f"Ejecutando comando: {' '.join(command)}")
 
     try:
@@ -122,15 +175,49 @@ def run_generate_guiones(job_id: str, command: list[str], cwd: Path, env_vars: d
         assert process.stdout is not None
         for line in process.stdout:
             append_log(job_id, line)
-            update_progress_from_log(job_id, line)
+            if parse_drive_uploads:
+                parsed = parse_drive_upload_line(line)
+                if parsed:
+                    with _LOCK:
+                        _JOBS[job_id].drive_links.append(parsed)
+            update_progress_from_log(job_id, line, progress_map)
 
         return_code = process.wait()
         append_log(job_id, f"Proceso finalizado con código: {return_code}")
-        set_job_finished(job_id, success=(return_code == 0))
+        success = return_code == 0
+        if files_listing_fn is not None:
+            set_job_finished(job_id, success=success, files_listing_fn=files_listing_fn)
+        elif job_kind == "scripts":
+            set_job_finished(job_id, success=success, files_listing_fn=lambda _: [])
+        else:
+            set_job_finished(job_id, success=success)
     except Exception as exc:
-        set_job_failed_with_message(job_id, f"Error al ejecutar generate_guiones.py: {exc}")
+        set_job_failed_with_message(job_id, f"Error al ejecutar el proceso: {exc}")
 
 
-def start_job_thread(job_id: str, command: list[str], cwd: Path, env_vars: dict[str, str] | None = None) -> None:
-    thread = threading.Thread(target=run_generate_guiones, args=(job_id, command, cwd, env_vars), daemon=True)
+def start_job_thread(
+    job_id: str,
+    command: list[str],
+    cwd: Path,
+    env_vars: dict[str, str] | None = None,
+    *,
+    initial_progress_step: str = "leyendo syllabus",
+    progress_map: dict[str, str] | None = None,
+    parse_drive_uploads: bool = False,
+    job_kind: str = "granules",
+    files_listing_fn: Callable[[str], list[str]] | None = None,
+) -> None:
+    kwargs: dict[str, Any] = {
+        "initial_progress_step": initial_progress_step,
+        "progress_map": progress_map,
+        "parse_drive_uploads": parse_drive_uploads,
+        "job_kind": job_kind,
+        "files_listing_fn": files_listing_fn,
+    }
+    thread = threading.Thread(
+        target=run_subprocess_job,
+        args=(job_id, command, cwd, env_vars),
+        kwargs=kwargs,
+        daemon=True,
+    )
     thread.start()
