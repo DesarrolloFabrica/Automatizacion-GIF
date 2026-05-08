@@ -285,27 +285,31 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
           </div>
         </div>
 
-        <div className="scripts-banner muted" style={{ marginBottom: '1rem', padding: '0.75rem 1rem', borderRadius: 8, background: 'rgba(59, 130, 246, 0.08)' }}>
+        <div className="scripts-banner-notice">
           El proceso puede tardar varios minutos. No cierres esta pestaña.
         </div>
 
-        <section style={{ display: 'grid', gap: '1rem', marginBottom: '1rem' }}>
-          <article className="card scripts-step-card">
+        <section className="scripts-modality-stack">
+          <article className="scripts-modality-card scripts-step-card">
             <button
               type="button"
+              className="scripts-modality-toggle"
+              aria-expanded={mode === 'drive'}
               onClick={() => setMode((prev) => (prev === 'drive' ? null : 'drive'))}
-              style={{ all: 'unset', display: 'block', cursor: 'pointer', width: '100%' }}
             >
-              <div className="scripts-step-header">
+              <div className="scripts-modality-head-row">
                 <span className="scripts-step-badge">Modalidad 1</span>
-                <h2>Generar desde Google Drive</h2>
+                <span className="scripts-modality-chevron" aria-hidden>
+                  ▼
+                </span>
               </div>
+              <h2 className="scripts-modality-title">Generar desde Google Drive</h2>
               <p className="card-description">
                 Usa una carpeta de Drive con los gránulos fuente y sube automáticamente los materiales generados.
               </p>
             </button>
             {mode === 'drive' && (
-              <>
+              <div className="scripts-modality-panel">
                 <input
                   type="text"
                   className="select-input"
@@ -315,17 +319,15 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
                   disabled={isGenerating}
                 />
                 {detectedFolderId && (
-                  <p className="muted" style={{ marginTop: 8, fontSize: '0.85rem' }}>
+                  <p className="muted scripts-modality-id-hint">
                     ID detectado: <code>{detectedFolderId}</code>
                   </p>
                 )}
                 {driveFolderInput.trim() && !isValidDriveFolderInput(driveFolderInput) && (
-                  <p style={{ marginTop: 8, color: '#b91c1c', fontSize: '0.85rem' }}>
-                    Formato de link o ID no reconocido.
-                  </p>
+                  <p className="scripts-modality-error">Formato de link o ID no reconocido.</p>
                 )}
 
-                <div style={{ marginTop: 14 }}>
+                <div className="scripts-modality-fields">
                   <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
                     Asignatura
                     <input
@@ -349,7 +351,7 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
                     />
                   </label>
 
-                  <section className="action-card scripts-generate-section" style={{ marginTop: 12 }}>
+                  <section className="scripts-action-panel scripts-generate-section">
                     <p className="muted">{generationMessage || 'Completa los campos para generar materiales.'}</p>
                     <button
                       type="button"
@@ -361,44 +363,44 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
                     </button>
                   </section>
                 </div>
-              </>
+              </div>
             )}
           </article>
 
           {mode !== 'drive' && (
-            <article className="card scripts-step-card">
-            <button
-              type="button"
-              onClick={() => setMode((prev) => (prev === 'local' ? null : 'local'))}
-              style={{ all: 'unset', display: 'block', cursor: 'pointer', width: '100%' }}
-            >
-              <div className="scripts-step-header">
-                <span className="scripts-step-badge">Modalidad 2</span>
-                <h2>Generar desde archivos locales</h2>
-              </div>
-              <p className="card-description">
-                Sube los gránulos académicos desde tu computador y descarga los materiales generados al finalizar.
-              </p>
-            </button>
-            {mode === 'local' && (
-              <div
-                onDragOver={(event) => {
-                  event.preventDefault()
-                  setIsDragging(true)
-                }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={(event) => {
-                  event.preventDefault()
-                  setIsDragging(false)
-                  addFiles(event.dataTransfer.files)
-                }}
-                style={{
-                  marginTop: 12,
-                  border: `2px dashed ${isDragging ? '#2563eb' : '#cbd5e1'}`,
-                  borderRadius: 10,
-                  padding: '0.9rem',
-                }}
+            <article className="scripts-modality-card scripts-step-card">
+              <button
+                type="button"
+                className="scripts-modality-toggle"
+                aria-expanded={mode === 'local'}
+                onClick={() => setMode((prev) => (prev === 'local' ? null : 'local'))}
               >
+                <div className="scripts-modality-head-row">
+                  <span className="scripts-step-badge">Modalidad 2</span>
+                  <span className="scripts-modality-chevron" aria-hidden>
+                    ▼
+                  </span>
+                </div>
+                <h2 className="scripts-modality-title">Generar desde archivos locales</h2>
+                <p className="card-description">
+                  Sube los gránulos académicos desde tu computador y descarga los materiales generados al finalizar.
+                </p>
+              </button>
+              {mode === 'local' && (
+                <div className="scripts-modality-panel">
+                  <div
+                    onDragOver={(event) => {
+                      event.preventDefault()
+                      setIsDragging(true)
+                    }}
+                    onDragLeave={() => setIsDragging(false)}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      setIsDragging(false)
+                      addFiles(event.dataTransfer.files)
+                    }}
+                    className={['scripts-local-dropzone', isDragging ? 'scripts-local-dropzone--drag' : ''].filter(Boolean).join(' ')}
+                  >
                 <label className="file-input-label" htmlFor="local-granules-input">
                   Subir múltiples gránulos .docx
                 </label>
@@ -440,45 +442,46 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
                     ))}
                   </ul>
                 )}
+                  </div>
 
-                <div style={{ marginTop: 14 }}>
-                  <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                    Asignatura
-                    <input
-                      type="text"
-                      className="select-input"
-                      value={localAsignatura}
-                      onChange={(event) => setLocalAsignatura(event.target.value)}
-                      placeholder="Ej: INTELIGENCIA ARTIFICIAL Y ANALÍTICA AVANZADA..."
-                      disabled={localIsGenerating}
-                    />
-                  </label>
-                  <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                    Programa
-                    <input
-                      type="text"
-                      className="select-input"
-                      value={localPrograma}
-                      onChange={(event) => setLocalPrograma(event.target.value)}
-                      placeholder="Ej: QUÍMICA FARMACÉUTICA"
-                      disabled={localIsGenerating}
-                    />
-                  </label>
+                  <div className="scripts-modality-fields">
+                    <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
+                      Asignatura
+                      <input
+                        type="text"
+                        className="select-input"
+                        value={localAsignatura}
+                        onChange={(event) => setLocalAsignatura(event.target.value)}
+                        placeholder="Ej: INTELIGENCIA ARTIFICIAL Y ANALÍTICA AVANZADA..."
+                        disabled={localIsGenerating}
+                      />
+                    </label>
+                    <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
+                      Programa
+                      <input
+                        type="text"
+                        className="select-input"
+                        value={localPrograma}
+                        onChange={(event) => setLocalPrograma(event.target.value)}
+                        placeholder="Ej: QUÍMICA FARMACÉUTICA"
+                        disabled={localIsGenerating}
+                      />
+                    </label>
 
-                  <section className="action-card scripts-generate-section" style={{ marginTop: 12 }}>
-                    <p className="muted">{localMessage || 'Completa los campos para generar materiales localmente.'}</p>
-                    <button
-                      type="button"
-                      className="primary-button"
-                      onClick={handleGenerateLocal}
-                      disabled={!localFormValid || localIsGenerating}
-                    >
-                      {localIsGenerating ? 'Generando materiales…' : 'Generar materiales'}
-                    </button>
-                  </section>
+                    <section className="scripts-action-panel scripts-generate-section">
+                      <p className="muted">{localMessage || 'Completa los campos para generar materiales localmente.'}</p>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={handleGenerateLocal}
+                        disabled={!localFormValid || localIsGenerating}
+                      >
+                        {localIsGenerating ? 'Generando materiales…' : 'Generar materiales'}
+                      </button>
+                    </section>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
             </article>
           )}
         </section>
@@ -659,21 +662,27 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
         )}
 
         {mode === 'drive' && (
-          <article className="card scripts-step-card" style={{ marginBottom: '1rem' }}>
-            <button
-              type="button"
-              onClick={() => setMode((prev) => (prev === 'local' ? null : 'local'))}
-              style={{ all: 'unset', display: 'block', cursor: 'pointer', width: '100%' }}
-            >
-              <div className="scripts-step-header">
-                <span className="scripts-step-badge">Modalidad 2</span>
-                <h2>Generar desde archivos locales</h2>
-              </div>
-              <p className="card-description">
-                Sube los gránulos académicos desde tu computador y descarga los materiales generados al finalizar.
-              </p>
-            </button>
-          </article>
+          <div className="scripts-modality-peek-slot">
+            <article className="scripts-modality-card scripts-modality-card--peek scripts-step-card">
+              <button
+                type="button"
+                className="scripts-modality-toggle"
+                aria-label="Cambiar a generación desde archivos locales"
+                onClick={() => setMode((prev) => (prev === 'local' ? null : 'local'))}
+              >
+                <div className="scripts-modality-head-row">
+                  <span className="scripts-step-badge">Modalidad 2</span>
+                  <span className="scripts-modality-chevron scripts-modality-chevron--peek" aria-hidden>
+                    →
+                  </span>
+                </div>
+                <h2 className="scripts-modality-title">Generar desde archivos locales</h2>
+                <p className="card-description">
+                  Sube los gránulos desde tu equipo y descarga los materiales al finalizar. Toca para usar esta opción.
+                </p>
+              </button>
+            </article>
+          </div>
         )}
 
         {false && mode === 'local' && (
