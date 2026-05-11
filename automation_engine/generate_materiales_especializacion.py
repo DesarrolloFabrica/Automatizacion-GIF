@@ -787,6 +787,49 @@ RENDERERS = {
     "07": _render_video,
 }
 
+# Claves internas de layout ("02"…"07"): mismas que MATERIAL_VALIDATION_RULES / RENDERERS.
+# Por categoría académica, el nn del material (01…07 en prompts) no coincide con esa clave:
+# hay que mapear qué plantilla DOCX usar (fichas, glosario, revista, infografía, podcast, video).
+_LAYOUT_RENDERER_BY_CATEGORY: dict[str, dict[str, str]] = {
+    "especializacion": {"02": "02", "03": "03", "04": "04", "05": "05", "06": "06", "07": "07"},
+    "pregrado": {
+        "01": "06",
+        "02": "05",
+        "03": "07",
+        "04": "03",
+        "05": "07",
+        "06": "04",
+        "07": "02",
+    },
+    "curso_rapido": {
+        "01": "05",
+        "02": "06",
+        "03": "07",
+        "04": "03",
+        "05": "07",
+        "06": "04",
+        "07": "02",
+    },
+    "diplomado": {
+        "01": "07",
+        "02": "03",
+        "03": "04",
+        "04": "07",
+        "05": "05",
+        "06": "06",
+        "07": "02",
+    },
+    "curso_externos_profesional": {
+        "01": "07",
+        "02": "06",
+        "03": "05",
+        "04": "07",
+        "05": "04",
+        "06": "03",
+        "07": "02",
+    },
+}
+
 
 MATERIAL_NUMBER_BY_NAME = {
     rule["name"]: nn
@@ -796,6 +839,20 @@ MATERIAL_NUMBER_BY_NAME = {
 
 def _get_material_number(material_nombre: str) -> Optional[str]:
     return MATERIAL_NUMBER_BY_NAME.get(material_nombre)
+
+
+def resolve_layout_renderer_key(
+    category_key: str | None,
+    material_nn: str | None,
+    material_nombre: str,
+) -> Optional[str]:
+    """Resuelve la clave de RENDERERS ("02"…"07") según categoría y número de material."""
+    ck = (category_key or "").strip().lower()
+    nn = (material_nn or "").strip()
+    table = _LAYOUT_RENDERER_BY_CATEGORY.get(ck)
+    if table and nn in table:
+        return table[nn]
+    return _get_material_number(material_nombre)
 
 
 def _validate_rendered_docx(output_path: Path, nn: Optional[str]) -> None:
@@ -854,6 +911,9 @@ def save_docx_with_structure(
     material_nombre: str,
     granule_code: str,
     tema: str,
+    *,
+    category_key: str | None = None,
+    material_nn: str | None = None,
 ) -> None:
     cleaned = clean_ai_response(content)
     doc = Document()
@@ -875,16 +935,24 @@ def save_docx_with_structure(
     if meta_idx is not None:
         _add_metadata_inline(doc, tables[meta_idx][1])
 
-    nn = _get_material_number(material_nombre)
-    renderer = RENDERERS.get(nn)
-    if renderer:
-        renderer(doc, content_tables)
+    layout_nn = resolve_layout_renderer_key(category_key, material_nn, material_nombre)
+    if not layout_nn:
+        raise ValueError(
+            f"No se pudo resolver plantilla DOCX para material {material_nombre!r} "
+            f"(categoría={category_key!r}, nn={material_nn!r}). "
+            "Compruebe resolve_layout_renderer_key / categoría en configuración."
+        )
+    renderer = RENDERERS.get(layout_nn)
+    if not renderer:
+        raise ValueError(f"Plantilla de renderizado interna ausente para layout {layout_nn!r}")
+
+    renderer(doc, content_tables)
 
     _add_footer_with_page_number(doc, granule_code, material_nombre)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
-    _validate_rendered_docx(output_path, nn)
+    _validate_rendered_docx(output_path, layout_nn)
 
 
 def extract_docx_text(path: Path) -> str:
@@ -1266,7 +1334,10 @@ def generate_all_materiales(
                         f"Respuesta insuficiente ({len(content)} chars). Minimo: {MIN_RESPONSE_CHARS}."
                     )
 
-                val_status, val_warnings = validate_material_content(material.nn, content)
+                layout_nn = resolve_layout_renderer_key("especializacion", material.nn, material.nombre)
+                if not layout_nn:
+                    raise ValueError(f"No se resolvió layout para especialización material {material.nn} {material.nombre}")
+                val_status, val_warnings = validate_material_content(layout_nn, content)
                 if val_warnings:
                     for w in val_warnings:
                         print(f"    ADVERTENCIA: {w}")
@@ -1278,6 +1349,8 @@ def generate_all_materiales(
                     material_nombre=material.nombre,
                     granule_code=granule_code,
                     tema=tema,
+                    category_key="especializacion",
+                    material_nn=material.nn,
                 )
 
                 if not material_output_path.exists() or material_output_path.stat().st_size == 0:

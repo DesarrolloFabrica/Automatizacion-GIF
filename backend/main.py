@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -11,11 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
-from jobs import append_log, create_job, get_job, start_job_thread
+from jobs import append_log, create_job, get_job, start_job_thread, terminate_job_subprocess
 from schemas import (
     DetectedCourse,
     DrivePackageUploadResponse,
     DriveUploadLink,
+    JobCancelResponse,
     JobCreateResponse,
     JobStatusResponse,
     LocalGeneratedFile,
@@ -29,14 +32,18 @@ from storage import (
     AcademicPackageError,
     PROJECT_ROOT,
     academic_package_filename,
+    cleanup_drive_job_content_root,
     collect_academic_package_files,
+    collect_partial_package_files_for_drive_phase,
     create_docs_zip,
     create_full_outputs_zip,
     create_outputs_zip,
     create_phase_zip,
+    default_drive_phase_status,
     ensure_job_dirs,
     get_available_next_action,
     get_current_phase,
+    get_drive_sync_snapshot,
     get_job_paths,
     get_job_category,
     get_materials_dir,
@@ -46,14 +53,23 @@ from storage import (
     list_generated_files,
     list_material_files,
     list_pipeline_local_files,
+    merge_job_metadata,
+    read_job_metadata,
     read_phase_status,
     refresh_phase_files,
+    accumulate_drive_counters,
     save_job_metadata,
     save_local_granules,
     save_syllabus_file,
+    set_drive_phase_record,
     update_phase_status,
 )
-from drive_service import upload_academic_package_to_drive  # noqa: E402
+from drive_service import (  # noqa: E402
+    ensure_drive_package_structure,
+    get_authenticated_drive_service,
+    resolve_academic_workspace_folder_id,
+    upload_academic_package_to_drive,
+)
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -179,9 +195,101 @@ def _phase_start_callback(phase_key: str):
     return _callback
 
 
+def run_phased_drive_sync(job_id: str, drive_phase: str) -> None:
+    """Sincroniza una fase con Drive si el job tiene drivePhasedSync y carpeta padre."""
+    meta = read_job_metadata(job_id)
+    if not meta.get("drivePhasedSync") or not meta.get("driveParentFolderId"):
+        return
+    parent = str(meta.get("driveWorkspaceFolderId") or meta["driveParentFolderId"])
+    p = drive_phase.lower().strip()
+    log_fn = lambda m: append_log(job_id, m)
+
+    if p == "structure":
+        try:
+            st = ensure_drive_package_structure(parent_folder_id=parent, log_fn=log_fn)
+            merge_job_metadata(
+                job_id,
+                {
+                    "driveWorkspaceFolderId": st.user_folder_id,
+                    "driveParentFolderId": st.user_folder_id,
+                    "drivePackageFolderId": st.user_folder_id,
+                    "drivePackageUrl": st.user_folder_link,
+                    "driveRootFolderId": st.user_folder_id,
+                },
+            )
+            accumulate_drive_counters(
+                job_id,
+                folders_created=st.folders_created,
+                folders_reused=st.folders_reused,
+            )
+            set_drive_phase_record(job_id, "structure", status="completed", error=None)
+        except Exception as exc:
+            set_drive_phase_record(job_id, "structure", status="failed", error=str(exc))
+            append_log(job_id, f"Drive sync (estructura) error: {exc}")
+        return
+
+    phase_status_map = {
+        "syllabus": "syllabus",
+        "granules": "granules",
+        "activities": "activities",
+        "resources": "resources",
+    }
+    collect_key = phase_status_map.get(p)
+    if not collect_key:
+        return
+
+    try:
+        files = collect_partial_package_files_for_drive_phase(job_id, collect_key)
+        if not files:
+            append_log(job_id, f"Drive sync ({p}): sin archivos locales para subir")
+            set_drive_phase_record(job_id, collect_key, status="completed", error=None)
+            return
+        summary = upload_academic_package_to_drive(
+            parent_folder_id=parent,
+            package_files=files,
+            include_zip=None,
+            log_fn=log_fn,
+            job_id=job_id,
+        )
+        merge_job_metadata(
+            job_id,
+            {
+                "drivePackageFolderId": summary.root_folder_id,
+                "drivePackageUrl": summary.root_folder_link,
+                "driveRootFolderId": parent,
+            },
+        )
+        accumulate_drive_counters(
+            job_id,
+            folders_created=summary.folders_created,
+            folders_reused=summary.folders_reused,
+            files_uploaded=summary.files_uploaded,
+            files_overwritten=summary.files_overwritten,
+        )
+        set_drive_phase_record(job_id, collect_key, status="completed", error=None)
+        if collect_key == "resources" and files:
+            cleanup_drive_job_content_root(job_id)
+    except Exception as exc:
+        set_drive_phase_record(job_id, collect_key, status="failed", error=str(exc))
+        append_log(job_id, f"Drive sync ({p}) error: {exc}")
+
+
 def _phase_complete_callback(phase_key: str, files_fn):
+    """Tras terminar la generación local de una fase: sube a Drive y luego marca la fase completada.
+
+    Así los archivos solo aparecen en Drive cuando esa fase ya terminó de generarse (no durante el proceso).
+    """
+
     def _callback(job_id: str, success: bool) -> None:
         refresh_phase_files(job_id)
+        if success:
+            append_log(job_id, "=== Sincronización con Drive: la subida ocurre solo después de terminar esta fase en local ===")
+            if phase_key == "granules":
+                run_phased_drive_sync(job_id, "granules")
+            elif phase_key == "pipelineLocal":
+                run_phased_drive_sync(job_id, "activities")
+            elif phase_key == "specializationMaterials":
+                run_phased_drive_sync(job_id, "resources")
         update_phase_status(job_id, phase_key, status="completed" if success else "failed", files=files_fn(job_id))
 
     return _callback
@@ -200,6 +308,28 @@ def _ensure_not_running(job_id: str) -> None:
     phases = [phase_status["granules"], phase_status["pipelineLocal"], phase_status["specializationMaterials"], phase_status.get("uploadDrive", {"status": "pending"})]
     if job.status == "running" or any(phase["status"] == "running" for phase in phases):
         raise HTTPException(status_code=409, detail="Ya hay una fase en ejecución para este job.")
+
+
+def _ensure_drive_job_metadata(job_id: str, parent_folder_id: str) -> None:
+    """Registra carpeta Drive en metadata y fases por defecto si aún no existen."""
+    meta = read_job_metadata(job_id)
+    raw = parent_folder_id.strip()
+    try:
+        svc = get_authenticated_drive_service()
+        resolved = resolve_academic_workspace_folder_id(svc, raw)
+    except Exception:
+        resolved = raw
+    patch: dict = {
+        "driveParentFolderId": resolved,
+        "driveWorkspaceFolderId": resolved,
+        "drivePhasedSync": True,
+    }
+    if "drivePhaseStatus" not in meta:
+        patch["drivePhaseStatus"] = default_drive_phase_status()
+    for key in ("driveFoldersCreated", "driveFoldersReused", "driveFilesUploaded", "driveFilesOverwritten"):
+        if key not in meta:
+            patch[key] = 0
+    merge_job_metadata(job_id, patch)
 
 
 def extract_drive_folder_id(value: str) -> str:
@@ -268,6 +398,15 @@ def validate_required_api_key() -> None:
         raise HTTPException(status_code=400, detail="Falta configurar la API key en el .env (OPENAI_API_KEY).")
 
 
+def _env_for_academic_subprocess(job_id: str) -> dict[str, str]:
+    """Expone el job_id a generate_* para subida incremental a Drive (solo si el job usa carpeta Drive por fases)."""
+    env = os.environ.copy()
+    meta = read_job_metadata(job_id)
+    if meta.get("drivePhasedSync") and meta.get("driveParentFolderId"):
+        env["AUTOMATIZACION_GIF_JOB_ID"] = job_id
+    return env
+
+
 def detect_media_type(filename: str) -> str:
     lower = filename.lower()
     if lower.endswith(".docx"):
@@ -292,56 +431,60 @@ async def syllabus_preview(syllabus: UploadFile = File(...)) -> SyllabusPreviewR
     file_name = syllabus.filename or "syllabus.docx"
     validate_docx_filename(file_name)
 
-    preview_id = f"preview_{uuid.uuid4().hex[:10]}"
-    saved_path = save_syllabus_file(preview_id, syllabus.file)
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        shutil.copyfileobj(syllabus.file, tmp)
+        tmp_path = Path(tmp.name)
+    try:
+        parsed = parse_syllabus_docx(tmp_path)
+        courses = parsed.coursesDetected
+        primary_course = parsed.selectedCourse if parsed.selectedCourse else extract_course_plan(tmp_path)
 
-    parsed = parse_syllabus_docx(saved_path)
-    courses = parsed.coursesDetected
-    primary_course = parsed.selectedCourse if parsed.selectedCourse else extract_course_plan(saved_path)
+        print(f"[preview] Programa global detectado: {parsed.program or primary_course.programa or ''}")
+        print(f"[preview] Total coursesDetected: {len(courses)}")
+        for index, course in enumerate(courses, start=1):
+            first_topic = course.temas[0] if course.temas else ""
+            print(
+                f"[preview] Curso {index}: subject={course.asignatura} | "
+                f"semester={course.semestre} | topics_count={len(course.temas)} | first_topic={first_topic}"
+            )
 
-    print(f"[preview] Programa global detectado: {parsed.program or primary_course.programa or ''}")
-    print(f"[preview] Total coursesDetected: {len(courses)}")
-    for index, course in enumerate(courses, start=1):
-        first_topic = course.temas[0] if course.temas else ""
-        print(
-            f"[preview] Curso {index}: subject={course.asignatura} | "
-            f"semester={course.semestre} | topics_count={len(course.temas)} | first_topic={first_topic}"
+        topics = [{"index": index, "title": topic} for index, topic in enumerate(primary_course.temas, start=1)]
+
+        courses_detected = [
+            DetectedCourse(
+                asignatura=c.asignatura,
+                programa=c.programa,
+                escuela=c.escuela,
+                semestre=c.semestre,
+                temas=c.temas,
+            )
+            for c in courses
+        ]
+
+        return SyllabusPreviewResponse(
+            fileName=file_name,
+            subjectName=primary_course.asignatura or "",
+            programName=parsed.program or primary_course.programa or "",
+            detectedTopics=topics,
+            totalGranules=len(topics),
+            coursesDetected=courses_detected,
+            selectedCourse=DetectedCourse(
+                asignatura=primary_course.asignatura,
+                programa=parsed.program or primary_course.programa,
+                escuela=parsed.school or primary_course.escuela,
+                semestre=primary_course.semestre,
+                temas=primary_course.temas,
+            ),
         )
-
-    topics = [{"index": index, "title": topic} for index, topic in enumerate(primary_course.temas, start=1)]
-
-    courses_detected = [
-        DetectedCourse(
-            asignatura=c.asignatura,
-            programa=c.programa,
-            escuela=c.escuela,
-            semestre=c.semestre,
-            temas=c.temas,
-        )
-        for c in courses
-    ]
-
-    return SyllabusPreviewResponse(
-        fileName=file_name,
-        subjectName=primary_course.asignatura or "",
-        programName=parsed.program or primary_course.programa or "",
-        detectedTopics=topics,
-        totalGranules=len(topics),
-        coursesDetected=courses_detected,
-        selectedCourse=DetectedCourse(
-            asignatura=primary_course.asignatura,
-            programa=parsed.program or primary_course.programa,
-            escuela=parsed.school or primary_course.escuela,
-            semestre=primary_course.semestre,
-            temas=primary_course.temas,
-        ),
-    )
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 @app.post("/api/jobs", response_model=JobCreateResponse)
 async def create_generation_job(
     syllabus: UploadFile = File(...),
     nivel: str = Form(...),
+    driveFolderId: str | None = Form(None),
 ) -> JobCreateResponse:
     if nivel not in ALLOWED_LEVELS:
         raise HTTPException(status_code=400, detail="Nivel no válido.")
@@ -358,14 +501,33 @@ async def create_generation_job(
     validate_required_api_key()
 
     job_id = uuid.uuid4().hex[:12]
+
+    drive_parent: str | None = None
+    if driveFolderId and str(driveFolderId).strip():
+        drive_parent = extract_drive_folder_id(str(driveFolderId).strip())
+        try:
+            svc = get_authenticated_drive_service()
+            drive_parent = resolve_academic_workspace_folder_id(svc, drive_parent)
+        except Exception:
+            pass
+
+    save_job_metadata(
+        job_id,
+        category=category.key,
+        syllabus_original_name=file_name,
+        drive_parent_folder_id=drive_parent,
+    )
     paths = ensure_job_dirs(job_id)
-    save_job_metadata(job_id, category=category.key, syllabus_original_name=file_name)
     save_syllabus_file(job_id, syllabus.file)
 
     job_kind = "granules_academic_package"
 
     create_job(job_id=job_id, log_path=paths["log_path"], generated_dir=paths["generated_dir"], job_kind=job_kind)
     init_phase_status(job_id)
+
+    if drive_parent:
+        run_phased_drive_sync(job_id, "structure")
+        run_phased_drive_sync(job_id, "syllabus")
 
     command = [
         sys.executable,
@@ -386,7 +548,7 @@ async def create_generation_job(
         job_id=job_id,
         command=command,
         cwd=PROJECT_ROOT,
-        env_vars=os.environ.copy(),
+        env_vars=_env_for_academic_subprocess(job_id),
         initial_progress_step="leyendo syllabus",
         progress_map=progress_map,
         parse_drive_uploads=False,
@@ -408,6 +570,9 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     phase_status = refresh_phase_files(job_id) if job.job_kind == "granules_academic_package" else read_phase_status(job_id)
     files = list_all_job_files(job_id) if job.job_kind == "granules_academic_package" else job.files
 
+    drive_sync = get_drive_sync_snapshot(job.job_id) if job.job_kind == "granules_academic_package" else None
+    category_key = get_job_category(job.job_id) if job.job_kind == "granules_academic_package" else None
+
     return JobStatusResponse(
         jobId=job.job_id,
         status=job.status,
@@ -421,7 +586,26 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         currentPhase=get_current_phase(phase_status),
         availableNextAction=get_available_next_action(phase_status, job.status),
         phaseStatus=phase_status,
+        driveSync=drive_sync,
+        categoryKey=category_key,
     )
+
+
+@app.post("/api/jobs/{job_id}/cancel", response_model=JobCancelResponse)
+def cancel_generation_job(job_id: str) -> JobCancelResponse:
+    """Intenta detener el subproceso del job. Las fases ya completadas y los archivos en Drive no se borran."""
+    validate_required_api_key()
+    job = _ensure_job_exists(job_id)
+    if job.job_kind != "granules_academic_package":
+        raise HTTPException(status_code=400, detail="Este endpoint solo aplica a jobs de paquete académico.")
+    terminated = terminate_job_subprocess(job_id)
+    append_log(job_id, "=== Cancelación solicitada por el usuario ===")
+    msg = (
+        "Proceso local detenido. Puedes reanudar más tarde desde la misma carpeta del job si las fases siguen pendientes."
+        if terminated
+        else "No había proceso activo en este momento (quizá ya había terminado o fallado)."
+    )
+    return JobCancelResponse(jobId=job_id, processTerminated=terminated, message=msg)
 
 
 @app.post("/api/jobs/{job_id}/pipeline-local", response_model=JobCreateResponse)
@@ -444,7 +628,7 @@ def start_pipeline_local_phase(job_id: str) -> JobCreateResponse:
         job_id=job_id,
         command=_build_pipeline_local_command(paths),
         cwd=PROJECT_ROOT,
-        env_vars=os.environ.copy(),
+        env_vars=_env_for_academic_subprocess(job_id),
         initial_progress_step="generando txt",
         progress_map=ACADEMIC_PACKAGE_PROGRESS_MAP,
         parse_drive_uploads=False,
@@ -485,7 +669,7 @@ def start_materiales_phase(job_id: str) -> JobCreateResponse:
         job_id=job_id,
         command=_build_materiales_command(job_id, category.key, paths),
         cwd=PROJECT_ROOT,
-        env_vars=os.environ.copy(),
+        env_vars=_env_for_academic_subprocess(job_id),
         initial_progress_step="generando materiales",
         progress_map=ACADEMIC_PACKAGE_PROGRESS_MAP,
         parse_drive_uploads=False,
@@ -733,34 +917,112 @@ def download_all_generated_files(job_id: str) -> FileResponse:
     return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
 
 
+def _drive_upload_response_from_snapshot(job_id: str) -> DrivePackageUploadResponse:
+    snap = get_drive_sync_snapshot(job_id)
+    return DrivePackageUploadResponse(
+        jobId=job_id,
+        status="completed",
+        folderId=snap.get("drivePackageFolderId") or "",
+        folderLink=snap.get("drivePackageUrl") or "",
+        filesUploaded=int(snap.get("driveFilesUploaded") or 0),
+        filesOverwritten=int(snap.get("driveFilesOverwritten") or 0),
+        filesSkipped=0,
+        foldersCreated=int(snap.get("driveFoldersCreated") or 0),
+        foldersReused=int(snap.get("driveFoldersReused") or 0),
+    )
+
+
 @app.post("/api/jobs/{job_id}/upload-drive", response_model=DrivePackageUploadResponse)
-def upload_package_to_drive(job_id: str, driveFolderId: str = Form(...), includeZip: bool = Form(True)) -> DrivePackageUploadResponse:
-    _ensure_not_running(job_id)
+def upload_package_to_drive(
+    job_id: str,
+    driveFolderId: str = Form(...),
+    includeZip: bool = Form(True),
+    phase: str = Form("all"),
+) -> DrivePackageUploadResponse:
     job = _ensure_job_exists(job_id)
     if job.job_kind != "granules_academic_package":
         raise HTTPException(status_code=400, detail="Este endpoint solo aplica para jobs de paquete académico.")
 
+    parent_folder_id = extract_drive_folder_id(driveFolderId)
+    _ensure_drive_job_metadata(job_id, parent_folder_id)
+
+    phase_norm = (phase or "all").strip().lower()
+    allowed_partial = {"structure", "syllabus", "granules", "activities", "resources"}
+    if phase_norm in allowed_partial:
+        _ensure_not_running(job_id)
+        append_log(job_id, f"=== Drive: sincronización manual fase={phase_norm} ===")
+        sync_map = {
+            "structure": "structure",
+            "syllabus": "syllabus",
+            "granules": "granules",
+            "activities": "activities",
+            "resources": "resources",
+        }
+        run_phased_drive_sync(job_id, sync_map[phase_norm])
+        return _drive_upload_response_from_snapshot(job_id)
+
+    if phase_norm != "all":
+        raise HTTPException(status_code=400, detail=f"Fase Drive inválida: {phase}")
+
+    _ensure_not_running(job_id)
     phase_status = refresh_phase_files(job_id)
     if phase_status["granules"]["status"] != "completed" or phase_status["pipelineLocal"]["status"] != "completed" or phase_status["specializationMaterials"]["status"] != "completed":
-        raise HTTPException(status_code=400, detail="El paquete debe estar completo antes de subirlo a Drive.")
+        raise HTTPException(status_code=400, detail="El paquete debe estar completo antes de subirlo a Drive (fase=all).")
 
     update_phase_status(job_id, "uploadDrive", status="running")
-    append_log(job_id, "=== FASE 4: SUBIDA A GOOGLE DRIVE ===")
+    append_log(job_id, "=== FASE 4: SUBIDA A GOOGLE DRIVE (completa) ===")
     try:
+        append_log(job_id, f"Drive upload: folder id recibido={parent_folder_id}")
+        local_files = list_all_job_files(job_id)
+        append_log(job_id, f"Drive upload: archivos locales visibles antes de empaquetar={len(local_files)}")
+        for relative_path in local_files[:12]:
+            append_log(job_id, f"Drive upload: local disponible {relative_path}")
+        if len(local_files) > 12:
+            append_log(job_id, f"Drive upload: {len(local_files) - 12} archivos locales adicionales disponibles")
         package_files = collect_academic_package_files(job_id)
+        append_log(job_id, f"Drive upload: archivos detectados para paquete={len(package_files)}")
+        for local_path, arcname in package_files[:12]:
+            append_log(job_id, f"Drive upload: archivo listo {arcname} <- {local_path}")
+        if len(package_files) > 12:
+            append_log(job_id, f"Drive upload: {len(package_files) - 12} archivos adicionales listos")
         zip_entry = None
         if includeZip:
             zip_path = create_full_outputs_zip(job_id)
             zip_entry = (zip_path, f"PAQUETE_ACADEMICO/{zip_path.name}")
+            append_log(job_id, f"Drive upload: ZIP incluido {zip_entry[1]} <- {zip_path}")
+        append_log(job_id, "Drive upload: iniciando autenticación y sincronización con Google Drive")
         summary = upload_academic_package_to_drive(
-            parent_folder_id=extract_drive_folder_id(driveFolderId),
+            parent_folder_id=parent_folder_id,
             package_files=package_files,
             include_zip=zip_entry,
+            log_fn=lambda message: append_log(job_id, message),
+            job_id=job_id,
+        )
+        merge_job_metadata(
+            job_id,
+            {
+                "drivePackageFolderId": summary.root_folder_id,
+                "drivePackageUrl": summary.root_folder_link,
+                "driveRootFolderId": parent_folder_id,
+            },
+        )
+        accumulate_drive_counters(
+            job_id,
+            folders_created=summary.folders_created,
+            folders_reused=summary.folders_reused,
+            files_uploaded=summary.files_uploaded,
+            files_overwritten=summary.files_overwritten,
         )
         files = [item["path"] for item in summary.uploaded_files]
         update_phase_status(job_id, "uploadDrive", status="completed", files=files)
         append_log(job_id, f"Drive folder: {summary.root_folder_link}")
         append_log(job_id, f"Drive upload completado: archivos nuevos={summary.files_uploaded}, sobrescritos={summary.files_overwritten}, carpetas creadas={summary.folders_created}, reutilizadas={summary.folders_reused}")
+        set_drive_phase_record(job_id, "structure", status="completed", error=None)
+        set_drive_phase_record(job_id, "syllabus", status="completed", error=None)
+        set_drive_phase_record(job_id, "granules", status="completed", error=None)
+        set_drive_phase_record(job_id, "activities", status="completed", error=None)
+        set_drive_phase_record(job_id, "resources", status="completed", error=None)
+        cleanup_drive_job_content_root(job_id)
         return DrivePackageUploadResponse(
             jobId=job_id,
             status="completed",

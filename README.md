@@ -99,7 +99,7 @@ Tambien puede configurarse en `.env`:
 GOOGLE_SERVICE_ACCOUNT_FILE=credentials/service-account.json
 ```
 
-Comparte la carpeta destino de Drive con el email `client_email` del service account y dale permiso de Editor. El usuario pega solo el Folder ID en la interfaz; el backend crea/reutiliza `PAQUETE_ACADEMICO` dentro de esa carpeta.
+Comparte la carpeta destino de Drive con el email `client_email` del service account y dale permiso de Editor. El usuario pega el Folder ID en la interfaz; esa carpeta es la raíz académica en Drive (`SYLLABUS`, `CONTENIDOS`, etc.). El ZIP local puede seguir usando la carpeta lógica `PAQUETE_ACADEMICO` solo como empaquetado en archivo.
 
 En nube, esos valores deberian manejarse como secretos, no como archivos versionados.
 

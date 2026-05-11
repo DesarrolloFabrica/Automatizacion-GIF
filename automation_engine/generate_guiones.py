@@ -1719,6 +1719,15 @@ def main() -> None:
         words = word_count(content)
         estimated_pages = round(words / 450, 1)
         print(f"Guardado: {output_path} ({words} palabras aprox.; {estimated_pages} paginas estimadas)")
+        try:
+            from automation_engine.incremental_drive_upload import upload_package_file_if_configured
+
+            upload_package_file_if_configured(
+                output_path,
+                f"PAQUETE_ACADEMICO/CONTENIDOS/G{index}.docx",
+            )
+        except Exception as sync_exc:
+            print(f"Drive incremental: aviso (no detiene generación): {sync_exc}")
 
 
 if __name__ == "__main__":

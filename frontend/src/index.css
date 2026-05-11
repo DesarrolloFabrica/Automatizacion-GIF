@@ -3888,6 +3888,14 @@ h2 {
   align-items: start;
 }
 
+.drive-package-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
 .config-console-panel,
 .status-console-panel {
   display: grid;

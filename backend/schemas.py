@@ -8,6 +8,12 @@ class JobCreateResponse(BaseModel):
     status: str
 
 
+class JobCancelResponse(BaseModel):
+    jobId: str
+    processTerminated: bool
+    message: str
+
+
 class JobStatusResponse(BaseModel):
     jobId: str
     status: str
@@ -21,6 +27,8 @@ class JobStatusResponse(BaseModel):
     currentPhase: str = "pending"
     availableNextAction: str = "none"
     phaseStatus: dict | None = None
+    driveSync: dict | None = None
+    categoryKey: str | None = None
 
 
 class PreviewTopic(BaseModel):

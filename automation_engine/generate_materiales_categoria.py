@@ -35,6 +35,7 @@ from automation_engine.generate_materiales_especializacion import (
     extract_material_prompt,
     extract_system_prompt,
     generate_material_content,
+    resolve_layout_renderer_key,
     save_docx_with_structure,
     validate_material_content,
 )
@@ -238,7 +239,13 @@ def generate_all_materiales(
                 if not content or len(content) < MIN_RESPONSE_CHARS:
                     raise ValueError(f"Respuesta insuficiente ({len(content)} chars). Minimo: {MIN_RESPONSE_CHARS}.")
 
-                val_status, val_warnings = validate_material_content(material.nn, content)
+                layout_nn = resolve_layout_renderer_key(category.key, material.nn, material.nombre)
+                if not layout_nn:
+                    raise ValueError(
+                        f"No hay plantilla DOCX definida para categoría {category.key!r} "
+                        f"material nn={material.nn!r} ({material.nombre})."
+                    )
+                val_status, val_warnings = validate_material_content(layout_nn, content)
                 if val_warnings:
                     for warning in val_warnings:
                         print(f"    ADVERTENCIA: {warning}")
@@ -250,12 +257,20 @@ def generate_all_materiales(
                     material_nombre=material.nombre,
                     granule_code=granule_code,
                     tema=tema,
+                    category_key=category.key,
+                    material_nn=material.nn,
                 )
                 if not material_output_path.exists() or material_output_path.stat().st_size == 0:
                     raise ValueError("El archivo se guardo vacio o no se creo.")
 
                 file_size = material_output_path.stat().st_size
                 print(f"    Material guardado: {material_filename} ({file_size} bytes)")
+                try:
+                    from automation_engine.incremental_drive_upload import upload_material_file_if_configured
+
+                    upload_material_file_if_configured(material_output_path)
+                except Exception as sync_exc:
+                    print(f"    Drive incremental: aviso — {sync_exc}")
                 granule_summary["materiales"][material.nn] = {
                     "nombre": material.nombre,
                     "archivo": material_filename,

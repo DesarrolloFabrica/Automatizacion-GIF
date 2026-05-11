@@ -25,10 +25,14 @@ except ImportError:  # pragma: no cover
 
 from automation_engine.generate_txt_from_drive import DEFAULT_CREDENTIALS_PATH, DEFAULT_TOKEN_PATH, get_drive_service
 
+from drive_naming import resolve_drive_relative_path
+
 
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_URL = "https://drive.google.com/drive/folders/{folder_id}"
+# Layout local/ZIP sigue usando PAQUETE_ACADEMICO/...; en Drive la raíz es la carpeta del usuario.
+DRIVE_STRIP_PACKAGE_PREFIX = "PAQUETE_ACADEMICO"
 
 
 @dataclass
@@ -41,6 +45,15 @@ class DriveUploadSummary:
     files_overwritten: int
     files_skipped: int
     uploaded_files: list[dict[str, str]]
+
+
+@dataclass
+class DriveStructureSummary:
+    """Raíz académica en Drive = carpeta pegada por el usuario (sin contenedor PAQUETE_ACADEMICO)."""
+    user_folder_id: str
+    user_folder_link: str
+    folders_created: int
+    folders_reused: int
 
 
 def _ensure_google_dependencies() -> None:
@@ -94,6 +107,45 @@ def validate_drive_folder(service, folder_id: str) -> dict[str, str]:
     return folder
 
 
+# Si el usuario pega el ID de una subcarpeta del paquete (p. ej. CONTENIDOS) como destino,
+# volver a crear SYLLABUS/CONTENIDOS debajo duplica toda la estructura. Subimos al padre.
+_ACADEMIC_PACKAGE_SUBFOLDER_NAMES = frozenset({"SYLLABUS", "CONTENIDOS", "ACTIVIDADES_MOODLE", "RECURSOS_COMPLEMENTARIOS"})
+
+
+def resolve_academic_workspace_folder_id(
+    service,
+    folder_id: str,
+    *,
+    log_fn=None,
+    _depth: int = 0,
+) -> str:
+    """Devuelve el ID de la carpeta raíz del curso (hermano de SYLLABUS), no una subcarpeta del paquete."""
+    if _depth > 12:
+        return (folder_id or "").strip()
+    clean_id = (folder_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", clean_id):
+        return clean_id
+    try:
+        meta = service.files().get(
+            fileId=clean_id,
+            fields="id,name,parents",
+            supportsAllDrives=True,
+        ).execute()
+    except Exception:
+        return clean_id
+    name_upper = (meta.get("name") or "").strip().upper()
+    parents = meta.get("parents") or []
+    if name_upper in _ACADEMIC_PACKAGE_SUBFOLDER_NAMES and parents:
+        parent_id = parents[0]
+        if log_fn:
+            log_fn(
+                f"Drive: la carpeta destino era «{meta.get('name')}» (parte del paquete); "
+                "se usa la carpeta padre como raíz para no anidar otra copia del mismo árbol."
+            )
+        return resolve_academic_workspace_folder_id(service, parent_id, log_fn=log_fn, _depth=_depth + 1)
+    return clean_id
+
+
 def _escape_drive_query(value: str) -> str:
     return value.replace("'", "\\'")
 
@@ -127,7 +179,16 @@ def find_or_create_child_folder(service, parent_id: str, name: str) -> tuple[dic
     return folder, True
 
 
-def ensure_folder_path(service, parent_id: str, parts: Iterable[str]) -> tuple[str, int, int]:
+def drive_arcname_for_upload(arcname: str) -> str:
+    """Convierte ruta de paquete local (PAQUETE_ACADEMICO/...) a ruta bajo la carpeta destino del usuario."""
+    normalized = arcname.replace("\\", "/").strip("/")
+    parts = [p for p in normalized.split("/") if p]
+    if parts and parts[0] == DRIVE_STRIP_PACKAGE_PREFIX:
+        parts = parts[1:]
+    return "/".join(parts)
+
+
+def ensure_folder_path(service, parent_id: str, parts: Iterable[str], log_fn=None) -> tuple[str, int, int]:
     current_id = parent_id
     created = 0
     reused = 0
@@ -136,8 +197,12 @@ def ensure_folder_path(service, parent_id: str, parts: Iterable[str]) -> tuple[s
         current_id = folder["id"]
         if was_created:
             created += 1
+            if log_fn:
+                log_fn(f"Drive upload: carpeta creada {part} ({current_id})")
         else:
             reused += 1
+            if log_fn:
+                log_fn(f"Drive upload: carpeta reutilizada {part} ({current_id})")
     return current_id, created, reused
 
 
@@ -168,6 +233,37 @@ def find_child_file(service, parent_id: str, name: str) -> dict[str, str] | None
         includeItemsFromAllDrives=True,
     ).execute().get("files", [])
     return files[0] if files else None
+
+
+def ensure_drive_package_structure(*, parent_folder_id: str, log_fn=None) -> DriveStructureSummary:
+    """Crea o reutiliza SYLLABUS, CONTENIDOS, ACTIVIDADES_MOODLE, RECURSOS_COMPLEMENTARIOS (subcarpetas G*_TEMA las crea cada sync)."""
+    if log_fn:
+        log_fn(f"Drive estructura: validando carpeta destino (raíz académica) {parent_folder_id}")
+    service = get_authenticated_drive_service()
+    parent_folder_id = resolve_academic_workspace_folder_id(service, parent_folder_id, log_fn=log_fn)
+    validate_drive_folder(service, parent_folder_id)
+
+    folders_created = 0
+    folders_reused = 0
+
+    for name in ("SYLLABUS", "CONTENIDOS", "ACTIVIDADES_MOODLE"):
+        _, c, r = ensure_folder_path(service, parent_folder_id, (name,), log_fn=log_fn)
+        folders_created += c
+        folders_reused += r
+
+    _, c, r = ensure_folder_path(service, parent_folder_id, ("RECURSOS_COMPLEMENTARIOS",), log_fn=log_fn)
+    folders_created += c
+    folders_reused += r
+
+    link = FOLDER_URL.format(folder_id=parent_folder_id)
+    if log_fn:
+        log_fn(f"Drive estructura: carpetas base listas bajo {link}")
+    return DriveStructureSummary(
+        user_folder_id=parent_folder_id,
+        user_folder_link=link,
+        folders_created=folders_created,
+        folders_reused=folders_reused,
+    )
 
 
 def upload_file_overwrite(service, parent_id: str, local_path: Path, drive_name: str) -> tuple[dict[str, str], bool]:
@@ -202,9 +298,16 @@ def upload_academic_package_to_drive(
     parent_folder_id: str,
     package_files: list[tuple[Path, str]],
     include_zip: tuple[Path, str] | None = None,
+    log_fn=None,
+    job_id: str | None = None,
 ) -> DriveUploadSummary:
+    if log_fn:
+        log_fn(f"Drive upload: conectando con Google Drive, parent={parent_folder_id}")
     service = get_authenticated_drive_service()
-    validate_drive_folder(service, parent_folder_id)
+    parent_folder_id = resolve_academic_workspace_folder_id(service, parent_folder_id, log_fn=log_fn)
+    parent = validate_drive_folder(service, parent_folder_id)
+    if log_fn:
+        log_fn(f"Drive upload: carpeta destino validada {parent.get('name', '')} ({parent_folder_id})")
 
     folders_created = 0
     folders_reused = 0
@@ -213,51 +316,68 @@ def upload_academic_package_to_drive(
     files_skipped = 0
     uploaded_files: list[dict[str, str]] = []
 
-    root_folder_id = ""
-    root_folder_link = ""
     entries = list(package_files)
     if include_zip is not None:
         entries.append(include_zip)
+    if log_fn:
+        log_fn(f"Drive upload: entradas a sincronizar={len(entries)}")
 
     folder_cache: dict[tuple[str, ...], str] = {}
     for local_path, arcname in entries:
         if not local_path.exists() or not local_path.is_file() or local_path.stat().st_size <= 0:
             files_skipped += 1
+            if log_fn:
+                log_fn(f"Drive upload: omitido archivo inválido {arcname} <- {local_path}")
             continue
-        parts = [part for part in Path(arcname).parts if part]
-        if len(parts) < 2:
+        rel = (
+            resolve_drive_relative_path(job_id, local_path, arcname)
+            if job_id
+            else drive_arcname_for_upload(arcname)
+        )
+        if not rel:
             files_skipped += 1
+            if log_fn:
+                log_fn(f"Drive upload: omitida ruta vacía tras normalizar {arcname}")
             continue
-        folder_parts = tuple(parts[:-1])
+        parts = [part for part in Path(rel).parts if part]
+        if len(parts) < 1:
+            files_skipped += 1
+            if log_fn:
+                log_fn(f"Drive upload: omitida ruta inválida {arcname}")
+            continue
         drive_name = parts[-1]
-        if folder_parts in folder_cache:
-            target_folder_id = folder_cache[folder_parts]
+        if len(parts) == 1:
+            target_folder_id = parent_folder_id
         else:
-            target_folder_id, created, reused = ensure_folder_path(service, parent_folder_id, folder_parts)
-            folder_cache[folder_parts] = target_folder_id
-            folders_created += created
-            folders_reused += reused
-            if folder_parts == ("PAQUETE_ACADEMICO",):
-                root_folder_id = target_folder_id
+            folder_parts = tuple(parts[:-1])
+            if folder_parts in folder_cache:
+                target_folder_id = folder_cache[folder_parts]
+            else:
+                target_folder_id, created, reused = ensure_folder_path(service, parent_folder_id, folder_parts, log_fn=log_fn)
+                folder_cache[folder_parts] = target_folder_id
+                folders_created += created
+                folders_reused += reused
         uploaded, overwritten = upload_file_overwrite(service, target_folder_id, local_path, drive_name)
         if overwritten:
             files_overwritten += 1
+            if log_fn:
+                log_fn(f"Drive upload: archivo sobrescrito {rel} ({uploaded.get('id', '')})")
         else:
             files_uploaded += 1
+            if log_fn:
+                log_fn(f"Drive upload: archivo subido {rel} ({uploaded.get('id', '')})")
         uploaded_files.append({
             "name": uploaded.get("name", drive_name),
             "id": uploaded.get("id", ""),
             "link": uploaded.get("webViewLink", ""),
-            "path": "/".join(parts),
+            "path": rel,
             "overwritten": str(overwritten).lower(),
         })
 
-    if not root_folder_id:
-        root, was_created = find_or_create_child_folder(service, parent_folder_id, "PAQUETE_ACADEMICO")
-        root_folder_id = root["id"]
-        folders_created += 1 if was_created else 0
-        folders_reused += 0 if was_created else 1
+    root_folder_id = parent_folder_id
     root_folder_link = FOLDER_URL.format(folder_id=root_folder_id)
+    if log_fn:
+        log_fn(f"Drive upload: fin sincronización link={root_folder_link}")
 
     return DriveUploadSummary(
         root_folder_id=root_folder_id,

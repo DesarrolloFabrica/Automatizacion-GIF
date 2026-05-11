@@ -70,6 +70,27 @@ export interface JobPhaseStatus {
   uploadDrive?: PhaseStatusDetails
 }
 
+export interface DrivePhaseSyncEntry {
+  status: PhaseStatus
+  error?: string | null
+  updatedAt?: string | null
+}
+
+export interface DriveSyncSnapshot {
+  drivePhasedSync: boolean
+  driveParentFolderId?: string | null
+  driveWorkspaceFolderId?: string | null
+  driveRootFolderId?: string | null
+  drivePackageFolderId?: string | null
+  drivePackageUrl?: string | null
+  driveFoldersCreated: number
+  driveFoldersReused: number
+  driveFilesUploaded: number
+  driveFilesOverwritten: number
+  drivePhaseStatus: Record<string, DrivePhaseSyncEntry> | null
+  driveLastError?: string | null
+}
+
 export interface CategoryDeliverable {
   nn: string
   name: string
@@ -102,6 +123,8 @@ export interface JobStatusResponse {
   currentPhase: string
   availableNextAction: AvailableNextAction
   phaseStatus: JobPhaseStatus | null
+  driveSync?: DriveSyncSnapshot | null
+  categoryKey?: PromptType | string | null
 }
 
 export interface DriveUploadResponse {

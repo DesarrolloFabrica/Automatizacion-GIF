@@ -186,6 +186,15 @@ def main() -> None:
                 save_txt(result, local_output)
                 previous_outputs = (previous_outputs + "\n\n" + result).strip()
                 print(f"Guardado: {local_output.name} -> {local_output}")
+                try:
+                    from automation_engine.incremental_drive_upload import upload_package_file_if_configured
+
+                    upload_package_file_if_configured(
+                        local_output,
+                        f"PAQUETE_ACADEMICO/ACTIVIDADES_MOODLE/{local_output.name}",
+                    )
+                except Exception as sync_exc:
+                    print(f"Drive incremental: aviso TXT — {sync_exc}")
         except Exception as exc:  # pragma: no cover
             txt_error = str(exc)
             print(f"\nERROR en fase TXT: {exc}", file=sys.stderr)
@@ -219,6 +228,15 @@ def main() -> None:
                 title = f"{DOCUMENT_TITLES[doc_type]} - {asignatura.upper()}"
                 render_docx(blocks[doc_type], local_path, title)
                 print(f"Guardado: {local_path.name} -> {local_path}")
+                try:
+                    from automation_engine.incremental_drive_upload import upload_package_file_if_configured
+
+                    upload_package_file_if_configured(
+                        local_path,
+                        f"PAQUETE_ACADEMICO/ACTIVIDADES_MOODLE/{local_path.name}",
+                    )
+                except Exception as sync_exc:
+                    print(f"Drive incremental: aviso DOCX — {sync_exc}")
         except Exception as exc:  # pragma: no cover
             docx_error = str(exc)
             print(f"\nERROR en fase DOCX: {exc}", file=sys.stderr)

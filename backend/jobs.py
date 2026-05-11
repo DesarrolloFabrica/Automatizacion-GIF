@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from storage import list_generated_docx
+from storage import get_job_paths, list_generated_docx, read_job_metadata
 
 
 MAX_LOG_LINES = 1000
@@ -51,6 +51,8 @@ class JobRecord:
 
 _JOBS: dict[str, JobRecord] = {}
 _LOCK = threading.Lock()
+# Subprocesos activos (granulos / fases) para poder cancelar sin reiniciar el servidor.
+_ACTIVE_SUBPROCESSES: dict[str, subprocess.Popen] = {}
 
 
 def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str = "granules") -> JobRecord:
@@ -67,9 +69,52 @@ def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str =
     return record
 
 
+def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
+    """Reconstruye el JobRecord tras reinicio del servidor o pérdida de memoria, desde disco."""
+    paths = get_job_paths(job_id)
+    if not paths["metadata_path"].exists() or not paths["phase_status_path"].exists():
+        return None
+    logs: list[str] = []
+    if paths["log_path"].exists():
+        try:
+            text = paths["log_path"].read_text(encoding="utf-8")
+            logs = text.splitlines()[-MAX_LOG_LINES:]
+        except OSError:
+            logs = []
+    record = JobRecord(
+        job_id=job_id,
+        status="completed",
+        progress_step="finalizado",
+        log_path=paths["log_path"],
+        generated_dir=paths["generated_dir"],
+        job_kind="granules_academic_package",
+        logs=logs,
+    )
+    with _LOCK:
+        if job_id in _JOBS:
+            return _JOBS[job_id]
+        _JOBS[job_id] = record
+    return record
+
+
 def get_job(job_id: str) -> JobRecord | None:
     with _LOCK:
-        return _JOBS.get(job_id)
+        cached = _JOBS.get(job_id)
+    if cached is not None:
+        return cached
+    return hydrate_job_from_disk(job_id)
+
+
+def terminate_job_subprocess(job_id: str) -> bool:
+    """Intenta detener el proceso del job (SIGTERM). Devuelve True si había proceso activo."""
+    proc = _ACTIVE_SUBPROCESSES.get(job_id)
+    if proc is None:
+        return False
+    try:
+        proc.terminate()
+        return True
+    except Exception:
+        return False
 
 
 def append_log(job_id: str, line: str) -> None:
@@ -235,20 +280,23 @@ def _run_command_and_stream_logs(
         errors="replace",
         env=env_vars or os.environ.copy(),
     )
+    _ACTIVE_SUBPROCESSES[job_id] = process
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            append_log(job_id, line)
+            if parse_drive_uploads:
+                parsed = parse_drive_upload_line(line)
+                if parsed:
+                    with _LOCK:
+                        _JOBS[job_id].drive_links.append(parsed)
+            update_progress_from_log(job_id, line, progress_map)
 
-    assert process.stdout is not None
-    for line in process.stdout:
-        append_log(job_id, line)
-        if parse_drive_uploads:
-            parsed = parse_drive_upload_line(line)
-            if parsed:
-                with _LOCK:
-                    _JOBS[job_id].drive_links.append(parsed)
-        update_progress_from_log(job_id, line, progress_map)
-
-    return_code = process.wait()
-    append_log(job_id, f"Proceso finalizado con código: {return_code}")
-    return return_code
+        return_code = process.wait()
+        append_log(job_id, f"Proceso finalizado con código: {return_code}")
+        return return_code
+    finally:
+        _ACTIVE_SUBPROCESSES.pop(job_id, None)
 
 
 def start_job_thread(

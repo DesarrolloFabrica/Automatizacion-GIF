@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -15,9 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from automation_engine.config.categories import get_category  # noqa: E402
+from automation_engine.config.categories import CATEGORIES, get_category  # noqa: E402
 
 JOBS_ROOT = PROJECT_ROOT / "outputs" / "jobs"
+DRIVE_JOB_CONTENT_ROOT = Path(tempfile.gettempdir()) / "automatizacion_gif_drive_content"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -38,22 +40,40 @@ MATERIAL_SHORT_NAMES = {
 }
 
 
+def _job_metadata_path(job_id: str) -> Path:
+    return JOBS_ROOT / job_id / "job_metadata.json"
+
+
+def job_uses_drive_temp_content(job_id: str) -> bool:
+    """Si True, input/generated/pipeline/materiales viven en temp del SO, no en outputs/jobs."""
+    mp = _job_metadata_path(job_id)
+    if not mp.exists():
+        return False
+    try:
+        data = json.loads(mp.read_text(encoding="utf-8"))
+        return bool(data.get("drivePhasedSync"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def get_job_paths(job_id: str) -> dict[str, Path]:
-    base_dir = JOBS_ROOT / job_id
-    input_dir = base_dir / "input"
-    generated_dir = base_dir / "generated"
-    pipeline_local_dir = base_dir / "pipeline_local"
-    materiales_dir = base_dir / "materiales_especializacion"
-    log_path = base_dir / "job.log"
-    phase_status_path = base_dir / "phase_status.json"
-    metadata_path = base_dir / "job_metadata.json"
-    zip_path = base_dir / "generated_docs.zip"
+    state_dir = JOBS_ROOT / job_id
+    content_root = (DRIVE_JOB_CONTENT_ROOT / job_id) if job_uses_drive_temp_content(job_id) else state_dir
+    input_dir = content_root / "input"
+    generated_dir = content_root / "generated"
+    pipeline_local_dir = content_root / "pipeline_local"
+    log_path = state_dir / "job.log"
+    phase_status_path = state_dir / "phase_status.json"
+    metadata_path = state_dir / "job_metadata.json"
+    zip_path = content_root / "generated_docs.zip"
     return {
-        "base_dir": base_dir,
+        "job_id": job_id,
+        "state_dir": state_dir,
+        "content_root": content_root,
+        "base_dir": state_dir,
         "input_dir": input_dir,
         "generated_dir": generated_dir,
         "pipeline_local_dir": pipeline_local_dir,
-        "materiales_dir": materiales_dir,
         "log_path": log_path,
         "phase_status_path": phase_status_path,
         "metadata_path": metadata_path,
@@ -61,20 +81,124 @@ def get_job_paths(job_id: str) -> dict[str, Path]:
     }
 
 
-def save_job_metadata(job_id: str, *, category: str, syllabus_original_name: str | None = None) -> dict:
-    paths = ensure_job_dirs(job_id)
+def _empty_drive_phase_entry(status: str = "pending") -> dict:
+    return {"status": status, "error": None, "updatedAt": None}
+
+
+def default_drive_phase_status() -> dict[str, dict]:
+    return {
+        "structure": _empty_drive_phase_entry(),
+        "syllabus": _empty_drive_phase_entry(),
+        "granules": _empty_drive_phase_entry(),
+        "activities": _empty_drive_phase_entry(),
+        "resources": _empty_drive_phase_entry(),
+    }
+
+
+def save_job_metadata(
+    job_id: str,
+    *,
+    category: str,
+    syllabus_original_name: str | None = None,
+    drive_parent_folder_id: str | None = None,
+    drive_phased_sync: bool | None = None,
+) -> dict:
+    state_dir = JOBS_ROOT / job_id
+    state_dir.mkdir(parents=True, exist_ok=True)
     payload = {"jobId": job_id, "category": category}
     if syllabus_original_name:
         payload["syllabusOriginalName"] = syllabus_original_name
-    paths["metadata_path"].write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if drive_parent_folder_id:
+        pid = drive_parent_folder_id.strip()
+        payload["driveParentFolderId"] = pid
+        # Raíz estable del paquete en Drive (no sobrescribir con subcarpetas en merges posteriores).
+        payload["driveWorkspaceFolderId"] = pid
+    effective_sync = drive_phased_sync if drive_phased_sync is not None else bool(drive_parent_folder_id)
+    if effective_sync and payload.get("driveParentFolderId"):
+        payload["drivePhasedSync"] = True
+        payload.setdefault("drivePhaseStatus", default_drive_phase_status())
+        payload.setdefault("driveFoldersCreated", 0)
+        payload.setdefault("driveFoldersReused", 0)
+        payload.setdefault("driveFilesUploaded", 0)
+        payload.setdefault("driveFilesOverwritten", 0)
+    metadata_path = state_dir / "job_metadata.json"
+    metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
 
+def merge_job_metadata(job_id: str, updates: dict) -> dict:
+    state_dir = JOBS_ROOT / job_id
+    state_dir.mkdir(parents=True, exist_ok=True)
+    base = read_job_metadata(job_id)
+    base.update(updates)
+    if "driveWorkspaceFolderId" not in base and base.get("driveParentFolderId"):
+        base["driveWorkspaceFolderId"] = str(base["driveParentFolderId"]).strip()
+    (state_dir / "job_metadata.json").write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
+    return base
+
+
 def read_job_metadata(job_id: str) -> dict:
-    paths = get_job_paths(job_id)
-    if not paths["metadata_path"].exists():
+    mp = _job_metadata_path(job_id)
+    if not mp.exists():
         return {"jobId": job_id, "category": "especializacion"}
-    return json.loads(paths["metadata_path"].read_text(encoding="utf-8"))
+    data = json.loads(mp.read_text(encoding="utf-8"))
+    if data.get("drivePhasedSync"):
+        data.setdefault("drivePhaseStatus", default_drive_phase_status())
+        for key in ("structure", "syllabus", "granules", "activities", "resources"):
+            data["drivePhaseStatus"].setdefault(key, _empty_drive_phase_entry())
+    return data
+
+
+def accumulate_drive_counters(
+    job_id: str,
+    *,
+    folders_created: int = 0,
+    folders_reused: int = 0,
+    files_uploaded: int = 0,
+    files_overwritten: int = 0,
+) -> dict:
+    meta = read_job_metadata(job_id)
+    meta["driveFoldersCreated"] = int(meta.get("driveFoldersCreated") or 0) + folders_created
+    meta["driveFoldersReused"] = int(meta.get("driveFoldersReused") or 0) + folders_reused
+    meta["driveFilesUploaded"] = int(meta.get("driveFilesUploaded") or 0) + files_uploaded
+    meta["driveFilesOverwritten"] = int(meta.get("driveFilesOverwritten") or 0) + files_overwritten
+    return merge_job_metadata(job_id, meta)
+
+
+def set_drive_phase_record(job_id: str, phase_key: str, *, status: str, error: str | None = None) -> dict:
+    meta = read_job_metadata(job_id)
+    phases = meta.setdefault("drivePhaseStatus", default_drive_phase_status())
+    entry = phases.setdefault(phase_key, _empty_drive_phase_entry())
+    entry["status"] = status
+    entry["error"] = error
+    entry["updatedAt"] = datetime.utcnow().isoformat()
+    if error:
+        meta["driveLastError"] = error
+    return merge_job_metadata(job_id, meta)
+
+
+def get_drive_sync_snapshot(job_id: str) -> dict:
+    """Subset of metadata for API responses (Drive polling)."""
+    meta = read_job_metadata(job_id)
+    phased = bool(meta.get("drivePhasedSync"))
+    root_id = meta.get("driveRootFolderId") or meta.get("drivePackageFolderId") or meta.get("driveParentFolderId")
+    out: dict = {
+        "drivePhasedSync": phased,
+        "driveParentFolderId": meta.get("driveParentFolderId"),
+        "driveWorkspaceFolderId": meta.get("driveWorkspaceFolderId") or meta.get("driveParentFolderId"),
+        "drivePackageFolderId": meta.get("drivePackageFolderId") or root_id,
+        "driveRootFolderId": root_id,
+        "drivePackageUrl": meta.get("drivePackageUrl"),
+        "driveFoldersCreated": int(meta.get("driveFoldersCreated") or 0),
+        "driveFoldersReused": int(meta.get("driveFoldersReused") or 0),
+        "driveFilesUploaded": int(meta.get("driveFilesUploaded") or 0),
+        "driveFilesOverwritten": int(meta.get("driveFilesOverwritten") or 0),
+        "drivePhaseStatus": meta.get("drivePhaseStatus") if phased else None,
+        "driveLastError": meta.get("driveLastError") if phased else None,
+    }
+    if phased and out["drivePhaseStatus"] is None:
+        out["drivePhaseStatus"] = default_drive_phase_status()
+    return out
 
 
 def get_job_category(job_id: str) -> str:
@@ -84,14 +208,42 @@ def get_job_category(job_id: str) -> str:
 def get_materials_dir(job_id: str) -> Path:
     paths = get_job_paths(job_id)
     category = get_category(get_job_category(job_id))
-    return paths["base_dir"] / category.materials_dir
+    return paths["content_root"] / category.materials_dir
+
+
+def _cleanup_stale_content_shadow_under_state(state_dir: Path) -> None:
+    """Elimina carpetas de contenido antiguas bajo outputs/jobs si el contenido pasó a temp (Drive)."""
+    for name in ("input", "generated", "pipeline_local"):
+        candidate = state_dir / name
+        if candidate.is_dir():
+            shutil.rmtree(candidate, ignore_errors=True)
+    for cfg in CATEGORIES.values():
+        candidate = state_dir / cfg.materials_dir
+        if candidate.is_dir():
+            shutil.rmtree(candidate, ignore_errors=True)
+
+
+def cleanup_drive_job_content_root(job_id: str) -> None:
+    """Borra el directorio temporal de contenido tras subida completa a Drive (modo drivePhasedSync)."""
+    if not job_uses_drive_temp_content(job_id):
+        return
+    root = DRIVE_JOB_CONTENT_ROOT / job_id
+    if not root.exists():
+        return
+    shutil.rmtree(root, ignore_errors=True)
+    merge_job_metadata(job_id, {"driveTempContentCleanedAt": datetime.utcnow().isoformat()})
 
 
 def ensure_job_dirs(job_id: str) -> dict[str, Path]:
     paths = get_job_paths(job_id)
+    paths["state_dir"].mkdir(parents=True, exist_ok=True)
+    paths["content_root"].mkdir(parents=True, exist_ok=True)
     paths["input_dir"].mkdir(parents=True, exist_ok=True)
     paths["generated_dir"].mkdir(parents=True, exist_ok=True)
     paths["pipeline_local_dir"].mkdir(parents=True, exist_ok=True)
+    get_materials_dir(job_id).mkdir(parents=True, exist_ok=True)
+    if job_uses_drive_temp_content(job_id):
+        _cleanup_stale_content_shadow_under_state(paths["state_dir"])
     return paths
 
 
@@ -202,7 +354,7 @@ def read_phase_status(job_id: str) -> dict:
 
 def write_phase_status(job_id: str, payload: dict) -> dict:
     paths = get_job_paths(job_id)
-    paths["base_dir"].mkdir(parents=True, exist_ok=True)
+    paths["state_dir"].mkdir(parents=True, exist_ok=True)
     paths["phase_status_path"].write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
@@ -277,7 +429,7 @@ def create_docs_zip(job_id: str) -> Path:
 
 def create_full_outputs_zip(job_id: str) -> Path:
     paths = get_job_paths(job_id)
-    zip_path = paths["base_dir"] / "full_outputs.zip"
+    zip_path = paths["content_root"] / "full_outputs.zip"
     package_files = _collect_academic_package_files(paths)
 
     with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zip_file:
@@ -294,7 +446,7 @@ def collect_academic_package_files(job_id: str) -> list[tuple[Path, str]]:
 def _collect_academic_package_files(paths: dict[str, Path]) -> list[tuple[Path, str]]:
     missing: list[str] = []
     package_files: list[tuple[Path, str]] = []
-    job_id = paths["base_dir"].name
+    job_id = paths["job_id"]
     category = get_category(get_job_category(job_id))
 
     syllabus_path = paths["input_dir"] / "syllabus.docx"
@@ -355,6 +507,66 @@ def _collect_academic_package_files(paths: dict[str, Path]) -> list[tuple[Path, 
         message = "No se puede crear el paquete académico completo. Faltan archivos: " + ", ".join(missing)
         LOGGER.warning(message)
         raise AcademicPackageError(message)
+
+    return package_files
+
+
+def collect_partial_package_files_for_drive_phase(job_id: str, phase: str) -> list[tuple[Path, str]]:
+    """Archivos locales existentes para una fase Drive (sin exigir paquete completo)."""
+    paths = get_job_paths(job_id)
+    phase_norm = (phase or "").strip().lower()
+    package_files: list[tuple[Path, str]] = []
+    category = get_category(get_job_category(job_id))
+
+    if phase_norm == "syllabus":
+        syllabus_path = paths["input_dir"] / "syllabus.docx"
+        if syllabus_path.exists() and syllabus_path.is_file():
+            package_files.append((syllabus_path, f"{ACADEMIC_PACKAGE_ROOT}/SYLLABUS/syllabus.docx"))
+        return package_files
+
+    if phase_norm == "granules":
+        granules = _find_granule_docx(paths["generated_dir"])
+        for index in range(1, 6):
+            code = f"G{index}"
+            granule_path = granules.get(code)
+            if granule_path:
+                package_files.append((granule_path, f"{ACADEMIC_PACKAGE_ROOT}/CONTENIDOS/{code}.docx"))
+        return package_files
+
+    if phase_norm == "activities":
+        txt_files = _find_pipeline_txt(paths["pipeline_local_dir"])
+        for short_name in ("PDA.txt", "QUIZ_1.txt", "QUIZ_2.txt", "QUIZ_3.txt"):
+            txt_path = txt_files.get(short_name)
+            if txt_path:
+                package_files.append((txt_path, f"{ACADEMIC_PACKAGE_ROOT}/ACTIVIDADES_MOODLE/{short_name}"))
+        academic_docx = _find_pipeline_academic_docx(paths["pipeline_local_dir"])
+        for short_name in ("ACA.docx", "FORO.docx", "PRESENTACION.docx"):
+            docx_path = academic_docx.get(short_name)
+            if docx_path:
+                package_files.append((docx_path, f"{ACADEMIC_PACKAGE_ROOT}/ACTIVIDADES_MOODLE/{short_name}"))
+        return package_files
+
+    if phase_norm == "resources":
+        materials_dir = get_materials_dir(job_id)
+        if category.key == "especializacion":
+            material_files = _find_specialization_materials(materials_dir)
+            for index in range(1, 6):
+                granule_code = f"G{index}"
+                for material_number, short_name in MATERIAL_SHORT_NAMES.items():
+                    material_path = material_files.get((granule_code, material_number))
+                    if material_path:
+                        package_files.append((
+                            material_path,
+                            f"{ACADEMIC_PACKAGE_ROOT}/RECURSOS_COMPLEMENTARIOS/{granule_code}/{short_name}",
+                        ))
+        else:
+            if materials_dir.exists():
+                for material_path in sorted(materials_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materials_dir)).lower()):
+                    if not material_path.is_file():
+                        continue
+                    relative = material_path.relative_to(materials_dir).as_posix()
+                    package_files.append((material_path, f"{ACADEMIC_PACKAGE_ROOT}/RECURSOS_COMPLEMENTARIOS/{relative}"))
+        return package_files
 
     return package_files
 
@@ -422,7 +634,7 @@ def academic_package_filename(program_name: str | None = None) -> str:
 
 def create_phase_zip(job_id: str, phase: str) -> Path:
     paths = get_job_paths(job_id)
-    zip_path = paths["base_dir"] / f"{phase}.zip"
+    zip_path = paths["content_root"] / f"{phase}.zip"
 
     with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zip_file:
         if phase == "granules":
