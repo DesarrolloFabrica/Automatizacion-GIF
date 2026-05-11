@@ -8,7 +8,7 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +35,7 @@ from automation_engine.generate_materiales_especializacion import (
     extract_material_prompt,
     extract_system_prompt,
     generate_material_content,
+    _parse_markdown_tables,
     resolve_layout_renderer_key,
     save_docx_with_structure,
     validate_material_content,
@@ -58,6 +59,60 @@ def validate_material_prompts(prompt_text: str, materials: tuple[MaterialDefinit
         except ValueError:
             missing.append(material.seccion_prompt)
     return missing
+
+
+def parse_material_filter(value: str | None) -> set[str] | None:
+    if not value:
+        return None
+    materials = {part.strip().zfill(2) for part in value.split(",") if part.strip()}
+    return materials or None
+
+
+def filter_materials(materials: Iterable[MaterialDefinition], only_materials: set[str] | None) -> tuple[MaterialDefinition, ...]:
+    selected = tuple(material for material in materials if only_materials is None or material.nn in only_materials)
+    if only_materials and not selected:
+        raise ValueError(f"No hay materiales configurados para el filtro: {', '.join(sorted(only_materials))}")
+    return selected
+
+
+def write_material_debug(
+    debug_dir: Path | None,
+    granule_code: str,
+    material_nn: str,
+    raw_content: str,
+    cleaned_content: str,
+) -> dict:
+    tables = _parse_markdown_tables(cleaned_content)
+    scene_rows = 0
+    for header, rows in tables:
+        normalized_header = " | ".join(cell.lower() for cell in header)
+        if "escena" in normalized_header:
+            scene_rows += len(rows)
+
+    stats = {
+        "raw_chars": len(raw_content or ""),
+        "cleaned_chars": len(cleaned_content or ""),
+        "parsed_tables": len(tables),
+        "scene_rows": scene_rows,
+    }
+    if not debug_dir:
+        return stats
+
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    (debug_dir / f"debug_raw_{granule_code}_{material_nn}.md").write_text(raw_content or "", encoding="utf-8")
+    (debug_dir / f"debug_cleaned_{granule_code}_{material_nn}.md").write_text(cleaned_content or "", encoding="utf-8")
+    parsed_payload = {
+        "stats": stats,
+        "tables": [
+            {"header": header, "row_count": len(rows), "rows_preview": rows[:3]}
+            for header, rows in tables
+        ],
+    }
+    (debug_dir / f"debug_parsed_{granule_code}_{material_nn}.json").write_text(
+        json.dumps(parsed_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return stats
 
 
 def build_user_prompt(
@@ -118,6 +173,10 @@ def generate_all_materiales(
     model: str,
     max_tokens: int,
     temperature: float,
+    only_materials: set[str] | None = None,
+    flat_output: bool = False,
+    disable_drive_upload: bool = False,
+    debug_dir: Path | None = None,
 ) -> dict:
     if OpenAI is None:
         raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
@@ -128,6 +187,8 @@ def generate_all_materiales(
     if not category.enabled_for_package:
         raise ValueError(category.disabled_reason or f"{category.label} no tiene prompt de materiales configurado.")
 
+    materials_to_generate = filter_materials(category.materials, only_materials)
+
     print(f"\n{'=' * 60}")
     print(f"=== FASE 3: GENERACION DE MATERIALES - {category.label.upper()} ===")
     print(f"{'=' * 60}")
@@ -135,7 +196,15 @@ def generate_all_materiales(
     print(f"Categoria: {category.key} ({category.label})")
     print(f"Directorio de granulos: {generated_dir}")
     print(f"Directorio de salida: {output_base}")
-    print(f"Materiales por granulo: {len(category.materials)}")
+    print(f"Materiales por granulo: {len(materials_to_generate)}")
+    if only_materials:
+        print(f"Filtro de materiales activo: {', '.join(material.nn for material in materials_to_generate)}")
+    if flat_output:
+        print("Salida plana activa: los DOCX se guardaran directamente en el directorio de salida.")
+    if disable_drive_upload:
+        print("Drive incremental desactivado para esta ejecucion.")
+    if debug_dir:
+        print(f"Debug de respuestas activo: {debug_dir}")
     if category.reserved_materials:
         reserved = ", ".join(f"{m.nn} - {m.nombre}" for m in category.reserved_materials)
         print(f"Materiales reservados/no generados: {reserved}")
@@ -145,16 +214,16 @@ def generate_all_materiales(
     system_prompt = extract_system_prompt(prompt_text)
     print("System prompt extraido correctamente.")
 
-    missing_prompts = validate_material_prompts(prompt_text, category.materials)
+    missing_prompts = validate_material_prompts(prompt_text, materials_to_generate)
     if missing_prompts:
         raise ValueError(
             f"Faltan {len(missing_prompts)} bloques de prompt para {category.label}. "
             f"Secciones no encontradas: {', '.join(missing_prompts)}."
         )
-    print(f"Validacion de prompts: {len(category.materials)}/{len(category.materials)} bloques encontrados.")
+    print(f"Validacion de prompts: {len(materials_to_generate)}/{len(materials_to_generate)} bloques encontrados.")
 
     material_prompts = {}
-    for material in category.materials:
+    for material in materials_to_generate:
         prompt_particular = extract_material_prompt(prompt_text, material.seccion_prompt)
         material_prompts[material.nn] = prompt_particular
         print(f"  Material configurado: {material.nn} - {material.nombre}")
@@ -175,7 +244,7 @@ def generate_all_materiales(
         "category_label": category.label,
         "fecha": datetime.now(timezone.utc).isoformat(),
         "total_granules": len(granules),
-        "total_materiales_esperados": len(granules) * len(category.materials),
+        "total_materiales_esperados": len(granules) * len(materials_to_generate),
         "total_materiales_generados": 0,
         "total_errores": 0,
         "total_advertencias": 0,
@@ -202,7 +271,7 @@ def generate_all_materiales(
             summary["total_errores"] += 1
             continue
 
-        granule_output_dir = output_base / build_granule_folder_name(granule_code, tema)
+        granule_output_dir = output_base if flat_output else output_base / build_granule_folder_name(granule_code, tema)
         granule_output_dir.mkdir(parents=True, exist_ok=True)
         print(f"  Carpeta de salida: {granule_output_dir}")
 
@@ -210,7 +279,7 @@ def generate_all_materiales(
         granule_errors = []
         granule_warnings_count = 0
 
-        for material in category.materials:
+        for material in materials_to_generate:
             material_filename = build_material_filename(
                 material.nn, granule_code, material.nombre, tema_corto, category.version, category.extension
             )
@@ -229,14 +298,23 @@ def generate_all_materiales(
                     tema_corto=tema_corto,
                     version=category.version,
                 )
-                content = clean_ai_response(generate_material_content(
+                raw_content = generate_material_content(
                     client=client,
                     model=model,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                ))
+                )
+                content = clean_ai_response(raw_content)
+                debug_stats = write_material_debug(debug_dir, granule_code, material.nn, raw_content, content)
+                print(
+                    "    Debug contenido: "
+                    f"raw={debug_stats['raw_chars']} chars, "
+                    f"cleaned={debug_stats['cleaned_chars']} chars, "
+                    f"tablas={debug_stats['parsed_tables']}, "
+                    f"escenas={debug_stats['scene_rows']}"
+                )
                 if not content or len(content) < MIN_RESPONSE_CHARS:
                     raise ValueError(f"Respuesta insuficiente ({len(content)} chars). Minimo: {MIN_RESPONSE_CHARS}.")
 
@@ -265,13 +343,15 @@ def generate_all_materiales(
                     raise ValueError("El archivo se guardo vacio o no se creo.")
 
                 file_size = material_output_path.stat().st_size
+                print(f"    DOCX final: {file_size} bytes")
                 print(f"    Material guardado: {material_filename} ({file_size} bytes)")
-                try:
-                    from automation_engine.incremental_drive_upload import upload_material_file_if_configured
+                if not disable_drive_upload:
+                    try:
+                        from automation_engine.incremental_drive_upload import upload_material_file_if_configured
 
-                    upload_material_file_if_configured(material_output_path)
-                except Exception as sync_exc:
-                    print(f"    Drive incremental: aviso — {sync_exc}")
+                        upload_material_file_if_configured(material_output_path)
+                    except Exception as sync_exc:
+                        print(f"    Drive incremental: aviso — {sync_exc}")
                 granule_summary["materiales"][material.nn] = {
                     "nombre": material.nombre,
                     "archivo": material_filename,
@@ -279,6 +359,7 @@ def generate_all_materiales(
                     "validation_status": val_status,
                     "warnings": val_warnings,
                     "size_bytes": file_size,
+                    "debug": debug_stats,
                 }
                 summary["total_materiales_generados"] += 1
                 manifest_entries.append({
@@ -291,6 +372,7 @@ def generate_all_materiales(
                     "path": str(material_output_path),
                     "validation_status": val_status,
                     "warnings": val_warnings,
+                    "debug": debug_stats,
                 })
             except Exception as exc:
                 error_msg = f"Error material {material.nn} {granule_code} ({material.nombre}): {exc}"
@@ -338,6 +420,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
     parser.add_argument("--max-tokens", type=int, default=8000, help="Maximo de tokens por material")
     parser.add_argument("--temperature", type=float, default=0.5, help="Creatividad de generacion")
+    parser.add_argument("--materials", "--only-material", dest="materials", help="Filtro de materiales por NN, ejemplo: 03 o 02,03")
+    parser.add_argument("--flat-output", action="store_true", help="Guarda los DOCX directamente en output-dir, sin subcarpetas por granulo")
+    parser.add_argument("--no-drive-upload", action="store_true", help="Desactiva el hook opcional de subida incremental a Drive")
+    parser.add_argument("--debug-dir", help="Directorio para guardar raw, cleaned y tablas parseadas por material")
     return parser.parse_args()
 
 
@@ -357,6 +443,10 @@ def main() -> None:
         model=args.model,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
+        only_materials=parse_material_filter(args.materials),
+        flat_output=args.flat_output,
+        disable_drive_upload=args.no_drive_upload,
+        debug_dir=Path(args.debug_dir) if args.debug_dir else None,
     )
 
     summary_path = output_base.parent / "summary.json"

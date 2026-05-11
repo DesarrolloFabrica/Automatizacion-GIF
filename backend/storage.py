@@ -378,6 +378,18 @@ def write_phase_status(job_id: str, payload: dict) -> dict:
     return payload
 
 
+def reset_job_phases_from(job_id: str, restart_from: str) -> dict:
+    """Pone en pending la fase `restart_from` y todas las posteriores (p. ej. re-ejecutar gránulos invalida pipeline/materiales/subida)."""
+    order = ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")
+    if restart_from not in order:
+        raise ValueError(f"restart_from inválido: {restart_from}")
+    payload = read_phase_status(job_id)
+    idx = order.index(restart_from)
+    for key in order[idx:]:
+        payload[key] = _empty_phase("pending")
+    return write_phase_status(job_id, payload)
+
+
 def update_phase_status(job_id: str, phase_key: str, *, status: str | None = None, files: list[str] | None = None) -> dict:
     payload = read_phase_status(job_id)
     payload.setdefault(phase_key, _empty_phase("pending"))

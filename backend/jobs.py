@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import threading
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -190,6 +192,84 @@ def set_job_failed_with_message(job_id: str, message: str) -> None:
         set_job_finished(job_id, success=False, files_listing_fn=lambda _: [])
 
 
+def _merge_subprocess_env(env_vars: dict[str, str] | None) -> dict[str, str]:
+    merged = os.environ.copy()
+    if env_vars:
+        merged.update(env_vars)
+    merged.setdefault("PYTHONUTF8", "1")
+    merged.setdefault("PYTHONIOENCODING", "utf-8")
+    return merged
+
+
+def _process_subprocess_line(
+    job_id: str,
+    line: str,
+    *,
+    progress_map: dict[str, str] | None,
+    parse_drive_uploads: bool,
+) -> None:
+    append_log(job_id, line)
+    if parse_drive_uploads:
+        parsed = parse_drive_upload_line(line)
+        if parsed:
+            with _LOCK:
+                _JOBS[job_id].drive_links.append(parsed)
+    update_progress_from_log(job_id, line, progress_map)
+
+
+def _write_subprocess_failure_artifacts(
+    job_id: str,
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    return_code: int,
+    stdout_text: str,
+    stderr_text: str,
+    host_traceback: str | None = None,
+) -> Path:
+    """Guarda stdout/stderr completos y un error.log con contexto (comando, cwd, env filtrado)."""
+    paths = get_job_paths(job_id)
+    logs_dir = paths["state_dir"] / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "stdout.log").write_text(stdout_text, encoding="utf-8")
+    (logs_dir / "stderr.log").write_text(stderr_text, encoding="utf-8")
+
+    def mask_secret(val: str) -> str:
+        s = str(val)
+        if len(s) <= 6:
+            return "***"
+        return s[:3] + "***" + s[-2:]
+
+    safe_env: dict[str, str] = {}
+    for key, val in sorted(env.items()):
+        ku = key.upper()
+        if any(x in ku for x in ("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL")):
+            safe_env[key] = mask_secret(val) if val else ""
+        elif key.startswith(("OPENAI", "PYTHON", "AUTOMATIZACION", "PATH", "VIRTUAL_ENV", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR")):
+            safe_env[key] = str(val)[:800]
+
+    parts = [
+        f"job_id={job_id}",
+        f"return_code={return_code}",
+        f"cwd={cwd}",
+        f"command={json.dumps(command, ensure_ascii=False)}",
+        "",
+        "=== environment (filtered / masked) ===",
+        json.dumps(safe_env, ensure_ascii=False, indent=2),
+        "",
+        "=== stderr (full) ===",
+        stderr_text,
+        "",
+        "=== stdout (full) ===",
+        stdout_text,
+    ]
+    if host_traceback:
+        parts.extend(["", "=== host-side exception ===", host_traceback])
+    err_path = logs_dir / "error.log"
+    err_path.write_text("\n".join(parts), encoding="utf-8")
+    return err_path
+
+
 def run_subprocess_job(
     job_id: str,
     command: list[str],
@@ -269,32 +349,99 @@ def _run_command_and_stream_logs(
     progress_map: dict[str, str] | None,
     parse_drive_uploads: bool,
 ) -> int:
+    merged_env = _merge_subprocess_env(env_vars)
     append_log(job_id, f"Ejecutando comando: {' '.join(command)}")
+    append_log(job_id, f"cwd={cwd}")
+    append_log(
+        job_id,
+        f"Entorno subprocess: PYTHONUTF8={merged_env.get('PYTHONUTF8', '')} PYTHONIOENCODING={merged_env.get('PYTHONIOENCODING', '')}",
+    )
+    host_tb: str | None = None
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def read_stdout() -> None:
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                stdout_chunks.append(line)
+                _process_subprocess_line(job_id, line, progress_map=progress_map, parse_drive_uploads=parse_drive_uploads)
+        except Exception as exc:
+            stdout_chunks.append(f"[jobs.py reader stdout] {exc!r}\n")
+
+    def read_stderr() -> None:
+        try:
+            assert process.stderr is not None
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                _process_subprocess_line(job_id, line, progress_map=progress_map, parse_drive_uploads=parse_drive_uploads)
+        except Exception as exc:
+            stderr_chunks.append(f"[jobs.py reader stderr] {exc!r}\n")
+
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        env=env_vars or os.environ.copy(),
+        env=merged_env,
     )
     _ACTIVE_SUBPROCESSES[job_id] = process
     try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            append_log(job_id, line)
-            if parse_drive_uploads:
-                parsed = parse_drive_upload_line(line)
-                if parsed:
-                    with _LOCK:
-                        _JOBS[job_id].drive_links.append(parsed)
-            update_progress_from_log(job_id, line, progress_map)
-
+        tout = threading.Thread(target=read_stdout, daemon=True)
+        terr = threading.Thread(target=read_stderr, daemon=True)
+        tout.start()
+        terr.start()
+        tout.join()
+        terr.join()
         return_code = process.wait()
         append_log(job_id, f"Proceso finalizado con código: {return_code}")
+        stdout_text = "".join(stdout_chunks)
+        stderr_text = "".join(stderr_chunks)
+        if return_code != 0:
+            err_path = _write_subprocess_failure_artifacts(
+                job_id,
+                command,
+                cwd,
+                merged_env,
+                return_code,
+                stdout_text,
+                stderr_text,
+                host_traceback=host_tb,
+            )
+            append_log(
+                job_id,
+                f"=== Subprocess falló (código {return_code}). Diagnóstico: outputs/jobs/{job_id}/logs/error.log (y stdout.log / stderr.log) ===",
+            )
+            if stderr_text.strip():
+                append_log(job_id, "=== Últimas líneas de stderr (error / traceback del hijo) ===")
+                for tail_line in stderr_text.strip().splitlines()[-50:]:
+                    append_log(job_id, tail_line)
         return return_code
+    except Exception as exc:
+        host_tb = traceback.format_exc()
+        append_log(job_id, f"Error ejecutando subprocess: {exc}")
+        append_log(job_id, host_tb)
+        stdout_text = "".join(stdout_chunks)
+        stderr_text = "".join(stderr_chunks)
+        try:
+            if process.poll() is None:
+                process.terminate()
+        except Exception:
+            pass
+        _write_subprocess_failure_artifacts(
+            job_id,
+            command,
+            cwd,
+            merged_env,
+            process.poll() if process.poll() is not None else -1,
+            stdout_text,
+            stderr_text,
+            host_traceback=host_tb,
+        )
+        return -1
     finally:
         _ACTIVE_SUBPROCESSES.pop(job_id, None)
 

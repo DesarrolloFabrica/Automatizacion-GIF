@@ -2,7 +2,9 @@ import argparse
 import json
 import os
 import re
+import sys
 import textwrap
+import traceback
 import unicodedata
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -1301,7 +1303,17 @@ def generate_document(client: OpenAI, model: str, system_prompt: str, user_promp
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    return response.choices[0].message.content.strip()
+    choice = response.choices[0]
+    content = choice.message.content
+    if content is None:
+        finish = getattr(choice, "finish_reason", None)
+        refusal = getattr(choice.message, "refusal", None)
+        raise RuntimeError(
+            "OpenAI devolvió message.content vacío (None). "
+            f"finish_reason={finish!r}; refusal={refusal!r}. "
+            "Revisa modelo, max_tokens, moderación o filtrado de contenido."
+        )
+    return content.strip()
 
 
 def word_count(text: str) -> int:
@@ -1513,6 +1525,9 @@ def max_references_for_level(level: str) -> int:
     }[level]
 
 
+MAX_SECTION_EXPANSION_ATTEMPTS = 3
+
+
 def build_expansion_prompt(plan: CoursePlan, topic: str, section: dict, current_text: str) -> str:
     return f"""
 La siguiente seccion quedo demasiado corta para un documento academico de 20 a 30 paginas.
@@ -1591,16 +1606,37 @@ def expand_if_short(
     elif word_count(section_text) >= section["min_words"]:
         return section_text
 
-    print(f"    La seccion quedo corta; solicitando ampliacion.")
-    expansion = generate_document(
-        client=client,
-        model=model,
-        system_prompt=system_prompt,
-        user_prompt=build_expansion_prompt(plan, topic, section, section_text),
-        max_tokens=max_tokens,
-        temperature=temperature,
+    combined = section_text
+    for attempt in range(1, MAX_SECTION_EXPANSION_ATTEMPTS + 1):
+        print(f"    La seccion quedo corta; solicitando ampliacion (intento {attempt}/{MAX_SECTION_EXPANSION_ATTEMPTS}).")
+        try:
+            expansion = generate_document(
+                client=client,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=build_expansion_prompt(plan, topic, section, combined),
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        except Exception as exc:
+            print(f"    ERROR en ampliacion: {type(exc).__name__}: {exc}")
+            traceback.print_exc(file=sys.stderr)
+            if attempt >= MAX_SECTION_EXPANSION_ATTEMPTS:
+                print(
+                    f"    ADVERTENCIA: no se pudo ampliar la seccion {section['key']} tras {MAX_SECTION_EXPANSION_ATTEMPTS} intentos; "
+                    f"se continua con ~{word_count(combined)} palabras (minimo institucional {section['min_words']}).",
+                )
+                return combined
+            continue
+        combined = (combined.rstrip() + "\n\n" + strip_repeated_title(expansion, section["title"])).strip()
+        if word_count(combined) >= section["min_words"]:
+            return combined
+
+    print(
+        f"    ADVERTENCIA: tras {MAX_SECTION_EXPANSION_ATTEMPTS} ampliaciones la seccion {section['key']} sigue corta "
+        f"({word_count(combined)} < {section['min_words']}); se continua con el texto disponible.",
     )
-    return (section_text.rstrip() + "\n\n" + strip_repeated_title(expansion, section["title"])).strip()
+    return combined
 
 
 def generate_long_document(
@@ -1833,4 +1869,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.stderr.write("\nInterrumpido por el usuario.\n")
+        sys.stderr.flush()
+        raise SystemExit(130)
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.write(f"\n[FATAL] {type(exc).__name__}: {exc}\n")
+        sys.stderr.flush()
+        raise SystemExit(1) from exc

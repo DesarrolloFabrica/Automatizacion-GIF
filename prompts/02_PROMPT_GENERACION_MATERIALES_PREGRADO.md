@@ -67,7 +67,7 @@ La ruta del nivel PREGRADO es:
 
 El cierre del tema NO es un material independiente. Debe integrarse en el último o penúltimo material que corresponda, normalmente en la REVISTA DIGITAL POR TEMA, el VIDEO POR TEMA, el PODCAST INVITACIÓN o las FICHAS DE ESTUDIO SCORM, según el caso.
 
-El VIDEO PRESENTACIÓN DEL PROBLEMA se conserva en la ruta para entender la secuencia de aprendizaje y orientar a presentadoras. Su producción principal corresponde a presentadoras; el equipo de diseño solo apoya intro, outro, textos en pantalla o recursos visuales básicos cuando aplique.
+El VIDEO PRESENTACIÓN DEL PROBLEMA debe generarse como un GUION AUDIOVISUAL COMPLETO EN FORMATO DOCX. El documento debe funcionar como base para grabación, guía para presentadora, guía de edición, apoyo para motion graphics y documento de producción audiovisual listo para ejecutarse.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 NOMENCLATURA OBLIGATORIA
@@ -100,7 +100,7 @@ TABLA DE NÚMEROS NN PARA PREGRADO
 |---|---|---|
 | 01 | PODCAST INVITACIÓN | MP3 |
 | 02 | INFOGRAFÍA UNA PÁGINA | PNG, PDF o formato solicitado para una página con fondo animado |
-| 03 | VIDEO PRESENTACIÓN DEL PROBLEMA | MP4 |
+| 03 | VIDEO PRESENTACIÓN DEL PROBLEMA | DOCX |
 | 04 | GLOSARIO POR TEMA | PDF |
 | 05 | VIDEO POR TEMA | MP4 |
 | 06 | REVISTA DIGITAL POR TEMA | PDF |
@@ -309,9 +309,17 @@ Entrega también:
 ### Prompt
 
 ```text
-Genera el guion para VIDEO PRESENTACIÓN DEL PROBLEMA del nivel PREGRADO.
+Genera el GUION AUDIOVISUAL COMPLETO EN FORMATO DOCX para VIDEO PRESENTACIÓN DEL PROBLEMA del nivel PREGRADO.
 
-Este video es principalmente para presentadoras. El equipo de diseño lo conserva en la ruta para entender la secuencia y apoyar intro/outro, textos en pantalla o recursos visuales básicos.
+Este material NO es un MP4 final, NO es una portada, NO es una ficha técnica mínima y NO es una simple guía para presentadora. Debe ser un documento de producción audiovisual completo, con suficiente desarrollo narrativo y pedagógico para que el equipo pueda grabar, editar y producir el video directamente desde el documento.
+
+El documento debe servir como:
+- Base para grabación.
+- Guía para presentadora.
+- Guía de edición.
+- Apoyo para motion graphics.
+- Apoyo para producción audiovisual.
+- Estructura lista para exportar a producción audiovisual.
 
 Usa únicamente estas secciones del GUION MAESTRO:
 - 1. Introducción.
@@ -322,38 +330,54 @@ Usa únicamente estas secciones del GUION MAESTRO:
 - 18. Producción audiovisual.
 
 Duración sugerida:
-- 45 a 60 segundos.
+- 3 a 5 minutos.
 
 Estructura obligatoria por escena:
 
-| Escena | Duración | Cámara | Texto a cámara para presentadora | Apoyo visual sugerido | Texto en pantalla | Intención pedagógica | Conexión con ruta |
-|---|---|---|---|---|---|---|---|
+| Escena | Tiempo estimado | Objetivo narrativo | Guion hablado completo | Acción visual sugerida | Recursos visuales | Texto en pantalla | Transición | Fuente del GUION MAESTRO |
+|---|---|---|---|---|---|---|---|---|
 
 Escenas:
-1. Apertura con pregunta, reto o situación.
-2. Contexto breve del problema.
-3. Promesa de aprendizaje.
-4. Transición al GLOSARIO POR TEMA.
+Debe generar mínimo 8 escenas y máximo 14 escenas.
+
+Contenido obligatorio del guion:
+- Introducción fuerte.
+- Problema inicial.
+- Contexto.
+- Desarrollo del conflicto.
+- Explicación pedagógica.
+- Ejemplos.
+- Transiciones entre ideas.
+- Reflexión.
+- Cierre real del tema.
+- CTA final.
 
 Reglas:
-- El texto debe estar escrito como guion hablado para presentadora.
-- Debe parecer natural en cámara.
+- El campo "Guion hablado completo" debe contener texto real de locución, natural, fluido y listo para grabación.
+- Cada escena debe incluir entre 80 y 180 palabras en el campo "Guion hablado completo".
+- No usar bullets, palabras sueltas, frases cortas ni resúmenes dentro del campo "Guion hablado completo".
+- Debe desarrollar una narrativa audiovisual completa, no una ficha técnica.
+- Debe incluir escenas, narrativa, texto de presentadora, indicaciones visuales, texto en pantalla, transiciones, cierre, duración por escena, apoyo audiovisual y recursos sugeridos.
 - Debe usar un tono motivador, claro y cercano.
-- No desarrollar todo el tema.
 - No inventar datos o casos.
 - Debe mencionar el material anterior: INFOGRAFÍA UNA PÁGINA.
 - Debe preparar el siguiente material: GLOSARIO POR TEMA.
-- Si el cierre integrado no corresponde aquí, no cerrar el tema completo.
-- Incluir textos de pantalla breves: máximo 6 palabras por aparición.
+- Debe cerrar realmente el tema presentado: resumir el aprendizaje, dejar una reflexión, conectar con el siguiente material y generar continuidad pedagógica.
+- El texto en pantalla puede incluir títulos, frases clave, palabras de impacto, preguntas, conceptos visuales, subtítulos completos, frases pedagógicas y overlays.
+- El apoyo visual debe sugerir motion graphics, imágenes, diagramas, b-roll, mockups, escenas, UI si aplica, ejemplos visuales, recursos académicos, cortes, zooms y transiciones.
+- El resultado debe verse como un documento de producción audiovisual con varias páginas, contenido completo, tablas completas y guion real.
 
 Entrega además:
 
 | Recomendación audiovisual | Detalle |
 |---|---|
-| Plano sugerido | |
-| Ritmo | |
+| Enfoque narrativo | |
+| Estilo visual sugerido | |
+| Ritmo de edición | |
 | Subtítulos | Obligatorios |
-| Archivo sugerido | 03_GX_TEMA_VERSION.MP4 |
+| Recursos sugeridos | |
+| Validación de contenido | Confirmar que contiene entre 8 y 14 escenas, que cada escena tiene guion hablado completo de 80 a 180 palabras y que el documento no es solo portada. |
+| Archivo sugerido | 03_GX_VIDEO_PRESENTACION_DEL_PROBLEMA_TEMA_VERSION.DOCX |
 ```
 
 ---

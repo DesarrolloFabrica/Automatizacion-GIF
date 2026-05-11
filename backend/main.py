@@ -57,6 +57,7 @@ from storage import (
     read_job_metadata,
     read_phase_status,
     refresh_phase_files,
+    reset_job_phases_from,
     accumulate_drive_counters,
     save_job_metadata,
     save_granule_source_file,
@@ -402,6 +403,8 @@ def validate_required_api_key() -> None:
 def _env_for_academic_subprocess(job_id: str) -> dict[str, str]:
     """Expone el job_id a generate_* para subida incremental a Drive (solo si el job usa carpeta Drive por fases)."""
     env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     meta = read_job_metadata(job_id)
     if meta.get("drivePhasedSync") and meta.get("driveParentFolderId"):
         env["AUTOMATIZACION_GIF_JOB_ID"] = job_id
@@ -568,6 +571,67 @@ async def create_generation_job(
     return JobCreateResponse(jobId=job_id, status="queued")
 
 
+@app.post("/api/jobs/{job_id}/retry-granules", response_model=JobCreateResponse)
+def retry_granules_generation(job_id: str) -> JobCreateResponse:
+    """Reinicia la Fase 1 (gránulos) en un job existente con syllabus ya guardado; invalida fases posteriores en disco."""
+    validate_required_api_key()
+    _ensure_not_running(job_id)
+    job = _ensure_job_exists(job_id)
+    if job.job_kind != "granules_academic_package":
+        raise HTTPException(status_code=400, detail="Este endpoint solo aplica para jobs de paquete académico.")
+
+    paths = get_job_paths(job_id)
+    syllabus_path = paths["input_dir"] / "syllabus.docx"
+    if not syllabus_path.is_file():
+        raise HTTPException(status_code=400, detail="No hay syllabus guardado en este job; crea un job nuevo con el archivo.")
+
+    phase_status = read_phase_status(job_id)
+    granule_state = phase_status.get("granules", {}).get("status", "pending")
+    if granule_state == "running":
+        raise HTTPException(status_code=409, detail="La fase de gránulos está en ejecución. Cancela o espera a que termine.")
+    if granule_state not in ("failed", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se puede reintentar gránulos si la fase falló o ya terminó (estado actual: {granule_state}).",
+        )
+
+    reset_job_phases_from(job_id, "granules")
+    category_key = get_job_category(job_id)
+    category = get_category(category_key)
+    if not category.enabled_for_package:
+        raise HTTPException(status_code=400, detail=category.disabled_reason or f"{category.label} no tiene prompt de materiales configurado.")
+
+    command = [
+        sys.executable,
+        "-m",
+        "automation_engine.generate_guiones",
+        "--syllabus",
+        str(paths["input_dir"] / "syllabus.docx"),
+        "--nivel",
+        category_key,
+        "--output-dir",
+        str(paths["generated_dir"]),
+    ]
+    progress_map = ACADEMIC_PACKAGE_PROGRESS_MAP
+    files_listing_fn = lambda j: list_generated_docx_with_materiales(j)
+
+    append_log(job_id, "=== REINTENTO: FASE 1 GENERACIÓN DE GRÁNULOS (mismo job) ===")
+    start_job_thread(
+        job_id=job_id,
+        command=command,
+        cwd=PROJECT_ROOT,
+        env_vars=_env_for_academic_subprocess(job_id),
+        initial_progress_step="leyendo syllabus",
+        progress_map=progress_map,
+        parse_drive_uploads=False,
+        job_kind="granules_academic_package",
+        files_listing_fn=files_listing_fn,
+        on_start=_phase_start_callback("granules"),
+        on_complete=_phase_complete_callback("granules", lambda j: list_generated_docx(j)),
+    )
+    return JobCreateResponse(jobId=job_id, status="queued")
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str) -> JobStatusResponse:
     job = get_job(job_id)
@@ -647,6 +711,50 @@ def start_pipeline_local_phase(job_id: str) -> JobCreateResponse:
     return JobCreateResponse(jobId=job_id, status="queued")
 
 
+@app.post("/api/jobs/{job_id}/retry-pipeline-local", response_model=JobCreateResponse)
+def retry_pipeline_local_phase(job_id: str) -> JobCreateResponse:
+    """Reinicia la Fase 2 (TXT/DOCX) invalidando materiales y subida posteriores en el estado del job."""
+    validate_required_api_key()
+    _ensure_not_running(job_id)
+    job = _ensure_job_exists(job_id)
+    if job.job_kind != "granules_academic_package":
+        raise HTTPException(status_code=400, detail="Este endpoint solo aplica para jobs de paquete académico.")
+
+    paths = get_job_paths(job_id)
+    if len(list_generated_docx(job_id)) == 0:
+        raise HTTPException(status_code=400, detail="No hay gránulos generados. Ejecuta primero la Fase 1.")
+
+    phase_status = read_phase_status(job_id)
+    if phase_status["granules"]["status"] != "completed":
+        raise HTTPException(status_code=400, detail="La Fase 1 debe estar completada antes de regenerar actividades.")
+
+    pl_status = phase_status.get("pipelineLocal", {}).get("status", "pending")
+    if pl_status == "running":
+        raise HTTPException(status_code=409, detail="La fase de actividades está en ejecución.")
+    if pl_status not in ("failed", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se puede reiniciar actividades si la fase falló o ya terminó (estado actual: {pl_status}).",
+        )
+
+    reset_job_phases_from(job_id, "pipelineLocal")
+    append_log(job_id, "=== REINTENTO: FASE 2 PIPELINE LOCAL (mismo job) ===")
+    start_job_thread(
+        job_id=job_id,
+        command=_build_pipeline_local_command(paths),
+        cwd=PROJECT_ROOT,
+        env_vars=_env_for_academic_subprocess(job_id),
+        initial_progress_step="generando txt",
+        progress_map=ACADEMIC_PACKAGE_PROGRESS_MAP,
+        parse_drive_uploads=False,
+        job_kind="academic_package_phase",
+        files_listing_fn=lambda j: list_all_job_files(j),
+        on_start=_phase_start_callback("pipelineLocal"),
+        on_complete=_phase_complete_callback("pipelineLocal", lambda j: [f"pipeline_local/{p.name}" for p in list_pipeline_local_files(j)]),
+    )
+    return JobCreateResponse(jobId=job_id, status="queued")
+
+
 @app.post("/api/jobs/{job_id}/materiales-especializacion", response_model=JobCreateResponse)
 def start_materiales_especializacion_phase(job_id: str) -> JobCreateResponse:
     return start_materiales_phase(job_id)
@@ -672,6 +780,55 @@ def start_materiales_phase(job_id: str) -> JobCreateResponse:
     if phase_status["pipelineLocal"]["status"] != "completed":
         raise HTTPException(status_code=400, detail=f"La Fase 2 debe estar completada antes de generar materiales de {category.label}.")
 
+    start_job_thread(
+        job_id=job_id,
+        command=_build_materiales_command(job_id, category.key, paths),
+        cwd=PROJECT_ROOT,
+        env_vars=_env_for_academic_subprocess(job_id),
+        initial_progress_step="generando materiales",
+        progress_map=ACADEMIC_PACKAGE_PROGRESS_MAP,
+        parse_drive_uploads=False,
+        job_kind="academic_package_phase",
+        files_listing_fn=lambda j: list_all_job_files(j),
+        on_start=_phase_start_callback("specializationMaterials"),
+        on_complete=_phase_complete_callback("specializationMaterials", lambda j: [f["relative_path"] for f in list_material_files(j)]),
+    )
+    return JobCreateResponse(jobId=job_id, status="queued")
+
+
+@app.post("/api/jobs/{job_id}/retry-materials", response_model=JobCreateResponse)
+def retry_materials_phase_endpoint(job_id: str) -> JobCreateResponse:
+    """Reinicia la Fase 3 (materiales) invalidando la subida final en el estado del job."""
+    validate_required_api_key()
+    _ensure_not_running(job_id)
+    job = _ensure_job_exists(job_id)
+    if job.job_kind != "granules_academic_package":
+        raise HTTPException(status_code=400, detail="Este endpoint solo aplica para jobs de paquete académico.")
+
+    category_key = get_job_category(job_id)
+    category = get_category(category_key)
+    if not category.enabled_for_package:
+        raise HTTPException(status_code=400, detail=category.disabled_reason or f"{category.label} no tiene prompt de materiales configurado.")
+
+    paths = get_job_paths(job_id)
+    if len(list_generated_docx(job_id)) == 0:
+        raise HTTPException(status_code=400, detail="No hay gránulos generados. Ejecuta primero la Fase 1.")
+
+    phase_status = read_phase_status(job_id)
+    if phase_status["pipelineLocal"]["status"] != "completed":
+        raise HTTPException(status_code=400, detail=f"La Fase 2 debe estar completada antes de regenerar materiales de {category.label}.")
+
+    mat_status = phase_status.get("specializationMaterials", {}).get("status", "pending")
+    if mat_status == "running":
+        raise HTTPException(status_code=409, detail="La fase de materiales está en ejecución.")
+    if mat_status not in ("failed", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se puede reiniciar materiales si la fase falló o ya terminó (estado actual: {mat_status}).",
+        )
+
+    reset_job_phases_from(job_id, "specializationMaterials")
+    append_log(job_id, "=== REINTENTO: FASE 3 MATERIALES (mismo job) ===")
     start_job_thread(
         job_id=job_id,
         command=_build_materiales_command(job_id, category.key, paths),

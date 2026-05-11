@@ -307,6 +307,7 @@ def _looks_like_table_header(cells: List[str]) -> bool:
         "segmento | duracion estimada",
         "escena | duracion | funcion",
         "escena | duracion estimada | funcion",
+        "escena | tiempo estimado | objetivo narrativo",
         "criterio | cumple | observacion",
         "referencia | uso en revista",
         "recurso sugerido | uso pedagogico",
@@ -316,6 +317,38 @@ def _looks_like_table_header(cells: List[str]) -> bool:
         "cierre integrado de la ruta | texto",
     ]
     return any(sig in normalized for sig in header_signatures)
+
+
+def count_visible_docx_chars(doc: Document) -> int:
+    parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                text = cell.text.strip()
+                if text:
+                    parts.append(text)
+    return len("\n".join(parts))
+
+
+def _add_raw_content_fallback(doc: Document, content: str) -> None:
+    cleaned = clean_ai_response(content)
+    if not cleaned:
+        return
+    _add_styled_para(doc, "Contenido generado", size=H1_SIZE, bold=True,
+                      color=COLOR_NAVY, space_before=12, space_after=8)
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            _add_styled_para(doc, _clean_visible_text(stripped), size=BODY_SMALL,
+                              color=COLOR_DARK_GRAY, space_before=0, space_after=3)
+        elif re.match(r"^#{1,6}\s+", stripped):
+            _add_styled_para(doc, re.sub(r"^#{1,6}\s+", "", stripped), size=H2_SIZE,
+                              bold=True, color=COLOR_NAVY, space_before=10, space_after=4)
+        else:
+            _add_text_block(doc, stripped, size=BODY_SIZE,
+                            color=COLOR_DARK_GRAY, space_before=0, space_after=4)
 
 
 def _normalize_header_cell(value: str) -> str:
@@ -700,11 +733,19 @@ def _render_video(doc, content_tables):
 
     for row in rows:
         escena_num = _row_value(row, col_map, ["escena"], 0)
-        duracion = _row_value(row, col_map, ["duracion", "duracion estimada"], 1)
-        funcion = _row_value(row, col_map, ["funcion", "función"], 2)
-        locucion = _row_value(row, col_map, ["locucion", "locución"], 3)
-        visual = _row_value(row, col_map, ["visual sugerido", "visual"], 4)
+        duracion = _row_value(row, col_map, ["duracion", "duracion estimada", "tiempo estimado"], 1)
+        funcion = _row_value(row, col_map, ["funcion", "función", "objetivo narrativo"], 2)
+        locucion = _row_value(row, col_map, [
+            "locucion",
+            "locución",
+            "guion hablado completo",
+            "texto a camara para presentadora",
+            "texto a cámara para presentadora",
+        ], 3)
+        visual = _row_value(row, col_map, ["visual sugerido", "apoyo visual sugerido", "accion visual sugerida", "acción visual sugerida", "visual"], 4)
+        recursos = _row_value(row, col_map, ["recursos visuales", "recursos sugeridos", "apoyo audiovisual"])
         texto_pantalla = _row_value(row, col_map, ["texto en pantalla"], 5)
+        transicion = _row_value(row, col_map, ["transicion", "transición"])
 
         if not escena_num and not funcion:
             continue
@@ -729,13 +770,95 @@ def _render_video(doc, content_tables):
                               bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
             _add_text_block(doc, visual, size=BODY_SIZE,
                             color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+        if recursos:
+            _add_styled_para(doc, "RECURSOS VISUALES:", size=BODY_SMALL,
+                              bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
+            _add_text_block(doc, recursos, size=BODY_SIZE,
+                            color=COLOR_DARK_GRAY, space_before=0, space_after=4)
         if texto_pantalla:
             _add_styled_para(doc, "TEXTO EN PANTALLA:", size=BODY_SMALL,
                               bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
             _add_text_block(doc, texto_pantalla, size=BODY_SIZE,
                             color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+        if transicion:
+            _add_styled_para(doc, "TRANSICION:", size=BODY_SMALL,
+                              bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
+            _add_text_block(doc, transicion, size=BODY_SIZE,
+                            color=COLOR_DARK_GRAY, space_before=0, space_after=4)
 
         _add_separator(doc)
+
+
+def _render_video(doc, content_tables):
+    if not content_tables:
+        return
+
+    for header, rows in content_tables:
+        col_map = _header_map(header)
+        if "escena" not in col_map:
+            continue
+
+        for row in rows:
+            escena_num = _row_value(row, col_map, ["escena"], 0)
+            duracion = _row_value(row, col_map, ["duracion", "duracion estimada", "tiempo estimado"], 1)
+            funcion = _row_value(row, col_map, ["funcion", "función", "objetivo narrativo"], 2)
+            locucion = _row_value(row, col_map, [
+                "locucion",
+                "locución",
+                "guion hablado completo",
+                "texto a camara para presentadora",
+                "texto a cámara para presentadora",
+            ], 3)
+            visual = _row_value(row, col_map, [
+                "visual sugerido",
+                "apoyo visual sugerido",
+                "accion visual sugerida",
+                "acción visual sugerida",
+                "visual",
+            ], 4)
+            recursos = _row_value(row, col_map, ["recursos visuales", "recursos sugeridos", "apoyo audiovisual"])
+            texto_pantalla = _row_value(row, col_map, ["texto en pantalla"], 5)
+            transicion = _row_value(row, col_map, ["transicion", "transición"])
+
+            if not escena_num and not funcion:
+                continue
+
+            escena_label = f"ESCENA {escena_num}" if escena_num else "ESCENA"
+            if funcion:
+                escena_label += f" - {funcion}"
+
+            _add_styled_para(doc, escena_label, size=H2_SIZE, bold=True,
+                              color=COLOR_NAVY, space_before=14, space_after=2)
+            if duracion:
+                _add_styled_para(doc, f"Duracion: {duracion}", size=BODY_SMALL,
+                                  italic=True, color=COLOR_LIGHT_GRAY, space_before=0, space_after=6)
+            if locucion:
+                _add_styled_para(doc, "LOCUCION:", size=BODY_SMALL,
+                                  bold=True, color=COLOR_BLUE, space_before=6, space_after=2)
+                _add_text_block(doc, locucion, size=BODY_SIZE,
+                                color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+            if visual:
+                _add_styled_para(doc, "VISUAL:", size=BODY_SMALL,
+                                  bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
+                _add_text_block(doc, visual, size=BODY_SIZE,
+                                color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+            if recursos:
+                _add_styled_para(doc, "RECURSOS VISUALES:", size=BODY_SMALL,
+                                  bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
+                _add_text_block(doc, recursos, size=BODY_SIZE,
+                                color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+            if texto_pantalla:
+                _add_styled_para(doc, "TEXTO EN PANTALLA:", size=BODY_SMALL,
+                                  bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
+                _add_text_block(doc, texto_pantalla, size=BODY_SIZE,
+                                color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+            if transicion:
+                _add_styled_para(doc, "TRANSICION:", size=BODY_SMALL,
+                                  bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
+                _add_text_block(doc, transicion, size=BODY_SIZE,
+                                color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+
+            _add_separator(doc)
 
 
 def _add_footer_with_page_number(doc, granule_code, material_nombre):
@@ -777,6 +900,105 @@ def _add_footer_with_page_number(doc, granule_code, material_nombre):
 
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
+
+
+def _extract_video_scene_rows(content_tables):
+    scenes = []
+    for header, rows in content_tables:
+        col_map = _header_map(header)
+        if "escena" not in col_map:
+            continue
+        for row in rows:
+            escena_num = _row_value(row, col_map, ["escena"], 0)
+            funcion = _row_value(row, col_map, ["funcion", "función", "objetivo narrativo"], 2)
+            if not escena_num and not funcion:
+                continue
+            scenes.append({
+                "escena": escena_num,
+                "duracion": _row_value(row, col_map, ["duracion", "duracion estimada", "tiempo estimado"], 1),
+                "funcion": funcion,
+                "locucion": _row_value(row, col_map, [
+                    "locucion",
+                    "locución",
+                    "guion hablado completo",
+                    "texto a camara para presentadora",
+                    "texto a cámara para presentadora",
+                ], 3),
+                "visual": _row_value(row, col_map, [
+                    "visual sugerido",
+                    "apoyo visual sugerido",
+                    "accion visual sugerida",
+                    "acción visual sugerida",
+                    "visual",
+                ], 4),
+                "recursos": _row_value(row, col_map, ["recursos visuales", "recursos sugeridos", "apoyo audiovisual"]),
+                "texto_pantalla": _row_value(row, col_map, ["texto en pantalla"], 5),
+                "transicion": _row_value(row, col_map, ["transicion", "transición"]),
+            })
+    return scenes
+
+
+def _add_video_scene_table(doc, scenes):
+    if not scenes:
+        return
+    _add_styled_para(doc, "Tabla de escenas", size=H1_SIZE, bold=True,
+                      color=COLOR_NAVY, space_before=8, space_after=6)
+    headers = ["Escena", "Tiempo", "Objetivo", "Guion hablado", "Visual", "Recursos", "Texto en pantalla", "Transicion"]
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    for idx, header in enumerate(headers):
+        cell = table.rows[0].cells[idx]
+        cell.text = header
+        _set_cell_shading(cell, HEX_ACCENT)
+        _set_cell_font(cell, TABLE_HEADER_SIZE, bold=True, color=COLOR_NAVY)
+    for scene in scenes:
+        cells = table.add_row().cells
+        values = [
+            scene["escena"],
+            scene["duracion"],
+            scene["funcion"],
+            scene["locucion"],
+            scene["visual"],
+            scene["recursos"],
+            scene["texto_pantalla"],
+            scene["transicion"],
+        ]
+        for idx, value in enumerate(values):
+            cells[idx].text = _clean_visible_text(value)
+            _set_cell_font(cells[idx], BODY_SMALL, color=COLOR_DARK_GRAY)
+    _add_separator(doc)
+
+
+def _render_video(doc, content_tables):
+    scenes = _extract_video_scene_rows(content_tables)
+    if not scenes:
+        return
+
+    _add_video_scene_table(doc, scenes)
+    _add_styled_para(doc, "Desarrollo por escena", size=H1_SIZE, bold=True,
+                      color=COLOR_NAVY, space_before=12, space_after=6)
+    for scene in scenes:
+        escena_label = f"ESCENA {scene['escena']}" if scene["escena"] else "ESCENA"
+        if scene["funcion"]:
+            escena_label += f" - {scene['funcion']}"
+        _add_styled_para(doc, escena_label, size=H2_SIZE, bold=True,
+                          color=COLOR_NAVY, space_before=14, space_after=2)
+        if scene["duracion"]:
+            _add_styled_para(doc, f"Duracion: {scene['duracion']}", size=BODY_SMALL,
+                              italic=True, color=COLOR_LIGHT_GRAY, space_before=0, space_after=6)
+        for label, key in [
+            ("LOCUCION:", "locucion"),
+            ("VISUAL:", "visual"),
+            ("RECURSOS VISUALES:", "recursos"),
+            ("TEXTO EN PANTALLA:", "texto_pantalla"),
+            ("TRANSICION:", "transicion"),
+        ]:
+            if scene[key]:
+                _add_styled_para(doc, label, size=BODY_SMALL,
+                                  bold=True, color=COLOR_BLUE, space_before=4, space_after=2)
+                _add_text_block(doc, scene[key], size=BODY_SIZE,
+                                color=COLOR_DARK_GRAY, space_before=0, space_after=4)
+        _add_separator(doc)
 
 
 RENDERERS = {
@@ -904,6 +1126,8 @@ def _validate_rendered_docx(output_path: Path, nn: Optional[str]) -> None:
         scene_count = sum(1 for p in body_parts if p.strip().lower().startswith("escena"))
         if scene_count < 7:
             raise ValueError(f"DOCX VIDEO incompleto: {scene_count}/7 escenas renderizadas.")
+        if len(body_text) < 2500:
+            raise ValueError(f"DOCX VIDEO incompleto: solo {len(body_text)} caracteres visibles.")
 
 
 def save_docx_with_structure(
@@ -920,6 +1144,7 @@ def save_docx_with_structure(
     doc = Document()
     _setup_document(doc)
     _add_cover_page(doc, material_nombre, granule_code, tema)
+    chars_after_cover = count_visible_docx_chars(doc)
 
     tables = _parse_markdown_tables(cleaned)
     meta_idx = _find_metadata_table(tables)
@@ -948,6 +1173,14 @@ def save_docx_with_structure(
         raise ValueError(f"Plantilla de renderizado interna ausente para layout {layout_nn!r}")
 
     renderer(doc, content_tables)
+
+    chars_after_render = count_visible_docx_chars(doc)
+    if chars_after_render <= chars_after_cover + 200:
+        print(
+            "    ADVERTENCIA: renderer sin contenido suficiente; "
+            "se inserta fallback con respuesta limpia completa."
+        )
+        _add_raw_content_fallback(doc, cleaned)
 
     _add_footer_with_page_number(doc, granule_code, material_nombre)
 

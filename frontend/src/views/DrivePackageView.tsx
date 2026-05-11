@@ -42,10 +42,13 @@ const JOB_POLL_MAX_MS = 120 * 60 * 1000
 
 const DRIVE_PACKAGE_SESSION_KEY = 'drivePackageJobSession.v1'
 
+export type DriveRunMode = 'full' | 'stepped'
+
 interface StoredDriveSession {
   jobId: string
   driveFolderId: string
   prompt: PromptType | ''
+  runMode?: DriveRunMode
 }
 
 function parseGranuleCodesFromJobFiles(files: string[]): Array<{ id: string; label: string }> {
@@ -100,6 +103,10 @@ function clearDriveSession() {
   sessionStorage.removeItem(DRIVE_PACKAGE_SESSION_KEY)
 }
 
+function buildDriveSession(jobId: string, driveFolderId: string, prompt: PromptType | '', runMode: DriveRunMode): StoredDriveSession {
+  return { jobId, driveFolderId: driveFolderId.trim(), prompt, runMode }
+}
+
 function DrivePackageView({ onBack }: DrivePackageViewProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>('')
@@ -125,7 +132,11 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
   const runLockRef = useRef(false)
   const resultsPanelRef = useRef<HTMLElement | null>(null)
   const [packageJobId, setPackageJobId] = useState<string | null>(null)
+  const [driveRunMode, setDriveRunMode] = useState<DriveRunMode>('full')
+  const driveRunModeRef = useRef(driveRunMode)
+  driveRunModeRef.current = driveRunMode
   const executeDrivePipelineRef = useRef<(jobId: string | null, opts?: { force?: boolean }) => Promise<void>>(async () => {})
+  const steppedHydratePollRef = useRef<number | null>(null)
 
   const hasSyllabus = Boolean(selectedFile)
   const selectedCategory = useMemo(() => categories.find((category) => category.key === selectedPrompt) ?? getCategoryConfig(selectedPrompt), [categories, selectedPrompt])
@@ -201,6 +212,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     setDriveSync(null)
     setDriveResult(null)
     setPackageJobId(null)
+    setDriveRunMode('full')
     clearDriveSession()
     runLockRef.current = false
     clearPolling()
@@ -354,6 +366,67 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     return payload as DriveUploadResponse
   }
 
+  const ensureGranulesPhase = async (jobId: string) => {
+    setDriveStage('granules')
+    const payload = await fetchJobStatus(jobId)
+    if (getBackendPhaseStatus(payload, 'granules') === 'completed') return
+    if (getBackendPhaseStatus(payload, 'granules') === 'failed') {
+      throw new Error('La fase de gránulos falló. Usa «Volver a generar gránulos» o «Nuevo paquete».')
+    }
+    await waitForBackendPhase(jobId, 'granules', '1: generar gránulos')
+  }
+
+  const ensurePipelinePhase = async (jobId: string) => {
+    setDriveStage('activities')
+    let payload = await fetchJobStatus(jobId)
+    if (getBackendPhaseStatus(payload, 'pipelineLocal') === 'completed') return
+    if (getBackendPhaseStatus(payload, 'pipelineLocal') === 'failed') {
+      throw new Error('La fase de actividades falló. Usa «Volver a generar actividades» o «Nuevo paquete».')
+    }
+    if (payload.status === 'running' && payload.currentPhase === 'pipelineLocal') {
+      await waitForBackendPhase(jobId, 'pipelineLocal', '2: generar actividades')
+      return
+    }
+    setDriveMessage('Generando actividades; al terminar esta fase se suben a Drive.')
+    await postExistingJobPhase(jobId, `/api/jobs/${jobId}/pipeline-local`, 'generando txt', 'activities', 'pipelineLocal', '2: generar actividades')
+  }
+
+  const ensureMaterialsPhase = async (jobId: string) => {
+    setDriveStage('resources')
+    let payload = await fetchJobStatus(jobId)
+    if (getBackendPhaseStatus(payload, 'specializationMaterials') === 'completed') return
+    if (getBackendPhaseStatus(payload, 'specializationMaterials') === 'failed') {
+      throw new Error('La fase de recursos complementarios falló. Usa «Volver a generar recursos».')
+    }
+    if (payload.status === 'running' && payload.currentPhase === 'specializationMaterials') {
+      await waitForBackendPhase(jobId, 'specializationMaterials', '3: generar recursos')
+      return
+    }
+    setDriveMessage('Generando recursos complementarios; al terminar esta fase se suben a Drive.')
+    await postExistingJobPhase(jobId, `/api/jobs/${jobId}/materials`, 'generando materiales', 'resources', 'specializationMaterials', '3: generar recursos')
+  }
+
+  const finalizeDriveUploadPhase = async (jobId: string) => {
+    const finalPayload = await fetchJobStatus(jobId)
+    const ds = finalPayload.driveSync
+    if (isPhasedDrivePackageComplete(ds)) {
+      setDriveResult(snapshotToDriveUploadResponse(ds!, jobId))
+      setDriveStage('ready')
+      setStatus('finalizado')
+      setDriveMessage('Paquete Drive listo (sincronizado por fases).')
+      return
+    }
+    setDriveStage('uploading')
+    setStatus('organizando archivos')
+    setDriveMessage('Completando sincronización final con Drive…')
+    const drivePayload = await uploadDrivePackage(jobId, { phase: 'all', includeZip: false })
+    setDriveResult(drivePayload)
+    await fetchJobStatus(jobId)
+    setDriveStage('ready')
+    setStatus('finalizado')
+    setDriveMessage('Paquete creado en Drive.')
+  }
+
   const analyzeSyllabusPreview = async (file: File) => {
     setIsAnalyzingSyllabus(true)
     setPreviewMessage('Analizando estructura temática...')
@@ -423,78 +496,17 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       try {
         const jobId = existingJobId ?? (await createGranulesJob())
         setPackageJobId(jobId)
-        saveDriveSession({
-          jobId,
-          driveFolderId: driveFolderId.trim(),
-          prompt: selectedPrompt as PromptType,
-        })
+        saveDriveSession(buildDriveSession(jobId, driveFolderId, selectedPrompt as PromptType, driveRunModeRef.current))
 
-        const ensureGranulesDone = async () => {
-          activeDrivePhase = 'granules'
-          setDriveStage('granules')
-          const payload = await fetchJobStatus(jobId)
-          if (getBackendPhaseStatus(payload, 'granules') === 'completed') return
-          if (getBackendPhaseStatus(payload, 'granules') === 'failed') {
-            throw new Error('La fase de gránulos falló. Usa «Nuevo paquete» para empezar de cero.')
-          }
-          await waitForBackendPhase(jobId, 'granules', '1: generar gránulos')
-        }
-
-        const ensurePipelineDone = async () => {
-          activeDrivePhase = 'activities'
-          setDriveStage('activities')
-          let payload = await fetchJobStatus(jobId)
-          if (getBackendPhaseStatus(payload, 'pipelineLocal') === 'completed') return
-          if (getBackendPhaseStatus(payload, 'pipelineLocal') === 'failed') {
-            throw new Error('La fase de actividades falló. Reintenta el flujo o usa «Nuevo paquete».')
-          }
-          if (payload.status === 'running' && payload.currentPhase === 'pipelineLocal') {
-            await waitForBackendPhase(jobId, 'pipelineLocal', '2: generar actividades')
-            return
-          }
-          setDriveMessage('Generando actividades; al terminar esta fase se suben a Drive.')
-          await postExistingJobPhase(jobId, `/api/jobs/${jobId}/pipeline-local`, 'generando txt', 'activities', 'pipelineLocal', '2: generar actividades')
-        }
-
-        const ensureMaterialsDone = async () => {
-          activeDrivePhase = 'resources'
-          setDriveStage('resources')
-          let payload = await fetchJobStatus(jobId)
-          if (getBackendPhaseStatus(payload, 'specializationMaterials') === 'completed') return
-          if (getBackendPhaseStatus(payload, 'specializationMaterials') === 'failed') {
-            throw new Error('La fase de recursos complementarios falló. Reintenta el flujo o usa «Nuevo paquete».')
-          }
-          if (payload.status === 'running' && payload.currentPhase === 'specializationMaterials') {
-            await waitForBackendPhase(jobId, 'specializationMaterials', '3: generar recursos')
-            return
-          }
-          setDriveMessage('Generando recursos complementarios; al terminar esta fase se suben a Drive.')
-          await postExistingJobPhase(jobId, `/api/jobs/${jobId}/materials`, 'generando materiales', 'resources', 'specializationMaterials', '3: generar recursos')
-        }
-
-        await ensureGranulesDone()
-        await ensurePipelineDone()
-        await ensureMaterialsDone()
+        activeDrivePhase = 'granules'
+        await ensureGranulesPhase(jobId)
+        activeDrivePhase = 'activities'
+        await ensurePipelinePhase(jobId)
+        activeDrivePhase = 'resources'
+        await ensureMaterialsPhase(jobId)
 
         activeDrivePhase = 'drive'
-        const finalPayload = await fetchJobStatus(jobId)
-        const ds = finalPayload.driveSync
-        if (isPhasedDrivePackageComplete(ds)) {
-          setDriveResult(snapshotToDriveUploadResponse(ds!, jobId))
-          setDriveStage('ready')
-          setStatus('finalizado')
-          setDriveMessage('Paquete Drive listo (sincronizado por fases).')
-        } else {
-          setDriveStage('uploading')
-          setStatus('organizando archivos')
-          setDriveMessage('Completando sincronización final con Drive…')
-          const drivePayload = await uploadDrivePackage(jobId, { phase: 'all', includeZip: false })
-          setDriveResult(drivePayload)
-          await fetchJobStatus(jobId)
-          setDriveStage('ready')
-          setStatus('finalizado')
-          setDriveMessage('Paquete creado en Drive.')
-        }
+        await finalizeDriveUploadPhase(jobId)
       } catch (error) {
         setFailedDrivePhase(activeDrivePhase)
         setDriveStage('error')
@@ -517,6 +529,219 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
 
   executeDrivePipelineRef.current = executeDrivePipeline
 
+  const persistDriveSessionJob = (jobId: string) => {
+    saveDriveSession(buildDriveSession(jobId, driveFolderId, selectedPrompt as PromptType, driveRunModeRef.current))
+  }
+
+  const handleDriveRunModeChange = (mode: DriveRunMode) => {
+    if (isRunning) return
+    setDriveRunMode(mode)
+    const s = loadDriveSession()
+    if (s?.jobId) {
+      saveDriveSession(
+        buildDriveSession(s.jobId, (s.driveFolderId || driveFolderId).trim(), (s.prompt || selectedPrompt) as PromptType, mode),
+      )
+    }
+  }
+
+  const phaseGranules = phaseStatus?.granules.status ?? 'pending'
+  const phasePipeline = phaseStatus?.pipelineLocal.status ?? 'pending'
+  const phaseMaterials = phaseStatus?.specializationMaterials.status ?? 'pending'
+  const phaseUpload = phaseStatus?.uploadDrive?.status ?? 'pending'
+
+  const canStepGranules = Boolean(
+    driveRunMode === 'stepped' &&
+      !isRunning &&
+      driveStage !== 'ready' &&
+      selectedCategory?.enabledForPackage &&
+      selectedFile &&
+      driveFolderId.trim() &&
+      detectedGranules.length > 0 &&
+      phaseGranules !== 'completed',
+  )
+  const canStepPipeline = Boolean(
+    driveRunMode === 'stepped' && !isRunning && packageJobId && phaseGranules === 'completed' && phasePipeline !== 'completed',
+  )
+  const canStepMaterials = Boolean(
+    driveRunMode === 'stepped' && !isRunning && packageJobId && phasePipeline === 'completed' && phaseMaterials !== 'completed',
+  )
+  const canStepFinalizeDrive = Boolean(
+    driveRunMode === 'stepped' &&
+      !isRunning &&
+      packageJobId &&
+      phaseGranules === 'completed' &&
+      phasePipeline === 'completed' &&
+      phaseMaterials === 'completed' &&
+      driveStage !== 'ready',
+  )
+
+  const canRegenerateGranules = Boolean(
+    packageJobId && !isRunning && (phaseGranules === 'failed' || phaseGranules === 'completed') && driveFolderId.trim(),
+  )
+  const canRegeneratePipeline = Boolean(
+    packageJobId && !isRunning && phaseGranules === 'completed' && (phasePipeline === 'failed' || phasePipeline === 'completed'),
+  )
+  const canRegenerateMaterials = Boolean(
+    packageJobId && !isRunning && phasePipeline === 'completed' && (phaseMaterials === 'failed' || phaseMaterials === 'completed'),
+  )
+  const canRegenerateDriveUpload = Boolean(
+    packageJobId &&
+      !isRunning &&
+      phaseGranules === 'completed' &&
+      phasePipeline === 'completed' &&
+      phaseMaterials === 'completed' &&
+      (phaseUpload === 'failed' ||
+        phaseUpload === 'completed' ||
+        (driveStage === 'error' && failedDrivePhase === 'drive')),
+  )
+
+  const runDriveStepWithUi = async (activePhase: DrivePhaseKey, work: () => Promise<void>) => {
+    if (runLockRef.current) return
+    runLockRef.current = true
+    setIsRunning(true)
+    setFailedDrivePhase(null)
+    clearPolling()
+    try {
+      await work()
+      await fetchJobStatus(packageJobId!)
+    } catch (error) {
+      setFailedDrivePhase(activePhase)
+      setDriveStage('error')
+      setStatus('error')
+      setDriveMessage(error instanceof Error ? error.message : 'Error en el flujo Drive.')
+    } finally {
+      clearPolling()
+      runLockRef.current = false
+      setIsRunning(false)
+    }
+  }
+
+  const handleStepGranules = () => {
+    if (driveRunMode !== 'stepped') return
+    void (async () => {
+      if (runLockRef.current) return
+      runLockRef.current = true
+      setIsRunning(true)
+      setFailedDrivePhase(null)
+      setDriveMessage('Fase 1: generando gránulos…')
+      clearPolling()
+      try {
+        const jobId = packageJobId ?? (await createGranulesJob())
+        setPackageJobId(jobId)
+        persistDriveSessionJob(jobId)
+        await ensureGranulesPhase(jobId)
+        setDriveMessage('Fase 1 completada. Continúa con actividades cuando quieras.')
+        await fetchJobStatus(jobId)
+        setDriveStage('idle')
+        setStatus('pendiente')
+      } catch (error) {
+        setFailedDrivePhase('granules')
+        setDriveStage('error')
+        setStatus('error')
+        setDriveMessage(error instanceof Error ? error.message : 'Error en gránulos.')
+      } finally {
+        clearPolling()
+        runLockRef.current = false
+        setIsRunning(false)
+      }
+    })()
+  }
+
+  const handleStepPipeline = () => {
+    if (!packageJobId || driveRunMode !== 'stepped') return
+    void runDriveStepWithUi('activities', async () => {
+      await ensurePipelinePhase(packageJobId)
+      setDriveMessage('Fase 2 completada. Continúa con recursos complementarios.')
+    })
+  }
+
+  const handleStepMaterials = () => {
+    if (!packageJobId || driveRunMode !== 'stepped') return
+    void runDriveStepWithUi('resources', async () => {
+      await ensureMaterialsPhase(packageJobId)
+      setDriveMessage('Fase 3 completada. Puedes cerrar el paquete en Drive.')
+    })
+  }
+
+  const handleStepFinalizeDrive = () => {
+    if (!packageJobId || driveRunMode !== 'stepped') return
+    void runDriveStepWithUi('drive', async () => {
+      await finalizeDriveUploadPhase(packageJobId)
+    })
+  }
+
+  const handleRegenerateGranules = () => {
+    if (!packageJobId) return
+    void runDriveStepWithUi('granules', async () => {
+      const res = await apiFetch(`/api/jobs/${packageJobId}/retry-granules`, { method: 'POST' })
+      if (!res.ok) throw new Error(await readApiErrorDetail(res, 'No se pudo reiniciar la fase de gránulos.'))
+      await waitForBackendPhase(packageJobId, 'granules', '1: generar gránulos')
+      setDriveMessage('Gránulos regenerados.')
+    })
+  }
+
+  const handleRegeneratePipeline = () => {
+    if (!packageJobId) return
+    void runDriveStepWithUi('activities', async () => {
+      const useRetry = phasePipeline === 'failed' || phasePipeline === 'completed'
+      const path = useRetry ? `/api/jobs/${packageJobId}/retry-pipeline-local` : `/api/jobs/${packageJobId}/pipeline-local`
+      setStatus('generando txt')
+      setDriveStage('activities')
+      const res = await apiFetch(path, { method: 'POST' })
+      if (!res.ok) throw new Error(await readApiErrorDetail(res, 'No se pudo reiniciar actividades.'))
+      await waitForBackendPhase(packageJobId, 'pipelineLocal', '2: generar actividades')
+      setDriveMessage('Actividades regeneradas.')
+    })
+  }
+
+  const handleRegenerateMaterials = () => {
+    if (!packageJobId) return
+    void runDriveStepWithUi('resources', async () => {
+      const useRetry = phaseMaterials === 'failed' || phaseMaterials === 'completed'
+      const path = useRetry ? `/api/jobs/${packageJobId}/retry-materials` : `/api/jobs/${packageJobId}/materials`
+      setStatus('generando materiales')
+      setDriveStage('resources')
+      const res = await apiFetch(path, { method: 'POST' })
+      if (!res.ok) throw new Error(await readApiErrorDetail(res, 'No se pudo reiniciar materiales.'))
+      await waitForBackendPhase(packageJobId, 'specializationMaterials', '3: generar recursos')
+      setDriveMessage('Recursos complementarios regenerados.')
+    })
+  }
+
+  const handleRegenerateDriveUpload = () => {
+    if (!packageJobId) return
+    void runDriveStepWithUi('drive', async () => {
+      await finalizeDriveUploadPhase(packageJobId)
+      setDriveMessage('Sincronización con Drive completada.')
+    })
+  }
+
+  const handleDriveRetry = () => {
+    if (!packageJobId) {
+      void executeDrivePipeline(null)
+      return
+    }
+    if (driveRunMode === 'stepped') {
+      if (phaseGranules === 'failed' || failedDrivePhase === 'granules') {
+        void handleRegenerateGranules()
+        return
+      }
+      if (phasePipeline === 'failed' || failedDrivePhase === 'activities') {
+        void handleRegeneratePipeline()
+        return
+      }
+      if (phaseMaterials === 'failed' || failedDrivePhase === 'resources') {
+        void handleRegenerateMaterials()
+        return
+      }
+      if (phaseUpload === 'failed' || failedDrivePhase === 'drive') {
+        void handleRegenerateDriveUpload()
+        return
+      }
+    }
+    void executeDrivePipeline(packageJobId)
+  }
+
   const handleGenerateDrivePackage = () => void executeDrivePipeline(null)
   const handleResumeDrivePackage = () => {
     if (!packageJobId) return
@@ -530,6 +755,10 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       if (!res.ok) {
         setDriveMessage(await readApiErrorDetail(res, 'No se pudo cancelar el proceso.'))
         return
+      }
+      if (steppedHydratePollRef.current) {
+        window.clearInterval(steppedHydratePollRef.current)
+        steppedHydratePollRef.current = null
       }
       clearPolling()
       runLockRef.current = false
@@ -547,11 +776,17 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
 
   useEffect(() => {
     let cancelled = false
+    if (steppedHydratePollRef.current) {
+      window.clearInterval(steppedHydratePollRef.current)
+      steppedHydratePollRef.current = null
+    }
     const s = loadDriveSession()
     if (!s) return
     setPackageJobId(s.jobId)
     if (s.driveFolderId) setDriveFolderId(s.driveFolderId)
     if (s.prompt) setSelectedPrompt(s.prompt)
+    const mode: DriveRunMode = s.runMode === 'stepped' ? 'stepped' : 'full'
+    setDriveRunMode(mode)
     void fetchJobStatus(s.jobId)
       .then((payload) => {
         if (cancelled) return
@@ -564,7 +799,13 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
           return
         }
         if (payload.status === 'running') {
-          void executeDrivePipelineRef.current(s.jobId, { force: true })
+          if (mode === 'stepped') {
+            steppedHydratePollRef.current = window.setInterval(() => {
+              void fetchJobStatus(s.jobId).catch(() => {})
+            }, JOB_POLL_INTERVAL_MS)
+          } else {
+            void executeDrivePipelineRef.current(s.jobId, { force: true })
+          }
         }
       })
       .catch(() => {
@@ -573,6 +814,10 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       })
     return () => {
       cancelled = true
+      if (steppedHydratePollRef.current) {
+        window.clearInterval(steppedHydratePollRef.current)
+        steppedHydratePollRef.current = null
+      }
     }
   }, [])
 
@@ -719,8 +964,89 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
                   placeholder="Ej: 1AbCDefGhIjKlMnOpQrStUv"
                   disabled={isRunning}
                 />
+
+                <section className="action-card granule-card drive-mode-card">
+                  <div>
+                    <span className="view-kicker">Modo de ejecución</span>
+                    <h2>Todo en uno o por fases</h2>
+                    <p className="card-description">
+                      En depuración por fases avanzas con un botón por etapa. Puedes volver a generar solo la fase que falló o quedó inconsistente (incluido en flujo completo).
+                      {isRunning ? ' No cambies de modo con un proceso activo.' : ''}
+                    </p>
+                  </div>
+                  <div className="drive-mode-toggle" role="group" aria-label="Modo de ejecución Drive">
+                    <button
+                      type="button"
+                      className={driveRunMode === 'full' ? 'primary-button' : 'secondary-button'}
+                      onClick={() => handleDriveRunModeChange('full')}
+                      disabled={isRunning}
+                    >
+                      Todo en uno
+                    </button>
+                    <button
+                      type="button"
+                      className={driveRunMode === 'stepped' ? 'primary-button' : 'secondary-button'}
+                      onClick={() => handleDriveRunModeChange('stepped')}
+                      disabled={isRunning}
+                    >
+                      Depuración por fases
+                    </button>
+                  </div>
+                  {driveRunMode === 'stepped' && (
+                    <div className="drive-stepped-actions" style={{ marginTop: '1rem' }}>
+                      <p className="muted" style={{ marginBottom: '0.75rem' }}>
+                        Ejecuta cada fase cuando quieras. Si algo falla, usa «Volver a generar» más abajo o el reintento del panel de progreso.
+                      </p>
+                      <div className="console-secondary-actions" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
+                        <button type="button" className="primary-button" onClick={handleStepGranules} disabled={!canStepGranules}>
+                          1 · Gránulos
+                        </button>
+                        <button type="button" className="primary-button" onClick={handleStepPipeline} disabled={!canStepPipeline}>
+                          2 · Actividades (TXT/DOCX)
+                        </button>
+                        <button type="button" className="primary-button" onClick={handleStepMaterials} disabled={!canStepMaterials}>
+                          3 · Recursos
+                        </button>
+                        <button type="button" className="primary-button" onClick={handleStepFinalizeDrive} disabled={!canStepFinalizeDrive}>
+                          4 · Cierre en Drive
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {(canRegenerateGranules || canRegeneratePipeline || canRegenerateMaterials || canRegenerateDriveUpload) && (
+                    <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid rgba(148,163,184,0.35)' }}>
+                      <span className="view-kicker">Volver a generar una fase</span>
+                      <p className="muted" style={{ marginBottom: '0.65rem', fontSize: '0.9rem' }}>
+                        Reinicia solo esa parte del pipeline (las fases posteriores en disco se invalidan cuando aplica). Útil tras errores o resultados incompletos.
+                      </p>
+                      <div className="console-secondary-actions" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
+                        {canRegenerateGranules && (
+                          <button type="button" className="secondary-button" onClick={handleRegenerateGranules} disabled={isRunning}>
+                            Volver a generar gránulos
+                          </button>
+                        )}
+                        {canRegeneratePipeline && (
+                          <button type="button" className="secondary-button" onClick={handleRegeneratePipeline} disabled={isRunning}>
+                            Volver a generar actividades
+                          </button>
+                        )}
+                        {canRegenerateMaterials && (
+                          <button type="button" className="secondary-button" onClick={handleRegenerateMaterials} disabled={isRunning}>
+                            Volver a generar recursos
+                          </button>
+                        )}
+                        {canRegenerateDriveUpload && (
+                          <button type="button" className="secondary-button" onClick={handleRegenerateDriveUpload} disabled={isRunning}>
+                            Volver a subir a Drive
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </section>
+
                 <div className="drive-package-actions">
-                  {packageJobId && canResumeDrivePackage && (
+                  {packageJobId && canResumeDrivePackage && driveRunMode === 'full' && (
                     <button
                       type="button"
                       className="primary-button primary-button--hero"
@@ -732,9 +1058,9 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
                   )}
                   <button
                     type="button"
-                    className={packageJobId && canResumeDrivePackage ? 'secondary-button' : 'primary-button primary-button--hero'}
+                    className={packageJobId && canResumeDrivePackage && driveRunMode === 'full' ? 'secondary-button' : 'primary-button primary-button--hero'}
                     onClick={handleGenerateDrivePackage}
-                    disabled={!canStartNewDrivePackage || isRunning}
+                    disabled={driveRunMode === 'stepped' || !canStartNewDrivePackage || isRunning}
                   >
                     {driveActionLabel[driveStage]}
                   </button>
@@ -812,7 +1138,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
                 deliverables={selectedCategory?.deliverables ?? []}
                 categoryLabel={categoryLabel}
                 backendCurrentPhase={currentPhase}
-                onRetry={() => (packageJobId ? handleResumeDrivePackage() : handleGenerateDrivePackage())}
+                onRetry={handleDriveRetry}
               />
 
               <section className="action-card granule-card drive-upload-card">
