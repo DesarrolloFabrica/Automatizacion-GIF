@@ -17,6 +17,7 @@ class JobStatusResponse(BaseModel):
     granulesStatus: str = "pending"
     pipelineLocalStatus: str = "pending"
     specializationMaterialsStatus: str = "pending"
+    uploadDriveStatus: str = "pending"
     currentPhase: str = "pending"
     availableNextAction: str = "none"
     phaseStatus: dict | None = None
@@ -103,3 +104,15 @@ class EspecializacionJobStatusResponse(BaseModel):
     logs: list[str]
     files: list[str]
     granulesMaterials: list[GranuleMaterials]
+
+
+class DrivePackageUploadResponse(BaseModel):
+    jobId: str
+    status: str
+    folderId: str
+    folderLink: str
+    filesUploaded: int
+    filesOverwritten: int
+    filesSkipped: int
+    foldersCreated: int
+    foldersReused: int

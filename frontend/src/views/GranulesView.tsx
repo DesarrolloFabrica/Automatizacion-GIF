@@ -1,11 +1,11 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react'
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import BackButton from '../components/BackButton'
-import DetectedGranulesPreview from '../components/DetectedGranulesPreview'
 import FileDropzone from '../components/FileDropzone'
 import JobProgressPanel from '../components/JobProgressPanel'
 import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
-import type { AvailableNextAction, GenerationStatus, GranuleMaterials, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
+import { CATEGORY_CONFIGS, getCategoryConfig } from '../data/categories'
+import type { AvailableNextAction, CategoryConfig, DriveUploadResponse, GenerationStatus, GranuleMaterials, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
@@ -26,10 +26,16 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const [materialesByGranule, setMaterialesByGranule] = useState<GranuleMaterials[]>([])
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobLogs, setJobLogs] = useState<string[]>([])
-  const [generationMessage, setGenerationMessage] = useState('La generación puede tardar aproximadamente 20 minutos.')
+  const [, setGenerationMessage] = useState('')
   const [availableNextAction, setAvailableNextAction] = useState<AvailableNextAction>('generate_granules')
   const [phaseStatus, setPhaseStatus] = useState<JobPhaseStatus | null>(null)
   const [currentPhase, setCurrentPhase] = useState('pending')
+  const [isFullPipelineRunning, setIsFullPipelineRunning] = useState(false)
+  const [categories, setCategories] = useState<CategoryConfig[]>(CATEGORY_CONFIGS)
+  const [driveFolderId, setDriveFolderId] = useState('')
+  const [driveUploadStatus, setDriveUploadStatus] = useState<'pending' | 'uploading' | 'completed' | 'error'>('pending')
+  const [driveUploadMessage, setDriveUploadMessage] = useState('')
+  const [driveUploadResult, setDriveUploadResult] = useState<DriveUploadResponse | null>(null)
   const pollRef = useRef<number | null>(null)
   const pipelineCardRef = useRef<HTMLElement | null>(null)
   const resultsPanelRef = useRef<HTMLElement | null>(null)
@@ -37,7 +43,43 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const prevIsGeneratingRef = useRef(false)
   const canUploadSyllabus = Boolean(selectedPrompt)
   const hasSyllabus = Boolean(selectedFile)
-  const isEspecializacion = selectedPrompt === 'especializacion'
+  const selectedCategory = useMemo(() => categories.find((category) => category.key === selectedPrompt) ?? getCategoryConfig(selectedPrompt), [categories, selectedPrompt])
+  const materialsDir = selectedCategory?.materialsDir ?? 'materials'
+  const categoryLabel = selectedCategory?.label ?? 'categoría seleccionada'
+  const materialsPerGranule = selectedCategory?.expectedMaterialsPerGranule ?? 0
+
+  const localPhases = [
+    { key: 'syllabus', number: '01', icon: 'DOC', title: 'Syllabus recibido' },
+    { key: 'granules', number: '02', icon: 'G1', title: 'Gránulos' },
+    { key: 'pipeline', number: '03', icon: 'TXT', title: 'TXT/DOCX' },
+    { key: 'materials', number: '04', icon: '6x', title: 'Recursos' },
+    { key: 'download', number: '05', icon: 'ZIP', title: 'ZIP final' },
+  ] as const
+
+  const getLocalPhaseState = (phaseKey: string): 'pending' | 'active' | 'completed' | 'error' => {
+    if (status === 'error') {
+      if (currentPhase === 'granules' && phaseKey === 'granules') return 'error'
+      if (currentPhase === 'pipelineLocal' && phaseKey === 'pipeline') return 'error'
+      if (currentPhase === 'specializationMaterials' && phaseKey === 'materials') return 'error'
+    }
+    if (phaseKey === 'syllabus') return hasSyllabus ? 'completed' : 'active'
+    if (phaseKey === 'granules') {
+      if (isAnalyzingSyllabus) return 'active'
+      if (phaseStatus?.granules.status === 'completed') return 'completed'
+      if (detectedGranules.length > 0 && !jobId) return 'active'
+      return currentPhase === 'granules' || status === 'generando gránulos' || status === 'generando documentos' ? 'active' : 'pending'
+    }
+    if (phaseKey === 'pipeline') {
+      if (phaseStatus?.pipelineLocal.status === 'completed') return 'completed'
+      return currentPhase === 'pipelineLocal' || status === 'generando txt' || status === 'generando docx' ? 'active' : 'pending'
+    }
+    if (phaseKey === 'materials') {
+      if (phaseStatus?.specializationMaterials.status === 'completed') return 'completed'
+      return currentPhase === 'specializationMaterials' || status === 'generando materiales especialización' || status === 'generando materiales' ? 'active' : 'pending'
+    }
+    if (phaseKey === 'download') return availableNextAction === 'download_package' ? 'completed' : 'pending'
+    return 'pending'
+  }
 
   const alignTopWithViewport = useCallback((el: HTMLElement | null) => {
     if (!el) return
@@ -72,10 +114,14 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setAvailableNextAction('generate_granules')
     setPhaseStatus(null)
     setCurrentPhase('pending')
+    setIsFullPipelineRunning(false)
+    setDriveUploadStatus('pending')
+    setDriveUploadMessage('')
+    setDriveUploadResult(null)
     setSubjectName('')
     setProgramName('')
     setPreviewMessage('')
-    setGenerationMessage('La generación puede tardar aproximadamente 20 minutos.')
+    setGenerationMessage('')
     setSelectedFile(null)
     setDetectedGranules([])
     setIsAnalyzingSyllabus(false)
@@ -102,7 +148,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
         granuleMat.files.push({
           granule: granuleCode,
           name: `${nn}_${granuleCode}_${tema}_V01.docx`,
-          relativePath: `materiales_especializacion/${folderName}/${nn}_${granuleCode}_${tema}_V01.docx`,
+          relativePath: `${materialsDir}/${folderName}/${nn}_${granuleCode}_${tema}_V01.docx`,
         })
         granuleMat.totalMaterials = granuleMat.files.length
       }
@@ -114,7 +160,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const parseMaterialesFromFiles = (files: string[]): GranuleMaterials[] => {
     const granuleMap = new Map<string, GranuleMaterials>()
     for (const relativePath of files) {
-      if (!relativePath.startsWith('materiales_especializacion/')) continue
+      if (!relativePath.startsWith(`${materialsDir}/`)) continue
       const parts = relativePath.split('/')
       const folder = parts[1] ?? ''
       const name = parts[2] ?? ''
@@ -194,6 +240,69 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setMaterialesByGranule(parsedMateriales.length > 0 ? parsedMateriales : parseMaterialesFromLogs(payload.logs ?? []))
   }
 
+  const fetchJobStatus = async (targetJobId: string): Promise<JobStatusResponse> => {
+    const statusResponse = await fetch(`${apiBaseUrl}/api/jobs/${targetJobId}`)
+    if (!statusResponse.ok) throw new Error('No fue posible consultar el estado del job.')
+    const payload = (await statusResponse.json()) as JobStatusResponse
+    applyJobStatus(payload)
+    return payload
+  }
+
+  const waitForJobIdle = (targetJobId: string, phaseLabel: string): Promise<JobStatusResponse> => {
+    return new Promise((resolve, reject) => {
+      const intervalId = window.setInterval(async () => {
+        try {
+          const payload = await fetchJobStatus(targetJobId)
+          if (payload.status === 'completed') {
+            window.clearInterval(intervalId)
+            resolve(payload)
+          }
+          if (payload.status === 'failed') {
+            window.clearInterval(intervalId)
+            reject(new Error(`Error en fase ${phaseLabel}.`))
+          }
+        } catch (error) {
+          window.clearInterval(intervalId)
+          reject(error)
+        }
+      }, 3000)
+    })
+  }
+
+  const createGranulesJob = async (): Promise<string> => {
+    if (!selectedFile || !selectedPrompt) throw new Error('Falta seleccionar syllabus y nivel académico.')
+
+    const formData = new FormData()
+    formData.append('syllabus', selectedFile)
+    formData.append('nivel', selectedPrompt)
+
+    const createResponse = await fetch(`${apiBaseUrl}/api/jobs`, {
+      method: 'POST',
+      body: formData,
+    })
+
+    if (!createResponse.ok) {
+      const payload = (await createResponse.json()) as { detail?: string }
+      throw new Error(payload.detail ?? 'No se pudo crear el job de generación.')
+    }
+
+    const createdJob = (await createResponse.json()) as { jobId: string; status: string }
+    setJobId(createdJob.jobId)
+    return createdJob.jobId
+  }
+
+  const postExistingJobPhase = async (targetJobId: string, path: string, runningStatus: GenerationStatus, message: string) => {
+    setStatus(runningStatus)
+    setGenerationMessage(message)
+    setAvailableNextAction('none')
+    const response = await fetch(`${apiBaseUrl}${path}`, { method: 'POST' })
+    if (!response.ok) {
+      const payload = (await response.json()) as { detail?: string }
+      throw new Error(payload.detail ?? 'No se pudo iniciar la fase.')
+    }
+    return waitForJobIdle(targetJobId, message)
+  }
+
   const pollJobUntilIdle = (createdJobId: string) => {
     clearPolling()
     pollRef.current = window.setInterval(async () => {
@@ -236,31 +345,13 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setPhaseStatus(null)
     setAvailableNextAction('none')
     setStatus('leyendo syllabus')
-    setGenerationMessage(isEspecializacion
-      ? 'Fase 1: generando gránulos. Al finalizar podrás revisar resultados y continuar con TXT/DOCX académicos.'
-      : 'La generación puede tardar aproximadamente 20 minutos.'
-    )
+    setGenerationMessage(`Fase 1: generando gránulos de ${categoryLabel}. Al finalizar podrás continuar con TXT/DOCX académicos.`)
     clearPolling()
 
     try {
-      const formData = new FormData()
-      formData.append('syllabus', selectedFile)
-      formData.append('nivel', selectedPrompt)
-
-      const createResponse = await fetch(`${apiBaseUrl}/api/jobs`, {
-        method: 'POST',
-        body: formData,
-      })
-
-      if (!createResponse.ok) {
-        const payload = (await createResponse.json()) as { detail?: string }
-        throw new Error(payload.detail ?? 'No se pudo crear el job de generación.')
-      }
-
-      const createdJob = (await createResponse.json()) as { jobId: string; status: string }
-      setJobId(createdJob.jobId)
+      const createdJobId = await createGranulesJob()
       setStatus('pendiente')
-      pollJobUntilIdle(createdJob.jobId)
+      pollJobUntilIdle(createdJobId)
     } catch (error) {
       setStatus('error')
       setIsGenerating(false)
@@ -301,18 +392,61 @@ function GranulesView({ onBack }: GranulesViewProps) {
     )
   }
 
-  const handleGenerateSpecializationMaterials = () => {
+  const handleGenerateMaterials = () => {
     if (!jobId) return
     startExistingJobPhase(
-      `/api/jobs/${jobId}/materiales-especializacion`,
-      'generando materiales especialización',
-      'Fase 3: generando materiales de Especialización por gránulo.',
+      `/api/jobs/${jobId}/materials`,
+      'generando materiales',
+      `Fase 3: generando materiales de ${categoryLabel} por gránulo.`,
     )
+  }
+
+  const handleGenerateFullLocalPackage = async () => {
+    if (!selectedFile || !selectedPrompt || isGenerating || isFullPipelineRunning || detectedGranules.length === 0) return
+
+    setIsFullPipelineRunning(true)
+    setIsGenerating(true)
+    setJobLogs([])
+    setGeneratedDocuments([])
+    setMaterialesByGranule([])
+    setJobId(null)
+    setPhaseStatus(null)
+    setAvailableNextAction('none')
+    setStatus('leyendo syllabus')
+      setGenerationMessage(`Flujo completo: generando gránulos, luego TXT/DOCX y materiales de ${categoryLabel} por gránulo.`)
+    clearPolling()
+
+    try {
+      const createdJobId = await createGranulesJob()
+      await waitForJobIdle(createdJobId, '1: generar gránulos')
+      await postExistingJobPhase(
+        createdJobId,
+        `/api/jobs/${createdJobId}/pipeline-local`,
+        'generando txt',
+        'Fase 2: generando TXT/DOCX académicos.',
+      )
+      await postExistingJobPhase(
+        createdJobId,
+        `/api/jobs/${createdJobId}/materials`,
+        'generando materiales',
+        'Fase 3: generando materiales por gránulo.',
+      )
+      await fetchJobStatus(createdJobId)
+      setStatus('finalizado')
+      setGenerationMessage('Paquete completo listo. Puedes descargar el ZIP final institucional.')
+    } catch (error) {
+      setStatus('error')
+      const message = error instanceof Error ? error.message : 'Error ejecutando el flujo completo local.'
+      setGenerationMessage(message)
+    } finally {
+      setIsGenerating(false)
+      setIsFullPipelineRunning(false)
+    }
   }
 
   const handleRetryCurrentPhase = () => {
     if (phaseStatus?.specializationMaterials.status === 'failed') {
-      handleGenerateSpecializationMaterials()
+      handleGenerateMaterials()
       return
     }
     if (phaseStatus?.pipelineLocal.status === 'failed') {
@@ -320,6 +454,31 @@ function GranulesView({ onBack }: GranulesViewProps) {
       return
     }
     handleGenerate()
+  }
+
+  const handleUploadDrive = async () => {
+    if (!jobId || !driveFolderId.trim() || isGenerating || driveUploadStatus === 'uploading') return
+    setDriveUploadStatus('uploading')
+    setDriveUploadMessage('Subiendo estructura PAQUETE_ACADEMICO a Google Drive...')
+    setDriveUploadResult(null)
+    try {
+      const formData = new FormData()
+      formData.append('driveFolderId', driveFolderId.trim())
+      formData.append('includeZip', 'true')
+      const response = await fetch(`${apiBaseUrl}/api/jobs/${jobId}/upload-drive`, {
+        method: 'POST',
+        body: formData,
+      })
+      const payload = (await response.json()) as DriveUploadResponse | { detail?: string }
+      if (!response.ok) throw new Error((payload as { detail?: string }).detail ?? 'No fue posible subir el paquete a Drive.')
+      setDriveUploadResult(payload as DriveUploadResponse)
+      setDriveUploadStatus('completed')
+      setDriveUploadMessage('Paquete subido a Drive correctamente.')
+      await fetchJobStatus(jobId)
+    } catch (error) {
+      setDriveUploadStatus('error')
+      setDriveUploadMessage(error instanceof Error ? error.message : 'Error subiendo a Drive.')
+    }
   }
 
   const handleReset = () => {
@@ -332,6 +491,32 @@ function GranulesView({ onBack }: GranulesViewProps) {
   }
 
   useEffect(() => () => clearPolling(), [])
+
+  useEffect(() => {
+    let cancelled = false
+    fetch(`${apiBaseUrl}/api/categories`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('No categories')))
+      .then((payload: CategoryConfig[]) => {
+        if (!cancelled && Array.isArray(payload) && payload.length > 0) setCategories(payload)
+      })
+      .catch(() => {
+        if (!cancelled) setCategories(CATEGORY_CONFIGS)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const consoleStatus = status === 'error'
+    ? 'Error'
+    : availableNextAction === 'download_package'
+      ? 'Paquete listo'
+      : isGenerating
+        ? 'Procesando'
+        : 'Sistema listo'
+
+  const canRunFullPackage = Boolean(selectedFile) && detectedGranules.length > 0 && !isGenerating && !isFullPipelineRunning
+  const canRunGranulesOnly = Boolean(selectedFile) && detectedGranules.length > 0 && !jobId && !isGenerating
 
   useEffect(() => {
     if (!selectedFile || !canUploadSyllabus) return
@@ -375,97 +560,189 @@ function GranulesView({ onBack }: GranulesViewProps) {
   return (
     <div className="granules-view">
       <div className="granules-view-content">
-        <div className="view-header">
+        <div className="view-header generation-console-header">
           <BackButton onBack={onBack} />
+          <span className="generation-header-badge">Pipeline local</span>
           <div className="view-header-text">
-            <h1 className="view-title">Creación de gránulos</h1>
-            <p className="view-subtitle">Genera documentos académicos estructurados a partir de un syllabus.</p>
+            <h1 className="view-title">Generar paquete local</h1>
+            <p className="view-subtitle">Consola inteligente para convertir un syllabus en un paquete académico completo.</p>
           </div>
+          <span className={`generation-status-pill generation-status-pill--${status === 'error' ? 'error' : availableNextAction === 'download_package' ? 'ready' : isGenerating ? 'live' : 'idle'}`}>
+            {consoleStatus}
+          </span>
         </div>
 
-        <section className="grid-layout granules-config-grid">
-          <PromptSelector selectedPrompt={selectedPrompt} onSelectPrompt={handlePromptChange} />
-        </section>
+        <section className="generation-console">
+          <aside className="config-console-panel">
+            <div className="config-console-shell">
+              <div className="config-console-shell-header">
+                <span className="view-kicker">Configuración</span>
+                <h2>Panel del pipeline</h2>
+                <p>Define el nivel, carga el syllabus y lanza la generación completa desde un solo lugar.</p>
+              </div>
 
-        {!canUploadSyllabus && (
-          <section className="action-card granule-card setup-card">
-            <p className="muted">Selecciona el tipo de prompt (nivel académico) para continuar.</p>
-            <p className="card-description">
-              Esta configuración define el enfoque con el que se prepararán los gránulos a partir del syllabus.
-            </p>
-          </section>
-        )}
+            <PromptSelector selectedPrompt={selectedPrompt} onSelectPrompt={handlePromptChange} categories={categories} />
 
-        {canUploadSyllabus && (
-          <>
-            <FileDropzone
-              selectedFile={selectedFile}
-              onFileSelected={async (file) => {
-                handleReset()
-                setSelectedFile(file)
-
-                if (!file) {
-                  setDetectedGranules([])
-                  setPreviewMessage('')
-                  return
-                }
-
-                if (!file.name.toLowerCase().endsWith('.docx')) {
-                  setDetectedGranules([])
-                  setPreviewMessage('El archivo debe ser .docx')
-                  return
-                }
-
-                await analyzeSyllabusPreview(file)
-              }}
-            />
-
-            {hasSyllabus && (
-              <>
-                <DetectedGranulesPreview
-                  ref={pipelineCardRef}
-                  fileName={selectedFile?.name ?? null}
-                  subjectName={subjectName}
-                  programName={programName}
-                  selectedPrompt={(selectedPrompt || 'pregrado') as PromptType}
-                  granules={detectedGranules}
-                  isAnalyzing={isAnalyzingSyllabus}
-                  previewMessage={previewMessage}
-                  generationMessage={generationMessage}
-                  isGenerating={isGenerating}
-                  canGenerate={Boolean(selectedFile) && detectedGranules.length > 0 && !jobId}
-                  onGenerate={handleGenerate}
-                />
-                <JobProgressPanel
-                  status={status}
-                  logs={jobLogs}
-                  granules={detectedGranules}
-                  isGenerating={isGenerating}
-                  isError={status === 'error'}
-                  generatedFilesCount={generatedDocuments.length}
-                  totalMaterialsExpected={30}
-                  backendCurrentPhase={currentPhase}
-                  onRetry={handleRetryCurrentPhase}
-                />
-              </>
+            {!canUploadSyllabus && (
+              <section className="action-card granule-card setup-card console-hint-card">
+                <p className="muted">Selecciona una categoría activa para habilitar el upload del syllabus.</p>
+              </section>
             )}
-          </>
-        )}
 
-        {canUploadSyllabus && hasSyllabus && (
-          <ResultsPanel
-            ref={resultsPanelRef}
-            jobId={jobId}
-            documents={generatedDocuments}
-            materialesByGranule={materialesByGranule}
-            isVisible={Boolean(jobId)}
-            phaseStatus={phaseStatus}
-            availableNextAction={availableNextAction}
-            isGenerating={isGenerating}
-            onGeneratePipelineLocal={handleGeneratePipelineLocal}
-            onGenerateSpecializationMaterials={handleGenerateSpecializationMaterials}
-          />
-        )}
+            {canUploadSyllabus && (
+              <FileDropzone
+                selectedFile={selectedFile}
+                onFileSelected={async (file) => {
+                  handleReset()
+                  setSelectedFile(file)
+
+                  if (!file) {
+                    setDetectedGranules([])
+                    setPreviewMessage('')
+                    return
+                  }
+
+                  if (!file.name.toLowerCase().endsWith('.docx')) {
+                    setDetectedGranules([])
+                    setPreviewMessage('El archivo debe ser .docx')
+                    return
+                  }
+
+                  await analyzeSyllabusPreview(file)
+                }}
+              />
+            )}
+
+            <section className="action-card local-full-run-card console-primary-action">
+              <div>
+                <span className="view-kicker">Acción principal</span>
+                <h2>Generar paquete académico completo</h2>
+                <p className="card-description">Ejecuta gránulos, TXT/DOCX, recursos complementarios y ZIP final con el flujo local existente.</p>
+              </div>
+              <button
+                type="button"
+                className="primary-button primary-button--hero"
+                onClick={handleGenerateFullLocalPackage}
+                disabled={!canRunFullPackage}
+              >
+                {isFullPipelineRunning ? 'Generando paquete...' : 'Generar paquete académico completo'}
+              </button>
+              <div className="console-secondary-actions">
+                <button type="button" className="secondary-button" onClick={handleGenerate} disabled={!canRunGranulesOnly}>Generar solo gránulos</button>
+                {jobId && generatedDocuments.length > 0 && (
+                  <a className="secondary-button link-button" href={`${apiBaseUrl}/api/jobs/${jobId}/download/granules`} target="_blank" rel="noreferrer">Descargar gránulos</a>
+                )}
+                {jobId && availableNextAction === 'download_package' && (
+                  <a className="secondary-button link-button" href={`${apiBaseUrl}/api/jobs/${jobId}/download-all`} target="_blank" rel="noreferrer">Descargar paquete</a>
+                )}
+              </div>
+            </section>
+
+            <section className="action-card granule-card drive-upload-card">
+              <div>
+                <span className="view-kicker">Google Drive</span>
+                <h2>Replicar paquete en Drive</h2>
+                <p className="card-description">Pega el Folder ID destino. Se reutilizan carpetas existentes y se sobrescriben archivos con el mismo nombre.</p>
+              </div>
+              <input
+                type="text"
+                className="select-input"
+                value={driveFolderId}
+                onChange={(event) => setDriveFolderId(event.target.value)}
+                placeholder="Ej: 1AbCDefGhIjKlMnOpQrStUv"
+                disabled={driveUploadStatus === 'uploading'}
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={handleUploadDrive}
+                disabled={!jobId || availableNextAction !== 'download_package' || !driveFolderId.trim() || driveUploadStatus === 'uploading'}
+              >
+                {driveUploadStatus === 'uploading' ? 'Subiendo a Drive...' : 'Subir paquete a Drive'}
+              </button>
+              {driveUploadMessage && <p className={`preview-alert ${driveUploadStatus === 'error' ? 'is-error' : 'is-info'}`}>{driveUploadMessage}</p>}
+              {driveUploadResult && (
+                <div className="syllabus-preview-rows">
+                  <div><span>Archivos nuevos</span><strong>{driveUploadResult.filesUploaded}</strong></div>
+                  <div><span>Sobrescritos</span><strong>{driveUploadResult.filesOverwritten}</strong></div>
+                  <div><span>Carpetas creadas</span><strong>{driveUploadResult.foldersCreated}</strong></div>
+                  <div><span>Carpetas reutilizadas</span><strong>{driveUploadResult.foldersReused}</strong></div>
+                  <div><span>Carpeta Drive</span><strong><a href={driveUploadResult.folderLink} target="_blank" rel="noreferrer">Abrir PAQUETE_ACADEMICO</a></strong></div>
+                </div>
+              )}
+            </section>
+
+            <section ref={pipelineCardRef} className="granule-card syllabus-compact-preview granules-pipeline-scroll-target">
+              <div className="granule-card-header">
+                <span className="granule-card-kicker">PREVIEW</span>
+              </div>
+              <div className="syllabus-preview-rows">
+                <div><span>Archivo</span><strong>{selectedFile?.name ?? 'Pendiente'}</strong></div>
+                <div><span>Asignatura</span><strong>{subjectName || 'Sin detectar'}</strong></div>
+                <div><span>Programa</span><strong>{programName || 'Sin detectar'}</strong></div>
+                <div><span>Gránulos</span><strong>{isAnalyzingSyllabus ? 'Analizando...' : `${detectedGranules.length || 0} detectados`}</strong></div>
+              </div>
+              {previewMessage && <p className="preview-alert is-info">{previewMessage}</p>}
+            </section>
+            </div>
+          </aside>
+
+          <aside className="status-console-panel">
+            <section ref={resultsPanelRef} className="package-status-card status-console-shell">
+            <div className="local-flow-phases card console-pipeline-card">
+              <div className="local-flow-heading">
+                <div>
+                  <span className="view-kicker">Mapa del flujo</span>
+                  <h2>Pipeline académico</h2>
+                </div>
+                <span className={`local-flow-live ${isGenerating ? 'is-live' : ''}`}>{consoleStatus}</span>
+              </div>
+              <div className="local-flow-stepper console-flow-stepper">
+                {localPhases.map((phase) => {
+                  const phaseState = getLocalPhaseState(phase.key)
+                  return (
+                    <article key={phase.key} className={`local-flow-step local-flow-step--${phaseState}`}>
+                      <span className="local-flow-step-number">{phase.number}</span>
+                      <span className="local-flow-step-icon">{phase.icon}</span>
+                      <span className="local-flow-step-check" aria-hidden>{phaseState === 'completed' ? '✓' : phaseState === 'error' ? '!' : ''}</span>
+                      <strong>{phase.title}</strong>
+                      <small>{phaseState === 'completed' ? 'Completado' : phaseState === 'active' ? 'Activo' : phaseState === 'error' ? 'Error' : 'Pendiente'}</small>
+                    </article>
+                  )
+                })}
+              </div>
+            </div>
+
+              <JobProgressPanel
+                status={status}
+                logs={jobLogs}
+                granules={detectedGranules}
+                isGenerating={isGenerating}
+                isError={status === 'error'}
+                generatedFilesCount={generatedDocuments.length}
+                totalMaterialsExpected={detectedGranules.length * materialsPerGranule}
+                materialsPerGranule={materialsPerGranule}
+                deliverables={selectedCategory?.deliverables ?? []}
+                categoryLabel={categoryLabel}
+                backendCurrentPhase={currentPhase}
+                onRetry={handleRetryCurrentPhase}
+              />
+
+              <ResultsPanel
+                jobId={jobId}
+                documents={generatedDocuments}
+                materialesByGranule={materialesByGranule}
+                isVisible={Boolean(jobId)}
+                phaseStatus={phaseStatus}
+                availableNextAction={availableNextAction}
+                isGenerating={isGenerating}
+                onGeneratePipelineLocal={handleGeneratePipelineLocal}
+                onGenerateSpecializationMaterials={handleGenerateMaterials}
+                category={selectedCategory}
+              />
+            </section>
+          </aside>
+        </section>
       </div>
     </div>
   )

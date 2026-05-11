@@ -16,9 +16,11 @@ interface DetectedGranulesPreviewProps {
 }
 
 function formatPromptLabel(value: PromptType): string {
+  if (value === 'curso_rapido') return 'Curso rápido'
   if (value === 'pregrado') return 'Pregrado'
   if (value === 'especializacion') return 'Especialización'
   if (value === 'maestria') return 'Maestría'
+  if (value === 'curso_externos_profesional') return 'Curso externos profesional'
   return 'Diplomado'
 }
 
@@ -31,24 +33,25 @@ function PreviewMetricCard({
   icon,
   label,
   value,
-  clamp = 2,
+  accentColor,
 }: {
   icon: string
   label: string
   value: string | number
-  clamp?: 2 | 3
+  accentColor: string
 }) {
   const displayValue = String(value)
 
   return (
     <div className="preview-metric-card pipeline-metric-card" title={displayValue}>
       <div className="pipeline-metric-top">
-        <div className="pipeline-metric-icon" aria-hidden="true">{icon}</div>
+        <div className={`pipeline-metric-icon pipeline-metric-icon--${accentColor}`} aria-hidden="true">{icon}</div>
         <span>{label}</span>
       </div>
-      <div className={`pipeline-metric-copy pipeline-metric-copy--clamp-${clamp}`}>
+      <div className="pipeline-metric-copy">
         <strong>{displayValue}</strong>
       </div>
+      <div className={`pipeline-metric-accent pipeline-metric-accent--${accentColor}`} />
     </div>
   )
 }
@@ -62,7 +65,6 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
     granules,
     isAnalyzing,
     previewMessage,
-    generationMessage,
     isGenerating,
     canGenerate,
     onGenerate,
@@ -70,36 +72,37 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
   ref,
 ) {
   const hasError = previewMessage.toLowerCase().includes('error') || previewMessage.toLowerCase().includes('failed')
+  
   const previewMetrics = [
     {
       icon: '📄',
       label: 'ARCHIVO CARGADO',
       value: formatPreviewLabel(fileName, 'Pendiente por cargar'),
-      clamp: 2 as const,
+      accentColor: 'blue',
     },
     {
       icon: '🧠',
       label: 'TIPO DE PROMPT',
       value: formatPromptLabel(selectedPrompt),
-      clamp: 2 as const,
+      accentColor: 'purple',
     },
     {
       icon: '🎓',
       label: 'ASIGNATURA DETECTADA',
       value: formatPreviewLabel(subjectName, 'Sin detectar'),
-      clamp: 3 as const,
+      accentColor: 'indigo',
     },
     {
       icon: '📚',
       label: 'PROGRAMA DETECTADO',
       value: formatPreviewLabel(programName, 'Sin detectar'),
-      clamp: 3 as const,
+      accentColor: 'violet',
     },
     {
       icon: '#',
       label: 'TOTAL DE GRÁNULOS',
       value: granules.length,
-      clamp: 2 as const,
+      accentColor: 'cyan',
     },
   ]
 
@@ -123,16 +126,21 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
             icon={metric.icon}
             label={metric.label}
             value={metric.value}
-            clamp={metric.clamp}
+            accentColor={metric.accentColor}
           />
         ))}
       </div>
 
-      {previewMessage && <p className={`preview-alert ${hasError ? 'is-error' : 'is-info'}`}>{previewMessage}</p>}
-
       {isAnalyzing ? (
-        <p className="preview-alert is-info">Analizando estructura temática...</p>
-      ) : (
+        <div className="preview-alert is-info is-analyzing">
+          <div className="analyzing-spinner" aria-hidden="true" />
+          <span>Analizando estructura temática del syllabus...</span>
+        </div>
+      ) : previewMessage ? (
+        <p className={`preview-alert ${hasError ? 'is-error' : 'is-info'}`}>{previewMessage}</p>
+      ) : null}
+
+      {!isAnalyzing && granules.length > 0 && (
         <ul className="granules-list pipeline-topics-list">
           {granules.map((topic) => (
             <li key={topic.id} className="pipeline-topic-row">
@@ -140,22 +148,32 @@ const DetectedGranulesPreview = forwardRef<HTMLElement, DetectedGranulesPreviewP
                 <span className="pipeline-topic-badge">{topic.id}</span>
                 <span className="pipeline-topic-title">{topic.label}</span>
               </div>
-              <div className="pipeline-topic-action">→</div>
+              <div className="pipeline-topic-action">
+                <span className="topic-arrow">→</span>
+              </div>
             </li>
           ))}
         </ul>
       )}
 
-      <div className="pipeline-preview-footer">
-        <span>ⓘ</span>
-        <p>Estos son los elementos temáticos que el sistema identificó para construir el flujo de generación.</p>
-      </div>
+      {!isAnalyzing && granules.length === 0 && !previewMessage && (
+        <div className="pipeline-empty-state">
+          <span className="empty-icon" aria-hidden="true">📋</span>
+          <p>Los gránulos aparecerán aquí una vez analizado el syllabus.</p>
+        </div>
+      )}
+
+      {!isAnalyzing && granules.length > 0 && (
+        <div className="pipeline-preview-footer">
+          <span>ⓘ</span>
+          <p>Estos son los elementos temáticos que el sistema identificó para construir el flujo de generación.</p>
+        </div>
+      )}
 
       <section className="pipeline-preview-action">
-        <p className="muted">{generationMessage}</p>
         <button
           type="button"
-          className={`primary-button ${isGenerating ? 'is-loading' : ''}`}
+          className={`primary-button pipeline-generate-button ${isGenerating ? 'is-loading' : ''}`}
           onClick={onGenerate}
           disabled={!canGenerate || isGenerating || isAnalyzing}
         >

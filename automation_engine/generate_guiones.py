@@ -23,15 +23,49 @@ try:
 except ImportError:  # pragma: no cover
     OpenAI = None
 
+from automation_engine.config.categories import CATEGORIES
+
 
 ENGINE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ENGINE_DIR.parent
-PROMPT_PATHS = {
-    "pregrado": PROJECT_ROOT / "prompts" / "pregrado.md",
-    "especializacion": PROJECT_ROOT / "prompts" / "especializacion.md",
-    "diplomado": PROJECT_ROOT / "prompts" / "diplomado.md",
-    "maestria": PROJECT_ROOT / "prompts" / "maestria.md",
+PROMPT_PATHS = {key: config.guion_prompt_path for key, config in CATEGORIES.items()}
+
+DOMINANT_KEYWORD_LIMITS = {
+    "contexto latinoamericano": 3,
+    "innovacion": 5,
+    "innovación": 5,
+    "innovaci\ufffdn": 5,
+    "inmersion": 4,
+    "inmersión": 4,
+    "inmersi\ufffdn": 4,
+    "narrativa interactiva": 4,
+    "narrativas interactivas": 4,
+    "accesibilidad": 5,
+    "sostenibilidad": 4,
 }
+
+DOMINANT_KEYWORD_REPLACEMENTS = {
+    "contexto latinoamericano": "entorno regional",
+    "innovacion": "desarrollo creativo",
+    "innovación": "desarrollo creativo",
+    "innovaci\ufffdn": "desarrollo creativo",
+    "inmersion": "experiencia de juego",
+    "inmersión": "experiencia de juego",
+    "inmersi\ufffdn": "experiencia de juego",
+    "narrativa interactiva": "diseño narrativo",
+    "narrativas interactivas": "diseño narrativo",
+    "accesibilidad": "diseño inclusivo",
+    "sostenibilidad": "viabilidad del proyecto",
+}
+
+ACADEMIC_FILLER_PATTERNS = [
+    r"\bes importante destacar que\b",
+    r"\bcabe resaltar que\b",
+    r"\ben este sentido,?\b",
+    r"\bdesde esta perspectiva,?\b",
+    r"\bresulta fundamental comprender que\b",
+    r"\bde manera significativa\b",
+]
 
 
 SECTION_PLAN = [
@@ -149,9 +183,9 @@ SECTION_PLANS_BY_LEVEL = {
         {
             "key": "bibliografia",
             "title": "BIBLIOGRAFIA",
-            "target_words": "30 a 40 referencias posteriores a 2020",
+            "target_words": "12 a 18 referencias verificables posteriores a 2020",
             "min_words": 350,
-            "instruction": "Redacta unicamente la bibliografia en APA 7. Incluye entre 30 y 40 referencias reales y pertinentes, publicadas de 2021 en adelante.",
+            "instruction": "Redacta unicamente la bibliografia en APA 7. Incluye entre 12 y 18 referencias reales, verificables y pertinentes, publicadas de 2021 en adelante. Prioriza bibliografia del silabo, documentacion oficial, organismos reconocidos y fuentes institucionales. No inventes autores, DOI, URL, volumenes ni paginas.",
         },
     ],
     "diplomado": [
@@ -243,6 +277,9 @@ SECTION_PLANS_BY_LEVEL = {
         },
     ],
 }
+
+SECTION_PLANS_BY_LEVEL["curso_rapido"] = SECTION_PLAN
+SECTION_PLANS_BY_LEVEL["curso_externos_profesional"] = SECTION_PLANS_BY_LEVEL["diplomado"]
 
 
 @dataclass
@@ -1089,7 +1126,8 @@ Instrucciones específicas:
 - El documento debe estar centrado solo en el tema "{topic}", sin convertirse en un resumen general de toda la asignatura.
 - Conserva la estructura: encabezado, INTRODUCCIÓN, EJES ARTICULADORES, ENSAYOS DE PROFUNDIZACIÓN, CONCLUSIONES, BIBLIOGRAFÍA.
 - Extensión objetivo: 7.500 a 10.000 palabras. Si el límite de salida impide llegar a esa extensión, prioriza profundidad, coherencia y una bibliografía completa.
-- Incluye entre 20 y 30 referencias APA 7, todas posteriores a 2020. No incluyas fuentes de 2020 ni anteriores.
+- Incluye solo referencias APA 7 reales y verificables, posteriores a 2020. No inventes fuentes, autores, DOI ni URL.
+- Evita redundancia artificial: cada parrafo debe aportar una idea, criterio, comparacion, tension o implicacion nueva.
 """.strip()
 
 
@@ -1136,8 +1174,18 @@ Reglas de salida para esta llamada:
 - No escribas explicaciones sobre el proceso.
 - No uses markdown, asteriscos, emojis ni listas esquematicas salvo en BIBLIOGRAFIA.
 - Si la seccion es BIBLIOGRAFIA, escribe solo referencias APA 7, una por parrafo, y todas deben ser de 2021 en adelante.
-- Si la seccion no es BIBLIOGRAFIA, integra citas narrativas o parenteticas de forma natural, pero no agregues lista de referencias.
+- Si la seccion es BIBLIOGRAFIA, no incluyas referencias dudosas, sinteticas o inventadas. Si no conoces un DOI, URL, volumen, numero o paginas, omite ese dato.
+- Si la seccion no es BIBLIOGRAFIA, integra citas narrativas o parenteticas solo cuando sean necesarias y verificables; si no hay seguridad bibliografica, usa formulaciones generales como "investigaciones contemporaneas" o "literatura especializada" sin inventar autores.
+- No uses citas en texto de 2020 o anteriores aunque aparezcan en el silabo; pueden orientar el contexto, pero no deben figurar como referencia academica vigente.
 - No cierres el documento si aun no estas en CONCLUSIONES.
+
+Reglas editoriales anti-redundancia:
+- No reformules la misma idea multiples veces ni uses parrafos con la misma estructura argumental.
+- Cada parrafo debe aportar informacion nueva: concepto, criterio tecnico, comparacion, implicacion profesional, tension conceptual, caso aplicado o decision metodologica.
+- Prioriza densidad conceptual sobre longitud artificial: no expandas definiciones si no agregas analisis real.
+- Evita frases academicas genericas y muletillas como "es importante destacar", "en este sentido", "desde esta perspectiva" o equivalentes repetidos.
+- No repitas constantemente las expresiones "contexto latinoamericano", "innovacion", "inmersion", "narrativa interactiva", "accesibilidad" ni "sostenibilidad". Usa esos conceptos solo cuando agreguen precision analitica.
+- No cierres parrafos con conclusiones vacias; cierra con una consecuencia tecnica, pedagogica o profesional concreta.
 """.strip()
 
 
@@ -1175,6 +1223,160 @@ def has_old_references(text: str) -> bool:
     return any(year <= 2020 for year in years)
 
 
+def normalize_for_similarity(text: str) -> str:
+    value = unicodedata.normalize("NFKD", text.lower())
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    value = re.sub(r"[^a-z0-9ñáéíóúü\s]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def token_set(text: str) -> set[str]:
+    stopwords = {
+        "para", "como", "desde", "esta", "este", "estos", "estas", "porque", "sobre",
+        "entre", "donde", "cuando", "tambien", "también", "puede", "debe", "hacia",
+        "cada", "forma", "manera", "proceso", "tema", "nivel", "contexto", "analisis",
+        "análisis", "profesional", "academico", "académico", "estudiante", "documento",
+    }
+    return {word for word in normalize_for_similarity(text).split() if len(word) > 4 and word not in stopwords}
+
+
+def paragraph_similarity(left: str, right: str) -> float:
+    left_tokens = token_set(left)
+    right_tokens = token_set(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def is_near_duplicate(paragraph: str, previous_paragraphs: List[str]) -> bool:
+    normalized = normalize_for_similarity(paragraph)
+    if len(normalized.split()) < 35:
+        return False
+    for previous in previous_paragraphs[-18:]:
+        if paragraph_similarity(paragraph, previous) >= 0.82:
+            return True
+    return False
+
+
+def reduce_filler_phrases(text: str) -> str:
+    cleaned = text
+    for pattern in ACADEMIC_FILLER_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+([,.;:])", r"\1", cleaned)
+
+
+def remove_old_parenthetical_citations(text: str) -> str:
+    def replace_if_old(match: re.Match) -> str:
+        citation = match.group(0)
+        years = [int(year) for year in re.findall(r"(?:19\d{2}|20\d{2})", citation)]
+        if years and any(year <= 2020 for year in years):
+            return ""
+        return citation
+
+    cleaned = re.sub(r"\([^\)]*(?:19\d{2}|20\d{2})[^\)]*\)", replace_if_old, text)
+    cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
+    return cleaned
+
+
+def limit_dominant_keywords(text: str) -> tuple[str, dict[str, int]]:
+    counts = {}
+    result = text
+    for keyword, limit in DOMINANT_KEYWORD_LIMITS.items():
+        pattern = re.compile(re.escape(keyword), flags=re.IGNORECASE)
+        matches = list(pattern.finditer(result))
+        counts[keyword] = len(matches)
+        if len(matches) <= limit:
+            continue
+        replacement = DOMINANT_KEYWORD_REPLACEMENTS[keyword]
+        seen = 0
+
+        def replace_after_limit(match: re.Match) -> str:
+            nonlocal seen
+            seen += 1
+            if seen <= limit:
+                return match.group(0)
+            return replacement
+
+        result = pattern.sub(replace_after_limit, result)
+    return result, counts
+
+
+def editorial_postprocess_section(section_text: str, section: dict, level: str) -> tuple[str, dict]:
+    if section["key"] == "bibliografia":
+        return cap_bibliography(section_text, level), {"removed_duplicate_paragraphs": 0, "keyword_counts": {}}
+
+    processed = remove_old_parenthetical_citations(reduce_filler_phrases(section_text))
+    blocks = re.split(r"\n\s*\n", processed)
+    kept_blocks = []
+    removed = 0
+    for block in blocks:
+        paragraph = block.strip()
+        if not paragraph:
+            continue
+        if is_near_duplicate(paragraph, kept_blocks):
+            removed += 1
+            continue
+        kept_blocks.append(paragraph)
+
+    processed = "\n\n".join(kept_blocks).strip()
+    processed, keyword_counts = limit_dominant_keywords(processed)
+    report = {
+        "removed_duplicate_paragraphs": removed,
+        "keyword_counts": {key: value for key, value in keyword_counts.items() if value > DOMINANT_KEYWORD_LIMITS[key]},
+    }
+    return processed, report
+
+
+def editorial_postprocess_document(content: str) -> tuple[str, dict]:
+    blocks = re.split(r"\n\s*\n", content)
+    kept = []
+    seen_headings = set()
+    removed_headings = 0
+    for block in blocks:
+        text = block.strip()
+        if not text:
+            continue
+        normalized = normalize_heading(text)
+        if text.isupper() and len(text) <= 90:
+            if normalized in seen_headings:
+                removed_headings += 1
+                continue
+            seen_headings.add(normalized)
+        kept.append(text)
+
+    processed = "\n\n".join(kept).strip()
+    processed, keyword_counts = limit_dominant_keywords(processed)
+    return processed, {
+        "removed_duplicate_headings": removed_headings,
+        "keyword_counts": {key: value for key, value in keyword_counts.items() if value > DOMINANT_KEYWORD_LIMITS[key]},
+    }
+
+
+def cap_bibliography(text: str, level: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    heading = []
+    references = []
+    for line in lines:
+        if "bibliograf" in normalize_for_similarity(line):
+            continue
+        if re.search(r"\((20\d{2})[a-z]?\)", line):
+            references.append(line)
+    recent = []
+    seen = set()
+    for ref in references:
+        years = [int(year) for year in re.findall(r"\((20\d{2})[a-z]?\)", ref)]
+        if not years or any(year <= 2020 for year in years):
+            continue
+        key = normalize_for_similarity(ref)
+        if key in seen:
+            continue
+        recent.append(ref)
+        seen.add(key)
+    capped = recent[:max_references_for_level(level)]
+    return "\n\n".join((heading[:1] or []) + capped).strip() or text.strip()
+
+
 def filter_recent_bibliography(items: List[str]) -> List[str]:
     recent_items = []
     for item in items:
@@ -1188,15 +1390,24 @@ def format_recent_bibliography(items: List[str]) -> str:
     recent_items = filter_recent_bibliography(items)
     if recent_items:
         return "\n".join(f"- {item}" for item in recent_items[:30])
-    return "No se identifico bibliografia posterior a 2020 en el silabo. Complementa con fuentes academicas reales publicadas de 2021 en adelante."
+    return "No se identifico bibliografia posterior a 2020 en el silabo. No inventes referencias especificas: usa solo fuentes institucionales, documentacion oficial o autores/obras que puedas reconocer como reales y verificables."
 
 
 def min_references_for_level(level: str) -> int:
     return {
         "pregrado": 20,
-        "especializacion": 30,
+        "especializacion": 12,
         "diplomado": 15,
         "maestria": 40,
+    }[level]
+
+
+def max_references_for_level(level: str) -> int:
+    return {
+        "pregrado": 30,
+        "especializacion": 18,
+        "diplomado": 25,
+        "maestria": 55,
     }[level]
 
 
@@ -1217,15 +1428,18 @@ Texto actual de la seccion:
 Amplia esta misma seccion con contenido adicional sustantivo.
 Reglas:
 - No repitas literalmente lo ya escrito.
+- No reformules argumentos ya presentes ni agregues parrafos de relleno para cumplir extension.
 - No agregues encabezados principales nuevos.
 - Mantén el mismo tono de guion editorial academico.
-- Desarrolla ejemplos, analisis, implicaciones y conexiones con el contexto profesional.
+- Desarrolla unicamente contenido nuevo: ejemplos, analisis comparativo, implicaciones tecnicas, criterios de decision, tensiones profesionales o casos aplicados distintos a los ya usados.
+- Evita repetir en exceso "contexto latinoamericano", "innovacion", "inmersion", "narrativa interactiva", "accesibilidad" y "sostenibilidad".
 - Escribe solo la ampliacion que debe anexarse a esta seccion.
 """.strip()
 
 
 def build_bibliography_rewrite_prompt(plan: CoursePlan, topic: str, current_text: str) -> str:
     min_refs = min_references_for_level(plan.nivel)
+    max_refs = max_references_for_level(plan.nivel)
     return f"""
 La bibliografia generada no cumple el requisito institucional.
 
@@ -1239,11 +1453,11 @@ Bibliografia actual:
 Reescribe la bibliografia completa.
 Reglas obligatorias:
 - Escribe únicamente BIBLIOGRAFIA en formato APA 7.
-- Incluye al menos {min_refs} referencias, respetando el rango definido en el prompt de sistema del nivel {plan.nivel}.
+- Incluye entre {min_refs} y {max_refs} referencias; no agregues bibliografia extensa para aparentar profundidad.
 - Todas las referencias deben ser posteriores a 2020, es decir, de 2021 en adelante.
 - No incluyas ninguna referencia de 2020, 2019, 2018 ni años anteriores.
-- Usa fuentes reales, reconocibles y pertinentes al tema.
-- No inventes DOI ni URL. Si no estás seguro de un DOI o URL, omítelo.
+- Usa solo fuentes reales, reconocibles y pertinentes al tema: bibliografia del silabo, documentacion oficial, organismos reconocidos, normas o autores/obras que puedas identificar como verificables.
+- No inventes autores, titulos, revistas, editoriales, DOI, URL, volumenes, numeros ni paginas. Si no estas seguro de un dato, omitelo.
 - Escribe una referencia por parrafo.
 """.strip()
 
@@ -1338,6 +1552,12 @@ def generate_long_document(
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        section_text, editorial_report = editorial_postprocess_section(section_text, section, plan.nivel)
+        if editorial_report["removed_duplicate_paragraphs"]:
+            print(f"    Postproceso editorial: {editorial_report['removed_duplicate_paragraphs']} parrafos redundantes removidos.")
+        if editorial_report["keyword_counts"]:
+            dominant = ", ".join(f"{key}={value}" for key, value in editorial_report["keyword_counts"].items())
+            print(f"    Postproceso editorial: keywords dominantes ajustadas ({dominant}).")
 
         if section["title"] not in used_main_titles:
             blocks.append(section["title"])
@@ -1345,7 +1565,13 @@ def generate_long_document(
         blocks.append(section_text)
         previous_context = (previous_context + "\n\n" + section_text).strip()
 
-    return "\n\n".join(blocks).strip()
+    content, document_report = editorial_postprocess_document("\n\n".join(blocks).strip())
+    if document_report["removed_duplicate_headings"]:
+        print(f"  Postproceso editorial global: {document_report['removed_duplicate_headings']} subtitulos duplicados removidos.")
+    if document_report["keyword_counts"]:
+        dominant = ", ".join(f"{key}={value}" for key, value in document_report["keyword_counts"].items())
+        print(f"  Postproceso editorial global: keywords dominantes ajustadas ({dominant}).")
+    return content
 
 
 def strip_repeated_title(text: str, title: str) -> str:
@@ -1426,7 +1652,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nivel",
         default="auto",
-        choices=["auto", "pregrado", "especializacion", "diplomado", "maestria"],
+        choices=["auto", *CATEGORIES.keys()],
         help="Nivel academico/prompt a usar. En auto intenta detectarlo desde el silabo.",
     )
     parser.add_argument("--subject", default="", help="Nombre de la materia, si se quiere forzar")

@@ -1,91 +1,88 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import BackButton from '../components/BackButton'
-import {
-  SCRIPTS_PIPELINE_STEPS,
-  SCRIPTS_LOCAL_PIPELINE_STEPS,
-  extractFolderId,
-  isValidDriveFolderInput,
-  validateLocalGranulesSelection,
-} from '../data/mockScripts'
-import type {
-  DriveUploadLink,
-  LocalGeneratedFile,
-  ScriptsJobStatusResponse,
-  ScriptsLocalJobStatusResponse,
-  ScriptsLocalProgressStep,
-  ScriptsProgressStep,
-} from '../data/mockScripts'
+import { SCRIPTS_LOCAL_PIPELINE_STEPS, validateLocalGranulesSelection } from '../data/mockScripts'
+import type { LocalGeneratedFile, ScriptsLocalJobStatusResponse, ScriptsLocalProgressStep } from '../data/mockScripts'
+import type { GenerationStatus, JobStatusResponse, PromptType } from '../types/granules'
 
 interface ScriptsViewProps {
   onBack: () => void
 }
 
+type ScriptMode = 'granules' | 'txtdocx'
+
 const API_BASE = 'http://localhost:8000'
+
+const promptOptions: Array<{ value: PromptType; label: string }> = [
+  { value: 'especializacion', label: 'Especialización' },
+  { value: 'pregrado', label: 'Pregrado · disponible para pruebas' },
+  { value: 'diplomado', label: 'Diplomado · pendiente de validación' },
+  { value: 'maestria', label: 'Maestría · pendiente de validación' },
+]
 
 async function readApiErrorDetail(response: Response): Promise<string> {
   try {
     const payload = (await response.json()) as { detail?: unknown }
-    const d = payload.detail
-    if (typeof d === 'string') return d
-    if (Array.isArray(d))
-      return d
-        .map((item: unknown) =>
-          typeof item === 'object' && item !== null && 'msg' in item
-            ? String((item as { msg: string }).msg)
-            : JSON.stringify(item),
-        )
-        .join('; ')
+    if (typeof payload.detail === 'string') return payload.detail
     return 'Solicitud no válida.'
   } catch {
     return 'Error al procesar la respuesta del servidor.'
   }
 }
 
+function statusLabel(status: GenerationStatus | ScriptsLocalProgressStep): string {
+  const labels: Record<string, string> = {
+    pendiente: 'Listo para iniciar',
+    'leyendo syllabus': 'Leyendo syllabus',
+    'detectando estructura temática': 'Detectando estructura temática',
+    'preparando prompts': 'Preparando prompts',
+    'generando documentos': 'Generando gránulos',
+    'generando gránulos': 'Generando gránulos',
+    'cargando granulos': 'Cargando gránulos',
+    'validando estructura': 'Validando estructura',
+    'leyendo granulos': 'Leyendo gránulos',
+    'generando txt': 'Generando TXT',
+    'generando docx': 'Generando DOCX',
+    'preparando descargas': 'Preparando descargas',
+    finalizado: 'Completado',
+    error: 'Error',
+  }
+  return labels[status] ?? status
+}
+
 function ScriptsView({ onBack }: ScriptsViewProps) {
-  const [mode, setMode] = useState<'drive' | 'local' | null>('drive')
+  const [mode, setMode] = useState<ScriptMode>('granules')
 
-  const [driveFolderInput, setDriveFolderInput] = useState('')
-  const [asignatura, setAsignatura] = useState('')
-  const [programa, setPrograma] = useState('')
-
-  const [status, setStatus] = useState<ScriptsProgressStep>('pendiente')
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [generationMessage, setGenerationMessage] = useState('')
-  const [logs, setLogs] = useState<string[]>([])
-  const [driveLinks, setDriveLinks] = useState<DriveUploadLink[]>([])
-  const [jobId, setJobId] = useState<string | null>(null)
-
-  const pollRef = useRef<number | null>(null)
+  const [syllabusFile, setSyllabusFile] = useState<File | null>(null)
+  const [selectedPrompt, setSelectedPrompt] = useState<PromptType>('especializacion')
+  const [granulesJobId, setGranulesJobId] = useState<string | null>(null)
+  const [granulesStatus, setGranulesStatus] = useState<GenerationStatus>('pendiente')
+  const [granulesMessage, setGranulesMessage] = useState('Sube un syllabus y genera únicamente los gránulos G1-G5.')
+  const [granulesLogs, setGranulesLogs] = useState<string[]>([])
+  const [granulesFiles, setGranulesFiles] = useState<string[]>([])
+  const [isGeneratingGranules, setIsGeneratingGranules] = useState(false)
+  const granulesPollRef = useRef<number | null>(null)
 
   const [localFiles, setLocalFiles] = useState<File[]>([])
   const [localAsignatura, setLocalAsignatura] = useState('')
   const [localPrograma, setLocalPrograma] = useState('')
   const [localStatus, setLocalStatus] = useState<ScriptsLocalProgressStep>('pendiente')
   const [localIsGenerating, setLocalIsGenerating] = useState(false)
-  const [localMessage, setLocalMessage] = useState('')
+  const [localMessage, setLocalMessage] = useState('Sube G1-G5 en .docx para generar TXT/DOCX académicos.')
   const [localLogs, setLocalLogs] = useState<string[]>([])
   const [localGeneratedFiles, setLocalGeneratedFiles] = useState<LocalGeneratedFile[]>([])
   const [localJobId, setLocalJobId] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
-
   const localPollRef = useRef<number | null>(null)
 
-  const detectedFolderId = useMemo(() => extractFolderId(driveFolderInput), [driveFolderInput])
-
-  const formValid =
-    driveFolderInput.trim().length > 0 &&
-    asignatura.trim().length > 0 &&
-    programa.trim().length > 0 &&
-    isValidDriveFolderInput(driveFolderInput)
-
   const localValidation = useMemo(() => validateLocalGranulesSelection(localFiles), [localFiles])
-  const localFormValid =
-    localValidation.ok && localAsignatura.trim().length > 0 && localPrograma.trim().length > 0
+  const localFormValid = localValidation.ok && localAsignatura.trim().length > 0 && localPrograma.trim().length > 0
+  const localTxtFiles = localGeneratedFiles.filter((f) => f.kind === 'txt')
+  const localDocxFiles = localGeneratedFiles.filter((f) => f.kind === 'docx')
 
-  const clearPolling = () => {
-    if (pollRef.current !== null) {
-      window.clearInterval(pollRef.current)
-      pollRef.current = null
+  const clearGranulesPolling = () => {
+    if (granulesPollRef.current !== null) {
+      window.clearInterval(granulesPollRef.current)
+      granulesPollRef.current = null
     }
   }
 
@@ -96,23 +93,8 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
     }
   }
 
-  useEffect(() => () => clearPolling(), [])
+  useEffect(() => () => clearGranulesPolling(), [])
   useEffect(() => () => clearLocalPolling(), [])
-
-  const currentStepIndex = useMemo(() => {
-    if (status === 'error') return -1
-    const idx = SCRIPTS_PIPELINE_STEPS.findIndex((step) => step === status)
-    return idx === -1 ? 0 : idx
-  }, [status])
-
-  const complementarioFolderUrl =
-    detectedFolderId !== null ? `https://drive.google.com/drive/folders/${detectedFolderId}` : null
-
-  const localCurrentStepIndex = useMemo(() => {
-    if (localStatus === 'error') return -1
-    const idx = SCRIPTS_LOCAL_PIPELINE_STEPS.findIndex((step) => step === localStatus)
-    return idx === -1 ? 0 : idx
-  }, [localStatus])
 
   const addFiles = (incoming: FileList | File[]) => {
     const next = Array.from(incoming)
@@ -131,70 +113,66 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
     setLocalFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
-  const handleGenerate = async () => {
-    if (!formValid || isGenerating) return
+  const handleGenerateGranulesOnly = async () => {
+    if (!syllabusFile || isGeneratingGranules) return
 
-    clearPolling()
-    setIsGenerating(true)
-    setLogs([])
-    setDriveLinks([])
-    setJobId(null)
-    setStatus('pendiente')
-    setGenerationMessage('Iniciando pipeline desde Drive…')
+    clearGranulesPolling()
+    setIsGeneratingGranules(true)
+    setGranulesStatus('leyendo syllabus')
+    setGranulesMessage('Fase local: generando únicamente gránulos desde syllabus.')
+    setGranulesLogs([])
+    setGranulesFiles([])
+    setGranulesJobId(null)
 
     try {
       const formData = new FormData()
-      formData.append('driveFolderInput', driveFolderInput.trim())
-      formData.append('asignatura', asignatura.trim())
-      formData.append('programa', programa.trim())
+      formData.append('syllabus', syllabusFile)
+      formData.append('nivel', selectedPrompt)
 
-      const createResponse = await fetch(`${API_BASE}/api/scripts/jobs`, {
+      const createResponse = await fetch(`${API_BASE}/api/jobs`, {
         method: 'POST',
         body: formData,
       })
 
-      if (!createResponse.ok) {
-        throw new Error(await readApiErrorDetail(createResponse))
-      }
+      if (!createResponse.ok) throw new Error(await readApiErrorDetail(createResponse))
 
       const created = (await createResponse.json()) as { jobId: string }
-      setJobId(created.jobId)
+      setGranulesJobId(created.jobId)
 
-      pollRef.current = window.setInterval(async () => {
+      granulesPollRef.current = window.setInterval(async () => {
         try {
-          const res = await fetch(`${API_BASE}/api/scripts/jobs/${created.jobId}`)
+          const res = await fetch(`${API_BASE}/api/jobs/${created.jobId}`)
           if (!res.ok) return
 
-          const payload = (await res.json()) as ScriptsJobStatusResponse
-          setLogs(payload.logs ?? [])
-          const step = payload.progressStep as ScriptsProgressStep
-          setStatus(step === 'error' ? 'error' : step)
+          const payload = (await res.json()) as JobStatusResponse
+          setGranulesStatus(payload.progressStep)
+          setGranulesLogs(payload.logs ?? [])
+          setGranulesFiles((payload.files ?? []).filter((file) => /^G\d+_/.test(file)))
 
           if (payload.status === 'completed') {
-            setDriveLinks(payload.driveLinks ?? [])
-            setStatus('finalizado')
-            setIsGenerating(false)
-            setGenerationMessage('Generación completada.')
-            clearPolling()
+            setGranulesStatus('finalizado')
+            setIsGeneratingGranules(false)
+            setGranulesMessage('Gránulos completados. Puedes descargar el ZIP parcial o los archivos generados.')
+            clearGranulesPolling()
           }
 
           if (payload.status === 'failed') {
-            setStatus('error')
-            setIsGenerating(false)
-            setGenerationMessage('El proceso falló. Revisa el registro de actividad.')
-            clearPolling()
+            setGranulesStatus('error')
+            setIsGeneratingGranules(false)
+            setGranulesMessage('Error generando gránulos. Revisa el registro de actividad.')
+            clearGranulesPolling()
           }
         } catch {
-          setStatus('error')
-          setIsGenerating(false)
-          setGenerationMessage('No fue posible consultar el estado del job.')
-          clearPolling()
+          setGranulesStatus('error')
+          setIsGeneratingGranules(false)
+          setGranulesMessage('No fue posible consultar el estado del job.')
+          clearGranulesPolling()
         }
-      }, 4000)
+      }, 3000)
     } catch (error) {
-      setStatus('error')
-      setIsGenerating(false)
-      setGenerationMessage(error instanceof Error ? error.message : 'Error al iniciar el proceso.')
+      setGranulesStatus('error')
+      setIsGeneratingGranules(false)
+      setGranulesMessage(error instanceof Error ? error.message : 'Error al iniciar la generación de gránulos.')
     }
   }
 
@@ -207,7 +185,7 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
     setLocalGeneratedFiles([])
     setLocalJobId(null)
     setLocalStatus('cargando granulos')
-    setLocalMessage('Subiendo gránulos al backend...')
+    setLocalMessage('Subiendo gránulos locales al backend...')
 
     try {
       const formData = new FormData()
@@ -220,14 +198,12 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
         body: formData,
       })
 
-      if (!createResponse.ok) {
-        throw new Error(await readApiErrorDetail(createResponse))
-      }
+      if (!createResponse.ok) throw new Error(await readApiErrorDetail(createResponse))
 
       const created = (await createResponse.json()) as { jobId: string }
       setLocalJobId(created.jobId)
       setLocalStatus('validando estructura')
-      setLocalMessage('Procesando gránulos locales...')
+      setLocalMessage('Procesando G1-G5 para crear TXT/DOCX académicos...')
 
       localPollRef.current = window.setInterval(async () => {
         try {
@@ -243,7 +219,7 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
             setLocalGeneratedFiles(payload.files ?? [])
             setLocalStatus('finalizado')
             setLocalIsGenerating(false)
-            setLocalMessage('Generación local completada.')
+            setLocalMessage('TXT/DOCX completados. Puedes descargar el paquete generado localmente.')
             clearLocalPolling()
           }
 
@@ -267,623 +243,208 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
     }
   }
 
-  const txtLinks = driveLinks.filter((l) => l.kind === 'txt')
-  const docxLinks = driveLinks.filter((l) => l.kind === 'docx')
-  const localTxtFiles = localGeneratedFiles.filter((f) => f.kind === 'txt')
-  const localDocxFiles = localGeneratedFiles.filter((f) => f.kind === 'docx')
-
   return (
     <div className="scripts-view">
       <div className="scripts-view-content">
-        <div className="view-header">
+        <div className="view-header premium-view-header">
           <BackButton onBack={onBack} />
           <div className="view-header-text">
-            <h1 className="view-title">Creación de guiones</h1>
-            <p className="view-subtitle">
-              Genera materiales (TXT y DOCX) a partir de los documentos fuente en una carpeta de Google Drive.
-            </p>
+            <span className="view-kicker">Ejecución local modular</span>
+            <h1 className="view-title">Scripts individuales</h1>
+            <p className="view-subtitle">Ejecuta tareas locales específicas sin activar todo el paquete académico.</p>
           </div>
         </div>
 
-        <div className="scripts-banner-notice">
-          El proceso puede tardar varios minutos. No cierres esta pestaña.
-        </div>
-
-        <section className="scripts-modality-stack">
-          <article className="scripts-modality-card scripts-step-card">
-            <button
-              type="button"
-              className="scripts-modality-toggle"
-              aria-expanded={mode === 'drive'}
-              onClick={() => setMode((prev) => (prev === 'drive' ? null : 'drive'))}
-            >
-              <div className="scripts-modality-head-row">
-                <span className="scripts-step-badge">Modalidad 1</span>
-                <span className="scripts-modality-chevron" aria-hidden>
-                  ▼
-                </span>
-              </div>
-              <h2 className="scripts-modality-title">Generar desde Google Drive</h2>
-              <p className="card-description">
-                Usa una carpeta de Drive con los gránulos fuente y sube automáticamente los materiales generados.
-              </p>
+        <section className="scripts-cluster">
+          <div className="scripts-cluster-heading">
+            <span className="view-kicker">Scripts locales</span>
+            <h2>Operaciones modulares conectadas</h2>
+            <p>Ejecuta una parte específica del flujo cuando no necesitas construir el paquete completo.</p>
+          </div>
+          <div className="scripts-command-center">
+            <button type="button" className={`script-command-card ${mode === 'granules' ? 'is-active' : ''}`} onClick={() => setMode('granules')}>
+              <span className="script-command-icon">01</span>
+              <strong>Crear solo gránulos</strong>
+              <small>Syllabus → G1-G5</small>
+              <em>Conectado localmente</em>
             </button>
-            {mode === 'drive' && (
-              <div className="scripts-modality-panel">
-                <input
-                  type="text"
-                  className="select-input"
-                  placeholder="Pega el link o ID de la carpeta de Drive"
-                  value={driveFolderInput}
-                  onChange={(event) => setDriveFolderInput(event.target.value)}
-                  disabled={isGenerating}
-                />
-                {detectedFolderId && (
-                  <p className="muted scripts-modality-id-hint">
-                    ID detectado: <code>{detectedFolderId}</code>
-                  </p>
-                )}
-                {driveFolderInput.trim() && !isValidDriveFolderInput(driveFolderInput) && (
-                  <p className="scripts-modality-error">Formato de link o ID no reconocido.</p>
-                )}
-
-                <div className="scripts-modality-fields">
-                  <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                    Asignatura
-                    <input
-                      type="text"
-                      className="select-input"
-                      value={asignatura}
-                      onChange={(event) => setAsignatura(event.target.value)}
-                      placeholder="Ej: INTELIGENCIA ARTIFICIAL Y ANALÍTICA AVANZADA..."
-                      disabled={isGenerating}
-                    />
-                  </label>
-                  <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                    Programa
-                    <input
-                      type="text"
-                      className="select-input"
-                      value={programa}
-                      onChange={(event) => setPrograma(event.target.value)}
-                      placeholder="Ej: QUÍMICA FARMACÉUTICA"
-                      disabled={isGenerating}
-                    />
-                  </label>
-
-                  <section className="scripts-action-panel scripts-generate-section">
-                    <p className="muted">{generationMessage || 'Completa los campos para generar materiales.'}</p>
-                    <button
-                      type="button"
-                      className="primary-button"
-                      onClick={handleGenerate}
-                      disabled={!formValid || isGenerating}
-                    >
-                      {isGenerating ? 'Generando materiales…' : 'Generar materiales'}
-                    </button>
-                    <button
-                      type="button"
-                      className="primary-button"
-                      onClick={handleGenerate}
-                      disabled={!formValid || isGenerating}
-                    >
-                      {isGenerating ? 'Generando materiales…' : 'Generar guion presentadoras'}
-                    </button>
-                  </section>
-                </div>
-              </div>
-            )}
-          </article>
-
-          {mode !== 'drive' && (
-            <article className="scripts-modality-card scripts-step-card">
-              <button
-                type="button"
-                className="scripts-modality-toggle"
-                aria-expanded={mode === 'local'}
-                onClick={() => setMode((prev) => (prev === 'local' ? null : 'local'))}
-              >
-                <div className="scripts-modality-head-row">
-                  <span className="scripts-step-badge">Modalidad 2</span>
-                  <span className="scripts-modality-chevron" aria-hidden>
-                    ▼
-                  </span>
-                </div>
-                <h2 className="scripts-modality-title">Generar desde archivos locales</h2>
-                <p className="card-description">
-                  Sube los gránulos académicos desde tu computador y descarga los materiales generados al finalizar.
-                </p>
-              </button>
-              {mode === 'local' && (
-                <div className="scripts-modality-panel">
-                  <div
-                    onDragOver={(event) => {
-                      event.preventDefault()
-                      setIsDragging(true)
-                    }}
-                    onDragLeave={() => setIsDragging(false)}
-                    onDrop={(event) => {
-                      event.preventDefault()
-                      setIsDragging(false)
-                      addFiles(event.dataTransfer.files)
-                    }}
-                    className={['scripts-local-dropzone', isDragging ? 'scripts-local-dropzone--drag' : ''].filter(Boolean).join(' ')}
-                  >
-                <label className="file-input-label" htmlFor="local-granules-input">
-                  Subir múltiples gránulos .docx
-                </label>
-                <input
-                  id="local-granules-input"
-                  type="file"
-                  multiple
-                  accept=".docx"
-                  onChange={(event) => addFiles(event.target.files ?? [])}
-                  className="file-input"
-                />
-                <p className="muted" style={{ marginTop: 8 }}>
-                  Arrastra aquí tus archivos o haz clic para seleccionarlos.
-                </p>
-                {localValidation.reason && (
-                  <p
-                    style={{
-                      marginTop: 8,
-                      color:
-                        localValidation.level === 'success'
-                          ? '#166534'
-                          : localValidation.level === 'warning'
-                            ? '#a16207'
-                            : '#b91c1c',
-                    }}
-                  >
-                    {localValidation.reason}
-                  </p>
-                )}
-                {localFiles.length > 0 && (
-                  <ul className="results-list" style={{ marginTop: 10 }}>
-                    {localFiles.map((file, index) => (
-                      <li key={`${file.name}-${file.size}`}>
-                        <span>{file.name}</span>
-                        <button type="button" className="secondary-button" onClick={() => removeLocalFile(index)}>
-                          Quitar
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                  </div>
-
-                  <div className="scripts-modality-fields">
-                    <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                      Asignatura
-                      <input
-                        type="text"
-                        className="select-input"
-                        value={localAsignatura}
-                        onChange={(event) => setLocalAsignatura(event.target.value)}
-                        placeholder="Ej: INTELIGENCIA ARTIFICIAL Y ANALÍTICA AVANZADA..."
-                        disabled={localIsGenerating}
-                      />
-                    </label>
-                    <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                      Programa
-                      <input
-                        type="text"
-                        className="select-input"
-                        value={localPrograma}
-                        onChange={(event) => setLocalPrograma(event.target.value)}
-                        placeholder="Ej: QUÍMICA FARMACÉUTICA"
-                        disabled={localIsGenerating}
-                      />
-                    </label>
-
-                    <section className="scripts-action-panel scripts-generate-section">
-                      <p className="muted">{localMessage || 'Completa los campos para generar materiales localmente.'}</p>
-                      <button
-                        type="button"
-                        className="primary-button"
-                        onClick={handleGenerateLocal}
-                        disabled={!localFormValid || localIsGenerating}
-                      >
-                        {localIsGenerating ? 'Generando materiales…' : 'Generar materiales'}
-                      </button>
-
-                      <button
-                        type="button"
-                        className="primary-button"
-                        onClick={handleGenerateLocal}
-                        disabled={!localFormValid || localIsGenerating}
-                      >
-                        {localIsGenerating ? 'Generando materiales…' : 'Generar guion presentadoras'}
-                      </button>
-                    </section>
-                  </div>
-                </div>
-              )}
+            <button type="button" className={`script-command-card ${mode === 'txtdocx' ? 'is-active' : ''}`} onClick={() => setMode('txtdocx')}>
+              <span className="script-command-icon">02</span>
+              <strong>Crear TXT/DOCX</strong>
+              <small>G1-G5 locales → actividades Moodle</small>
+              <em>Conectado localmente</em>
+            </button>
+            <article className="script-command-card is-dependent">
+              <span className="script-command-icon">03</span>
+              <strong>Materiales por gránulo</strong>
+              <small>Disponible después de generar gránulos dentro del flujo Paquete Local.</small>
+              <em>Dependiente del job local</em>
             </article>
-          )}
+          </div>
         </section>
 
-        {false && mode === 'drive' && (
-          <div className="scripts-layout">
-            <div className="scripts-main">
-              <article className="card scripts-step-card">
-                <div className="scripts-step-header">
-                  <span className="scripts-step-badge">Metadatos</span>
-                  <h2>Asignatura y programa</h2>
-                </div>
-                <p className="card-description">Estos valores se usan en la generación y en la validación de los materiales.</p>
-                <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                  Asignatura
-                  <input
-                    type="text"
-                    className="select-input"
-                    value={asignatura}
-                    onChange={(event) => setAsignatura(event.target.value)}
-                    placeholder="Ej: INTELIGENCIA ARTIFICIAL Y ANALÍTICA AVANZADA..."
-                    disabled={isGenerating}
-                  />
-                </label>
-                <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                  Programa
-                  <input
-                    type="text"
-                    className="select-input"
-                    value={programa}
-                    onChange={(event) => setPrograma(event.target.value)}
-                    placeholder="Ej: QUÍMICA FARMACÉUTICA"
-                    disabled={isGenerating}
-                  />
-                </label>
-              </article>
-
-              <section className="action-card scripts-generate-section">
-                <p className="muted">{generationMessage || 'Completa los campos para generar materiales.'}</p>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={handleGenerate}
-                  disabled={!formValid || isGenerating}
-                >
-                  {isGenerating ? 'Generando materiales…' : 'Generar materiales'}
-                </button>
-              </section>
-
-              {(isGenerating || status !== 'pendiente') && (
-                <article className="card">
-                  <h2>Estado de procesamiento</h2>
-                  <p className="card-description">Seguimiento del pipeline Drive (logs del servidor).</p>
-
-                  <ol className="progress-list">
-                    {SCRIPTS_PIPELINE_STEPS.map((step, index) => {
-                      const isCompleted = status !== 'error' && index < currentStepIndex
-                      const isCurrent = status !== 'error' && step === status
-                      const hasError = status === 'error'
-
-                      return (
-                        <li
-                          key={step}
-                          className={[
-                            'progress-item',
-                            isCompleted ? 'is-completed' : '',
-                            isCurrent ? 'is-current' : '',
-                            hasError && step === 'finalizado' ? 'is-error' : '',
-                          ].join(' ')}
-                        >
-                          <span className="progress-dot" />
-                          <span>{step}</span>
-                        </li>
-                      )
-                    })}
-                  </ol>
-
-                  {status === 'error' && (
-                    <p style={{ color: '#b91c1c', marginTop: 8 }}>El proceso terminó con error.</p>
-                  )}
-
-                  {logs.length > 0 && (
-                    <div className="logs-box">
-                      <pre>{logs.slice(-40).join('\n')}</pre>
-                    </div>
-                  )}
-                </article>
-              )}
-
-              {status === 'finalizado' && driveLinks.length > 0 && (
-                <article className="card">
-                  <h2>Archivos en Drive</h2>
-                  <p className="card-description">Enlaces a los materiales generados (abren en una nueva pestaña).</p>
-
-                  {txtLinks.length > 0 && (
-                    <>
-                      <h3 style={{ marginTop: 12, fontSize: '1rem' }}>TXT</h3>
-                      <ul className="results-list">
-                        {txtLinks.map((item) => (
-                          <li key={`txt-${item.link}`}>
-                            <span>{item.name}</span>
-                            <a className="secondary-button link-button" href={item.link} target="_blank" rel="noreferrer">
-                              Abrir en Drive
-                            </a>
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-
-                  {docxLinks.length > 0 && (
-                    <>
-                      <h3 style={{ marginTop: 16, fontSize: '1rem' }}>DOCX</h3>
-                      <ul className="results-list">
-                        {docxLinks.map((item) => (
-                          <li key={`docx-${item.link}`}>
-                            <span>{item.name}</span>
-                            <a className="secondary-button link-button" href={item.link} target="_blank" rel="noreferrer">
-                              Abrir en Drive
-                            </a>
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-
-                  {complementarioFolderUrl && (
-                    <div style={{ marginTop: 20 }}>
-                      <a
-                        className="primary-button"
-                        href={complementarioFolderUrl ?? undefined}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ display: 'inline-block', textDecoration: 'none', textAlign: 'center' }}
-                      >
-                        Abrir contenido complementario en Drive
-                      </a>
-                    </div>
-                  )}
-                </article>
-              )}
+        {mode === 'granules' && (
+          <section className="scripts-workspace-card">
+            <div className="scripts-workspace-header">
+              <div>
+                <span className="scripts-step-badge">Script local conectado</span>
+                <h2>Crear solo gránulos desde syllabus</h2>
+                <p>Usa `/api/jobs` para generar la Fase 1 y descargar únicamente los gránulos.</p>
+              </div>
+              <span className={`script-status-pill script-status-pill--${granulesStatus === 'error' ? 'error' : granulesStatus === 'finalizado' ? 'success' : isGeneratingGranules ? 'active' : 'idle'}`}>
+                {statusLabel(granulesStatus)}
+              </span>
             </div>
 
-            <aside className="scripts-sidebar">
-              <article className="card scripts-summary-card">
-                <h2>Resumen</h2>
-                <div className="scripts-summary-grid">
-                  <div>
-                    <span className="label">Modo</span>
-                    <p className="summary-value">Drive</p>
-                  </div>
-                  <div>
-                    <span className="label">Carpeta</span>
-                    <p className="summary-value">{detectedFolderId ?? '—'}</p>
-                  </div>
-                  <div>
-                    <span className="label">Asignatura</span>
-                    <p className="summary-value">{asignatura.trim() || '—'}</p>
-                  </div>
-                  <div>
-                    <span className="label">Programa</span>
-                    <p className="summary-value">{programa.trim() || '—'}</p>
-                  </div>
-                  <div>
-                    <span className="label">Job</span>
-                    <p className="summary-value">{jobId ?? '—'}</p>
-                  </div>
-                  <div>
-                    <span className="label">Estado</span>
-                    <p className="summary-value">
-                      <span className={`summary-status summary-status--${status}`}>{status}</span>
-                    </p>
-                  </div>
-                </div>
-              </article>
-            </aside>
-          </div>
-        )}
+            <div className="scripts-form-grid">
+              <label className="label-block">
+                Nivel académico
+                <select className="select-input" value={selectedPrompt} onChange={(event) => setSelectedPrompt(event.target.value as PromptType)} disabled={isGeneratingGranules}>
+                  {promptOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="scripts-local-dropzone scripts-file-selector">
+                <span className="file-input-label">Subir syllabus .docx</span>
+                <input
+                  type="file"
+                  accept=".docx"
+                  className="file-input"
+                  disabled={isGeneratingGranules}
+                  onChange={(event) => setSyllabusFile(event.target.files?.[0] ?? null)}
+                />
+                <p className="muted">{syllabusFile ? syllabusFile.name : 'Selecciona el syllabus fuente.'}</p>
+              </label>
+            </div>
 
-        {mode === 'drive' && (
-          <div className="scripts-modality-peek-slot">
-            <article className="scripts-modality-card scripts-modality-card--peek scripts-step-card">
-              <button
-                type="button"
-                className="scripts-modality-toggle"
-                aria-label="Cambiar a generación desde archivos locales"
-                onClick={() => setMode((prev) => (prev === 'local' ? null : 'local'))}
-              >
-                <div className="scripts-modality-head-row">
-                  <span className="scripts-step-badge">Modalidad 2</span>
-                  <span className="scripts-modality-chevron scripts-modality-chevron--peek" aria-hidden>
-                    →
-                  </span>
-                </div>
-                <h2 className="scripts-modality-title">Generar desde archivos locales</h2>
-                <p className="card-description">
-                  Sube los gránulos desde tu equipo y descarga los materiales al finalizar. Toca para usar esta opción.
-                </p>
+            <section className="scripts-action-panel scripts-generate-section">
+              <p className="muted">{granulesMessage}</p>
+              <button type="button" className="primary-button primary-button--hero" onClick={handleGenerateGranulesOnly} disabled={!syllabusFile || isGeneratingGranules}>
+                {isGeneratingGranules ? 'Generando gránulos...' : 'Generar gránulos'}
               </button>
-            </article>
-          </div>
+            </section>
+
+            {(isGeneratingGranules || granulesStatus !== 'pendiente') && (
+              <article className="script-progress-card">
+                <h3>Estado de gránulos</h3>
+                <p>{statusLabel(granulesStatus)}</p>
+                {granulesLogs.length > 0 && <div className="logs-box"><pre>{granulesLogs.slice(-28).join('\n')}</pre></div>}
+              </article>
+            )}
+
+            {granulesJobId && granulesFiles.length > 0 && (
+              <article className="script-results-card">
+                <h3>Gránulos generados ({granulesFiles.length})</h3>
+                <ul className="results-list">
+                  {granulesFiles.map((fileName) => (
+                    <li key={fileName}>
+                      <span><strong>DOCX</strong> · {fileName}</span>
+                      <a className="secondary-button link-button" href={`${API_BASE}/api/jobs/${granulesJobId}/files/${encodeURIComponent(fileName)}`} target="_blank" rel="noreferrer">Descargar</a>
+                    </li>
+                  ))}
+                </ul>
+                <a className="primary-button link-button" href={`${API_BASE}/api/jobs/${granulesJobId}/download/granules`} target="_blank" rel="noreferrer">Descargar gránulos (.zip)</a>
+              </article>
+            )}
+          </section>
         )}
 
-        {false && mode === 'local' && (
-          <div className="scripts-layout">
-            <div className="scripts-main">
-              <article className="card scripts-step-card">
-                <div className="scripts-step-header">
-                  <span className="scripts-step-badge">Metadatos</span>
-                  <h2>Asignatura y programa</h2>
-                </div>
-                <p className="card-description">Estos valores se usan en la generación y en la validación de los materiales.</p>
-                <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                  Asignatura
-                  <input
-                    type="text"
-                    className="select-input"
-                    value={localAsignatura}
-                    onChange={(event) => setLocalAsignatura(event.target.value)}
-                    placeholder="Ej: INTELIGENCIA ARTIFICIAL Y ANALÍTICA AVANZADA..."
-                    disabled={localIsGenerating}
-                  />
-                </label>
-                <label className="label-block" style={{ display: 'block', marginTop: 12 }}>
-                  Programa
-                  <input
-                    type="text"
-                    className="select-input"
-                    value={localPrograma}
-                    onChange={(event) => setLocalPrograma(event.target.value)}
-                    placeholder="Ej: QUÍMICA FARMACÉUTICA"
-                    disabled={localIsGenerating}
-                  />
-                </label>
-              </article>
+        {mode === 'txtdocx' && (
+          <section className="scripts-workspace-card">
+            <div className="scripts-workspace-header">
+              <div>
+                <span className="scripts-step-badge">Script local conectado</span>
+                <h2>Crear TXT/DOCX desde gránulos locales</h2>
+                <p>Sube G1-G5 ya generados y descarga PDA, QUIZ y documentos académicos.</p>
+              </div>
+              <span className={`script-status-pill script-status-pill--${localStatus === 'error' ? 'error' : localStatus === 'finalizado' ? 'success' : localIsGenerating ? 'active' : 'idle'}`}>
+                {statusLabel(localStatus)}
+              </span>
+            </div>
 
-              <section className="action-card scripts-generate-section">
-                <p className="muted">{localMessage || 'Completa los campos para generar materiales localmente.'}</p>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={handleGenerateLocal}
-                  disabled={!localFormValid || localIsGenerating}
-                >
-                  {localIsGenerating ? 'Generando materiales…' : 'Generar materiales'}
-                </button>
-              </section>
-
-              {(localIsGenerating || localStatus !== 'pendiente') && (
-                <article className="card">
-                  <h2>Estado de procesamiento local</h2>
-                  <p className="card-description">Seguimiento del pipeline local (logs del servidor).</p>
-
-                  <ol className="progress-list">
-                    {SCRIPTS_LOCAL_PIPELINE_STEPS.map((step, index) => {
-                      const isCompleted = localStatus !== 'error' && index < localCurrentStepIndex
-                      const isCurrent = localStatus !== 'error' && step === localStatus
-                      const hasError = localStatus === 'error'
-
-                      return (
-                        <li
-                          key={step}
-                          className={[
-                            'progress-item',
-                            isCompleted ? 'is-completed' : '',
-                            isCurrent ? 'is-current' : '',
-                            hasError && step === 'finalizado' ? 'is-error' : '',
-                          ].join(' ')}
-                        >
-                          <span className="progress-dot" />
-                          <span>{step}</span>
-                        </li>
-                      )
-                    })}
-                  </ol>
-
-                  {localStatus === 'error' && (
-                    <p style={{ color: '#b91c1c', marginTop: 8 }}>El proceso terminó con error.</p>
-                  )}
-
-                  {localLogs.length > 0 && (
-                    <div className="logs-box">
-                      <pre>{localLogs.slice(-40).join('\n')}</pre>
-                    </div>
-                  )}
-                </article>
-              )}
-
-              {localStatus === 'finalizado' && localGeneratedFiles.length > 0 && (
-                <article className="card">
-                  <h2>Archivos generados localmente</h2>
-                  <p className="card-description">Descarga los materiales generados desde el backend.</p>
-
-                  {localTxtFiles.length > 0 && (
-                    <>
-                      <h3 style={{ marginTop: 12, fontSize: '1rem' }}>TXT</h3>
-                      <ul className="results-list">
-                        {localTxtFiles.map((file) => (
-                          <li key={`local-txt-${file.name}`}>
-                            <span>{file.name}</span>
-                            <a
-                              className="secondary-button link-button"
-                              href={`${API_BASE}/api/scripts/local/jobs/${localJobId}/files/${encodeURIComponent(file.name)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Descargar
-                            </a>
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-
-                  {localDocxFiles.length > 0 && (
-                    <>
-                      <h3 style={{ marginTop: 16, fontSize: '1rem' }}>DOCX</h3>
-                      <ul className="results-list">
-                        {localDocxFiles.map((file) => (
-                          <li key={`local-docx-${file.name}`}>
-                            <span>{file.name}</span>
-                            <a
-                              className="secondary-button link-button"
-                              href={`${API_BASE}/api/scripts/local/jobs/${localJobId}/files/${encodeURIComponent(file.name)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Descargar
-                            </a>
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-
-                  <div style={{ marginTop: 20 }}>
-                    <a
-                      className="primary-button"
-                      href={`${API_BASE}/api/scripts/local/jobs/${localJobId}/download-all`}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ display: 'inline-block', textDecoration: 'none', textAlign: 'center' }}
-                    >
-                      Descargar todo (.zip)
-                    </a>
-                  </div>
-                </article>
+            <div
+              onDragOver={(event) => {
+                event.preventDefault()
+                setIsDragging(true)
+              }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={(event) => {
+                event.preventDefault()
+                setIsDragging(false)
+                addFiles(event.dataTransfer.files)
+              }}
+              className={['scripts-local-dropzone', 'scripts-local-dropzone--large', isDragging ? 'scripts-local-dropzone--drag' : ''].filter(Boolean).join(' ')}
+            >
+              <label className="file-input-label" htmlFor="local-granules-input">Subir G1-G5 en .docx</label>
+              <input id="local-granules-input" type="file" multiple accept=".docx" onChange={(event) => addFiles(event.target.files ?? [])} className="file-input" />
+              <p className="muted">Arrastra aquí tus gránulos o haz clic para seleccionarlos.</p>
+              {localValidation.reason && <p className={`script-validation script-validation--${localValidation.level ?? 'error'}`}>{localValidation.reason}</p>}
+              {localFiles.length > 0 && (
+                <ul className="results-list compact-results-list">
+                  {localFiles.map((file, index) => (
+                    <li key={`${file.name}-${file.size}`}>
+                      <span>{file.name}</span>
+                      <button type="button" className="secondary-button" onClick={() => removeLocalFile(index)} disabled={localIsGenerating}>Quitar</button>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
 
-            <aside className="scripts-sidebar">
-              <article className="card scripts-summary-card">
-                <h2>Resumen</h2>
-                <div className="scripts-summary-grid">
-                  <div>
-                    <span className="label">Modo</span>
-                    <p className="summary-value">Local</p>
-                  </div>
-                  <div>
-                    <span className="label">Gránulos</span>
-                    <p className="summary-value">{localFiles.length}</p>
-                  </div>
-                  <div>
-                    <span className="label">Asignatura</span>
-                    <p className="summary-value">{localAsignatura.trim() || '—'}</p>
-                  </div>
-                  <div>
-                    <span className="label">Programa</span>
-                    <p className="summary-value">{localPrograma.trim() || '—'}</p>
-                  </div>
-                  <div>
-                    <span className="label">Job</span>
-                    <p className="summary-value">{localJobId ?? '—'}</p>
-                  </div>
-                  <div>
-                    <span className="label">Estado</span>
-                    <p className="summary-value">
-                      <span className={`summary-status summary-status--${localStatus}`}>{localStatus}</span>
-                    </p>
-                  </div>
-                </div>
+            <div className="scripts-form-grid">
+              <label className="label-block">
+                Asignatura
+                <input type="text" className="select-input" value={localAsignatura} onChange={(event) => setLocalAsignatura(event.target.value)} placeholder="Ej: Inteligencia artificial y analítica avanzada" disabled={localIsGenerating} />
+              </label>
+              <label className="label-block">
+                Programa
+                <input type="text" className="select-input" value={localPrograma} onChange={(event) => setLocalPrograma(event.target.value)} placeholder="Ej: Especialización en videojuegos" disabled={localIsGenerating} />
+              </label>
+            </div>
+
+            <section className="scripts-action-panel scripts-generate-section">
+              <p className="muted">{localMessage}</p>
+              <button type="button" className="primary-button primary-button--hero" onClick={handleGenerateLocal} disabled={!localFormValid || localIsGenerating}>
+                {localIsGenerating ? 'Generando TXT/DOCX...' : 'Generar TXT/DOCX'}
+              </button>
+            </section>
+
+            {(localIsGenerating || localStatus !== 'pendiente') && (
+              <article className="script-progress-card">
+                <h3>Estado de procesamiento local</h3>
+                <ol className="progress-list script-progress-list">
+                  {SCRIPTS_LOCAL_PIPELINE_STEPS.map((step) => (
+                    <li key={step} className={`progress-item ${step === localStatus ? 'is-current' : ''}`}>
+                      <span className="progress-dot" />
+                      <span>{statusLabel(step)}</span>
+                    </li>
+                  ))}
+                </ol>
+                {localLogs.length > 0 && <div className="logs-box"><pre>{localLogs.slice(-28).join('\n')}</pre></div>}
               </article>
-            </aside>
-          </div>
+            )}
+
+            {localStatus === 'finalizado' && localGeneratedFiles.length > 0 && (
+              <article className="script-results-card">
+                <h3>Archivos TXT/DOCX generados</h3>
+                {localTxtFiles.length > 0 && <p className="card-description">TXT: {localTxtFiles.map((file) => file.name).join(', ')}</p>}
+                {localDocxFiles.length > 0 && <p className="card-description">DOCX: {localDocxFiles.map((file) => file.name).join(', ')}</p>}
+                <a className="primary-button link-button" href={`${API_BASE}/api/scripts/local/jobs/${localJobId}/download-all`} target="_blank" rel="noreferrer">Descargar TXT/DOCX (.zip)</a>
+              </article>
+            )}
+          </section>
         )}
+
+        <section className="drive-soon-section">
+          <span className="drive-lock-orb" aria-hidden>↗</span>
+          <div>
+            <span className="scripts-step-badge">Próximamente</span>
+            <h2>Flujos Drive</h2>
+            <p>El paquete Drive completo queda bloqueado. El script histórico de TXT/DOCX desde Drive no corresponde al paquete Drive completo y se deja separado para una iteración posterior.</p>
+          </div>
+          <button type="button" className="secondary-button" disabled>Drive próximamente</button>
+        </section>
       </div>
     </div>
   )

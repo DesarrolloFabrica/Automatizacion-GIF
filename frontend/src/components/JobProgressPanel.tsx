@@ -1,22 +1,11 @@
-import type { GenerationStatus, GranuleTopic } from '../types/granules'
-
-const MATERIAL_NAMES: Record<string, string> = {
-  '02': 'Fichas de estudio de evidencia',
-  '03': 'Glosario especializado',
-  '04': 'Revista dossier',
-  '05': 'Infografía modelo o ruta',
-  '06': 'Podcast debate experto',
-  '07': 'Video solución o procedimiento',
-}
+import type { CategoryDeliverable, GenerationStatus, GranuleTopic } from '../types/granules'
 
 const PHASES = [
   { key: 'syllabus', label: 'Syllabus recibido' },
-  { key: 'granules', label: 'Generando gránulos' },
-  { key: 'txt', label: 'Generando TXT maestro' },
-  { key: 'docx', label: 'Generando DOCX maestro' },
-  { key: 'materials', label: 'Generando materiales de Especialización' },
-  { key: 'organizing', label: 'Organizando archivos' },
-  { key: 'package', label: 'Finalizando paquete descargable' },
+  { key: 'granules', label: 'Gránulos G1-G5' },
+  { key: 'documents', label: 'TXT/DOCX académicos' },
+  { key: 'materials', label: 'Recursos complementarios' },
+  { key: 'package', label: 'ZIP final' },
 ] as const
 
 interface JobProgressPanelProps {
@@ -27,6 +16,9 @@ interface JobProgressPanelProps {
   isError: boolean
   generatedFilesCount: number
   totalMaterialsExpected?: number
+  materialsPerGranule?: number
+  deliverables?: CategoryDeliverable[]
+  categoryLabel?: string
   backendCurrentPhase?: string
   onRetry: () => void
 }
@@ -53,18 +45,17 @@ function inferCurrentPhase(status: GenerationStatus, logs: string[]): string {
   const latest = normalizeLog(getLatestRelevantLog(logs))
   if (status === 'error') return 'error'
   if (status === 'finalizado') return 'package'
-  if (latest.includes('material guardado') || latest.includes('generando material') || status === 'generando materiales especialización') return 'materials'
-  if (latest.includes('generando docx') || status === 'generando docx') return 'docx'
-  if (latest.includes('generando txt') || status === 'generando txt') return 'txt'
+  if (latest.includes('material guardado') || latest.includes('generando material') || status === 'generando materiales especialización' || status === 'generando materiales') return 'materials'
+  if (latest.includes('generando docx') || latest.includes('generando txt') || status === 'generando docx' || status === 'generando txt') return 'documents'
   if (latest.includes('guardado:') || latest.includes('generando documento') || status === 'generando gránulos' || status === 'generando documentos') return 'granules'
-  if (latest.includes('summary guardado') || latest.includes('manifest guardado') || status === 'organizando archivos') return 'organizing'
+  if (latest.includes('summary guardado') || latest.includes('manifest guardado') || status === 'organizando archivos') return 'package'
   return 'syllabus'
 }
 
 function mapBackendPhase(backendCurrentPhase?: string): string | null {
   if (backendCurrentPhase === 'completed') return 'package'
   if (backendCurrentPhase === 'specializationMaterials') return 'materials'
-  if (backendCurrentPhase === 'pipelineLocal') return 'docx'
+  if (backendCurrentPhase === 'pipelineLocal') return 'documents'
   if (backendCurrentPhase === 'granules') return 'granules'
   return null
 }
@@ -75,7 +66,11 @@ function phaseIndex(key: string): number {
 
 function parseProgress(logs: string[], granules: GranuleTopic[]) {
   const granuleMap = new Map<string, GranuleProgressState>()
-  granules.forEach((granule) => {
+  const baseGranules = granules.length > 0
+    ? granules
+    : Array.from({ length: 5 }, (_, index) => ({ id: `G${index + 1}`, label: `Gránulo ${index + 1}` }))
+
+  baseGranules.forEach((granule) => {
     granuleMap.set(granule.id, {
       code: granule.id,
       label: granule.label,
@@ -142,7 +137,8 @@ function parseProgress(logs: string[], granules: GranuleTopic[]) {
   }
 }
 
-function calculateProgressPercent(currentPhase: string, materialsSaved: number, totalMaterialsExpected: number, isError: boolean): number {
+function calculateProgressPercent(currentPhase: string, materialsSaved: number, totalMaterialsExpected: number, isError: boolean, hasStarted: boolean): number {
+  if (!hasStarted) return 0
   if (isError) return 100
   if (currentPhase === 'package') return 100
   if (currentPhase === 'materials') {
@@ -151,14 +147,13 @@ function calculateProgressPercent(currentPhase: string, materialsSaved: number, 
   const baseByPhase: Record<string, number> = {
     syllabus: 8,
     granules: 34,
-    txt: 44,
-    docx: 54,
-    organizing: 94,
+    documents: 54,
   }
   return baseByPhase[currentPhase] ?? 12
 }
 
 function stepClass(stepKey: string, currentPhase: string, isError: boolean): string {
+  if (currentPhase === 'idle') return 'is-pending'
   if (isError && stepKey === currentPhase) return 'is-error'
   const current = phaseIndex(currentPhase)
   const step = phaseIndex(stepKey)
@@ -167,22 +162,16 @@ function stepClass(stepKey: string, currentPhase: string, isError: boolean): str
   return 'is-pending'
 }
 
-function MaterialList({ currentMaterial }: { currentMaterial: string }) {
+function MaterialList({ currentMaterial, deliverables }: { currentMaterial: string; deliverables: CategoryDeliverable[] }) {
   return (
     <div className="job-material-list">
-      {Object.entries(MATERIAL_NAMES).map(([code, name]) => (
-        <span key={code} className={code === currentMaterial ? 'is-active' : ''}>
-          {code} {name}
+      {deliverables.map((material) => (
+        <span key={material.nn} className={material.nn === currentMaterial ? 'is-active' : ''}>
+          {material.nn} {material.name.replaceAll('_', ' ').toLowerCase()}
         </span>
       ))}
     </div>
   )
-}
-
-function globalItemClass(isComplete: boolean, isActive: boolean): string {
-  if (isComplete) return 'is-complete'
-  if (isActive) return 'is-active'
-  return 'is-pending'
 }
 
 function JobProgressPanel({
@@ -193,20 +182,22 @@ function JobProgressPanel({
   isError,
   generatedFilesCount,
   totalMaterialsExpected = 30,
+  materialsPerGranule = 6,
+  deliverables = [],
+  categoryLabel = 'la categoría',
   backendCurrentPhase,
   onRetry,
 }: JobProgressPanelProps) {
-  if (!isGenerating && status === 'pendiente' && logs.length === 0) return null
-
   const parsed = parseProgress(logs, granules)
-  const currentPhase = mapBackendPhase(backendCurrentPhase) ?? inferCurrentPhase(status, logs)
-  const latestLog = getLatestRelevantLog(logs)
-  const progressPercent = calculateProgressPercent(currentPhase, parsed.materialsSaved, totalMaterialsExpected, isError)
-  const currentMaterialName = parsed.currentMaterial ? MATERIAL_NAMES[parsed.currentMaterial] : ''
+  const hasStarted = isGenerating || logs.length > 0 || status !== 'pendiente' || Boolean(backendCurrentPhase && backendCurrentPhase !== 'pending')
+  const currentPhase = hasStarted ? mapBackendPhase(backendCurrentPhase) ?? inferCurrentPhase(status, logs) : 'idle'
+  const latestLog = hasStarted ? getLatestRelevantLog(logs) : 'Listo para iniciar. Carga o valida el syllabus y ejecuta el paquete completo.'
+  const progressPercent = calculateProgressPercent(currentPhase, parsed.materialsSaved, totalMaterialsExpected, isError, hasStarted)
+  const currentMaterialName = parsed.currentMaterial ? deliverables.find((material) => material.nn === parsed.currentMaterial)?.name.replaceAll('_', ' ').toLowerCase() ?? '' : ''
   const isCompleted = status === 'finalizado'
   const completedTitle = currentPhase === 'package'
     ? 'Paquete listo para descargar'
-    : currentPhase === 'docx'
+    : currentPhase === 'documents'
       ? 'TXT y DOCX académicos listos'
       : 'Gránulos listos para revisar'
 
@@ -214,9 +205,9 @@ function JobProgressPanel({
     <section className={`job-progress-panel ${isError ? 'is-error' : ''} ${isCompleted ? 'is-complete' : ''}`}>
       <div className="job-progress-header">
         <div>
-          <span className="job-progress-kicker">ESTADO DEL JOB</span>
-          <h3>{isError ? 'La generación necesita revisión' : isCompleted ? completedTitle : 'Ejecutando fase seleccionada'}</h3>
-          <p>{isError ? 'Se detuvo el proceso. Revisa el último log y vuelve a intentar.' : isCompleted ? 'Revisa los resultados temporales y continúa con la siguiente fase cuando estés listo.' : 'No cierres esta ventana mientras se generan los archivos.'}</p>
+          <span className="job-progress-kicker">ESTADO DEL PAQUETE</span>
+          <h3>{isError ? 'Generación detenida' : isCompleted ? completedTitle : isGenerating ? 'Sistema procesando' : granules.length > 0 ? 'Syllabus listo' : 'Listo para iniciar'}</h3>
+          <p>{isError ? 'Revisa el último evento y vuelve a intentar.' : isCompleted ? 'Los entregables ya están disponibles.' : isGenerating ? 'La fase activa se actualiza con los eventos del job.' : 'Sin progreso hasta iniciar un job real.'}</p>
         </div>
         <div className="job-progress-percent">{progressPercent}%</div>
       </div>
@@ -228,19 +219,19 @@ function JobProgressPanel({
       <div className="job-progress-summary-grid">
         <div>
           <span>Fase actual</span>
-          <strong>{PHASES.find((phase) => phase.key === currentPhase)?.label ?? status}</strong>
+          <strong>{currentPhase === 'idle' ? 'Pendiente' : PHASES.find((phase) => phase.key === currentPhase)?.label ?? status}</strong>
         </div>
         <div>
-          <span>Material actual</span>
-          <strong>{parsed.currentGranule && currentMaterialName ? `${parsed.currentGranule} · ${parsed.currentMaterial} ${currentMaterialName}` : 'Pendiente'}</strong>
+          <span>Gránulos</span>
+          <strong>{parsed.granulesGenerated}/{granules.length || 5}</strong>
         </div>
         <div>
-          <span>Materiales generados</span>
+          <span>Recursos</span>
           <strong>{parsed.materialsSaved}/{totalMaterialsExpected}</strong>
         </div>
         <div>
-          <span>Tiempo estimado</span>
-          <strong>{isCompleted ? 'Finalizado' : '30-45 min aprox.'}</strong>
+          <span>Archivos</span>
+          <strong>{generatedFilesCount}</strong>
         </div>
       </div>
 
@@ -253,41 +244,18 @@ function JobProgressPanel({
         ))}
       </div>
 
-      <div className="job-global-pipeline" aria-label="Progreso global del pipeline">
-        <article className={globalItemClass(true, currentPhase === 'syllabus')}>
-          <span>Syllabus recibido</span>
-          <strong>Listo</strong>
-        </article>
-        <article className={globalItemClass(parsed.granulesGenerated >= granules.length && granules.length > 0, currentPhase === 'granules')}>
-          <span>Gránulos generados</span>
-          <strong>{parsed.granulesGenerated}/{granules.length || 5}</strong>
-        </article>
-        <article className={globalItemClass(parsed.masterTxt || phaseIndex(currentPhase) > phaseIndex('txt'), currentPhase === 'txt')}>
-          <span>TXT maestro</span>
-          <strong>{parsed.masterTxt || phaseIndex(currentPhase) > phaseIndex('txt') ? 'En proceso / listo' : 'Pendiente'}</strong>
-        </article>
-        <article className={globalItemClass(parsed.masterDocx || phaseIndex(currentPhase) > phaseIndex('docx'), currentPhase === 'docx')}>
-          <span>DOCX maestro</span>
-          <strong>{parsed.masterDocx || phaseIndex(currentPhase) > phaseIndex('docx') ? 'En proceso / listo' : 'Pendiente'}</strong>
-        </article>
-        <article className={globalItemClass(currentPhase === 'package', currentPhase === 'organizing')}>
-          <span>Paquete descargable</span>
-          <strong>{currentPhase === 'package' ? 'Finalizado' : currentPhase === 'organizing' ? 'Organizando' : 'Pendiente'}</strong>
-        </article>
-      </div>
-
       {currentPhase === 'materials' && (
         <div className="job-material-current-card">
           <div>
-            <span>Generando materiales de Especialización</span>
+            <span>Generando materiales de {categoryLabel}</span>
             <strong>{parsed.currentGranule && currentMaterialName ? `${parsed.currentGranule} · ${parsed.currentMaterial} ${currentMaterialName}` : 'Preparando materiales'}</strong>
           </div>
           <p>Materiales generados: {parsed.materialsSaved}/{totalMaterialsExpected}</p>
-          <MaterialList currentMaterial={parsed.currentMaterial} />
+          <MaterialList currentMaterial={parsed.currentMaterial} deliverables={deliverables} />
         </div>
       )}
 
-      <div className="job-granule-checklist">
+      <div className="job-granule-checklist" aria-label="Progreso por gránulo">
         {parsed.granules.map((granule) => (
           <article key={granule.code} className="job-granule-card">
             <div className="job-granule-title">
@@ -296,14 +264,14 @@ function JobProgressPanel({
             </div>
             <div className="job-granule-material-progress">
               <div>
-                <span>Materiales de Especialización</span>
-                <strong>{granule.materials}/6</strong>
+                <span>Materiales de {categoryLabel}</span>
+                <strong>{granule.materials}/{materialsPerGranule}</strong>
               </div>
               <div className="job-granule-mini-bar">
-                <span style={{ width: `${Math.min(100, (granule.materials / 6) * 100)}%` }} />
+                <span style={{ width: `${Math.min(100, materialsPerGranule ? (granule.materials / materialsPerGranule) * 100 : 0)}%` }} />
               </div>
-              <p className={granule.materials >= 6 ? 'is-complete' : granule.materials > 0 ? 'is-active' : 'is-pending'}>
-                {granule.materials >= 6 ? 'Completado' : granule.materials > 0 ? 'En proceso' : 'Pendiente'}
+              <p className={granule.materials >= materialsPerGranule ? 'is-complete' : granule.materials > 0 ? 'is-active' : 'is-pending'}>
+                {granule.materials >= materialsPerGranule ? 'Completado' : granule.materials > 0 ? 'En proceso' : 'Pendiente'}
               </p>
             </div>
           </article>
@@ -311,9 +279,16 @@ function JobProgressPanel({
       </div>
 
       <div className="job-latest-log">
-        <span>Último log relevante</span>
+        <span>Último evento</span>
         <code>{latestLog}</code>
       </div>
+
+      {logs.length > 0 && (
+        <details className="job-logs-details">
+          <summary>Ver logs ({logs.length})</summary>
+          <pre>{logs.slice(-24).join('\n')}</pre>
+        </details>
+      )}
 
       {isError && (
         <button type="button" className="secondary-button link-button" onClick={onRetry}>
@@ -324,7 +299,7 @@ function JobProgressPanel({
       {isCompleted && (
         <div className="job-final-summary">
           <span>Gránulos generados: {granules.length}</span>
-          <span>Materiales especialización: {parsed.materialsSaved}</span>
+          <span>Materiales {categoryLabel}: {parsed.materialsSaved}</span>
           <span>Errores: {parsed.errors}</span>
           <span>Archivos disponibles: {generatedFilesCount}</span>
         </div>

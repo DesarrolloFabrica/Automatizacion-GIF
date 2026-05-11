@@ -87,6 +87,20 @@ Para Google Drive, en desarrollo local se usan:
 - `credentials.json`
 - `token_drive.json`
 
+Para subir el paquete academico final a Drive se recomienda service account:
+
+```powershell
+$env:GOOGLE_SERVICE_ACCOUNT_FILE="C:\\ruta\\service-account.json"
+```
+
+Tambien puede configurarse en `.env`:
+
+```text
+GOOGLE_SERVICE_ACCOUNT_FILE=credentials/service-account.json
+```
+
+Comparte la carpeta destino de Drive con el email `client_email` del service account y dale permiso de Editor. El usuario pega solo el Folder ID en la interfaz; el backend crea/reutiliza `PAQUETE_ACADEMICO` dentro de esa carpeta.
+
 En nube, esos valores deberian manejarse como secretos, no como archivos versionados.
 
 ## Ejecutar Backend

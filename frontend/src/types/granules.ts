@@ -1,4 +1,4 @@
-export type PromptType = 'pregrado' | 'especializacion' | 'maestria' | 'diplomado'
+export type PromptType = 'curso_rapido' | 'pregrado' | 'especializacion' | 'maestria' | 'diplomado' | 'curso_externos_profesional'
 export type ScriptType = 'analistas' | 'presentadoras'
 
 export type GenerationStatus =
@@ -11,6 +11,7 @@ export type GenerationStatus =
   | 'generando txt'
   | 'generando docx'
   | 'generando materiales especialización'
+  | 'generando materiales'
   | 'organizando archivos'
   | 'finalizado'
   | 'error'
@@ -65,6 +66,27 @@ export interface JobPhaseStatus {
   granules: PhaseStatusDetails
   pipelineLocal: PhaseStatusDetails
   specializationMaterials: PhaseStatusDetails
+  materials?: PhaseStatusDetails
+  uploadDrive?: PhaseStatusDetails
+}
+
+export interface CategoryDeliverable {
+  nn: string
+  name: string
+  section: string
+}
+
+export interface CategoryConfig {
+  key: PromptType
+  label: string
+  enabledForPackage: boolean
+  disabledReason: string
+  materialsDir: string
+  materialsRoute: string
+  expectedGranules: number
+  expectedMaterialsPerGranule: number
+  deliverables: CategoryDeliverable[]
+  reservedDeliverables: CategoryDeliverable[]
 }
 
 export interface JobStatusResponse {
@@ -76,9 +98,22 @@ export interface JobStatusResponse {
   granulesStatus: PhaseStatus
   pipelineLocalStatus: PhaseStatus
   specializationMaterialsStatus: PhaseStatus
+  uploadDriveStatus?: PhaseStatus
   currentPhase: string
   availableNextAction: AvailableNextAction
   phaseStatus: JobPhaseStatus | null
+}
+
+export interface DriveUploadResponse {
+  jobId: string
+  status: string
+  folderId: string
+  folderLink: string
+  filesUploaded: number
+  filesOverwritten: number
+  filesSkipped: number
+  foldersCreated: number
+  foldersReused: number
 }
 
 export interface MaterialFile {

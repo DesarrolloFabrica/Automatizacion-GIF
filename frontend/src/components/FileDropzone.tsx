@@ -12,18 +12,19 @@ function FileDropzone({ selectedFile, onFileSelected }: FileDropzoneProps) {
   }
 
   return (
-    <article className="card granule-card">
+    <article className="card granule-card syllabus-console-card">
       <div className="granule-card-header">
-        <span className="granule-card-kicker">INSUMO</span>
+        <span className="granule-card-kicker">INPUT PRINCIPAL</span>
       </div>
       <div className="granule-card-body">
-        <h2>Syllabus</h2>
+        <h2>Syllabus .docx</h2>
         <p className="card-description">
-          Carga el archivo base del curso en formato Word para iniciar el flujo.
+          Arranca el pipeline académico desde el documento base del curso.
         </p>
         <div className="syllabus-dropzone">
           <label htmlFor="syllabus-file" className="file-input-label">
-            Seleccionar archivo .docx
+            <strong>Soltar o seleccionar syllabus</strong>
+            <span>Formato Word .docx</span>
           </label>
           <input
             id="syllabus-file"
@@ -33,7 +34,7 @@ function FileDropzone({ selectedFile, onFileSelected }: FileDropzoneProps) {
             className="file-input"
           />
           <p className={`file-pill ${selectedFile ? 'is-loaded' : ''}`}>
-            {selectedFile ? `Archivo cargado: ${selectedFile.name}` : 'No hay archivo seleccionado.'}
+            {selectedFile ? selectedFile.name : 'Sin archivo cargado'}
           </p>
         </div>
       </div>
