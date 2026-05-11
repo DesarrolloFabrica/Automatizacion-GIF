@@ -6,6 +6,7 @@ import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
 import { CATEGORY_CONFIGS, getCategoryConfig } from '../data/categories'
 import { API_BASE_URL, apiFetch, readApiErrorDetail } from '../lib/api'
+import { pickProgramFromPreview } from '../lib/pickProgramFromPreview'
 import type { AvailableNextAction, CategoryConfig, GenerationStatus, GranuleMaterials, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
@@ -201,7 +202,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
         : preview.detectedTopics
 
       setSubjectName(selectedCourse?.asignatura || preview.subjectName || '')
-      setProgramName(preview.programName ?? '')
+      setProgramName(pickProgramFromPreview(preview))
       setDetectedGranules(selectedTopics.map((topic) => ({ id: `G${topic.index}`, label: topic.title })))
 
       if (selectedTopics.length === 0) {

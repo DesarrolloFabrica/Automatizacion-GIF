@@ -1,6 +1,8 @@
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+/** Preferir 127.0.0.1 para alinear con uvicorn por defecto y evitar ambigüedad ::1 vs IPv4 en Windows. */
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 
-export const BACKEND_CONNECTION_ERROR = 'No se pudo conectar con el backend. Verifica que FastAPI esté activo en el puerto 8000.'
+export const BACKEND_CONNECTION_ERROR =
+  'No se pudo conectar con el backend. Verifica que FastAPI esté activo (por defecto http://127.0.0.1:8000).'
 
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   try {

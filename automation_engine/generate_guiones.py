@@ -381,6 +381,8 @@ def parse_syllabus_docx(path: Path) -> SyllabusParseResult:
     rows = extract_ordered_docx_rows(doc)
     full_text = extract_docx_text(path)
     program = detect_global_program(rows)
+    if not program:
+        program = extract_program_fallback_from_flat_docx_text(full_text)
     school = detect_global_field(rows, "Escuela")
     modality = detect_global_modality(rows)
 
@@ -456,6 +458,56 @@ def detect_course_block_ranges(rows: List[List[str]]) -> List[tuple[int, int]]:
     return ranges
 
 
+def _looks_like_institutional_school_row(text: str) -> bool:
+    """Nombre de escuela/facultad en una sola celda (plantillas CUN sin etiqueta 'Escuela')."""
+    if not clean_text(text):
+        return False
+    n = normalize_heading(text)
+    markers = (
+        "ESCUELA",
+        "FACULTAD",
+        "INSTITUTO",
+        "CORPORACION",
+        "CORPORACI",  # truncado por encoding
+        "UNIVERSIDAD",
+        "COLEGIO",
+        "CENTRO DE",
+    )
+    return any(m in n for m in markers)
+
+
+def _is_obviously_not_program_name(text: str) -> bool:
+    """Valores sueltos de modalidad u opciones entre escuela y programa."""
+    t = clean_text(text)
+    if len(t) <= 3:
+        return True
+    n = normalize_heading(t)
+    if n in {"X", "SI", "NO"}:
+        return True
+    if n in {"PRESENCIAL", "VIRTUAL", "DISTANCIA", "DUAL", "HIBRIDO", "HÍBRIDO"}:
+        return True
+    return False
+
+
+def detect_program_from_school_program_stacked_rows(rows: List[List[str]]) -> str:
+    """Dos filas consecutivas de una sola celda: institución (escuela/…) y nombre del programa."""
+    for i in range(len(rows) - 1):
+        r0, r1 = rows[i], rows[i + 1]
+        if len(r0) != 1 or len(r1) != 1:
+            continue
+        a = clean_text(r0[0])
+        b = clean_text(r1[0])
+        if not a or not b:
+            continue
+        if not _looks_like_institutional_school_row(a):
+            continue
+        if _is_obviously_not_program_name(b):
+            continue
+        if is_valid_program_value(b):
+            return b
+    return ""
+
+
 def detect_global_program(rows: List[List[str]]) -> str:
     for row_index, row in enumerate(rows):
         for cell_index, cell in enumerate(row):
@@ -465,6 +517,9 @@ def detect_global_program(rows: List[List[str]]) -> str:
                     cleaned = clean_text(candidate)
                     if is_valid_program_value(cleaned):
                         return cleaned
+    stacked = detect_program_from_school_program_stacked_rows(rows)
+    if stacked:
+        return stacked
     return ""
 
 
@@ -511,7 +566,34 @@ def is_valid_program_value(value: str) -> bool:
     if any(word in normalized for word in ["ESPECIALIZACION", "PREGRADO", "MAESTRIA", "DIPLOMADO"]):
         return True
     meaningful_words = [word for word in re.findall(r"[A-ZÁÉÍÓÚÑa-záéíóúñ]+", cleaned) if len(word) > 2]
+    # Nombres cortos pero válidos (ej. "Técnica Profesional X") o títulos largos
+    if len(meaningful_words) >= 2 and len(cleaned) >= 12:
+        return True
     return len(meaningful_words) > 3
+
+
+def extract_program_fallback_from_flat_docx_text(text: str) -> str:
+    """Último recurso: celdas 'Programa | valor' o dos líneas consecutivas escuela → programa (TABLAs en extract_docx_text)."""
+    lines = text.splitlines()
+    for raw in lines:
+        line = clean_text(raw)
+        if not line or line.upper().startswith("TABLA"):
+            continue
+        cells = [clean_text(c) for c in re.split(r"\s*\|\s*", line) if clean_text(c)]
+        for i, cell in enumerate(cells):
+            if normalize_label_token(cell) == "PROGRAMA" and i + 1 < len(cells):
+                val = clean_text(cells[i + 1])
+                if is_valid_program_value(val):
+                    return val
+    for i, raw in enumerate(lines[:-1]):
+        line, nxt = clean_text(raw), clean_text(lines[i + 1])
+        if not line or not nxt or "|" in line or "|" in nxt:
+            continue
+        if line.upper().startswith("TABLA") or lines[i + 1].upper().startswith("TABLA"):
+            continue
+        if _looks_like_institutional_school_row(line) and is_valid_program_value(nxt) and not _is_obviously_not_program_name(nxt):
+            return nxt
+    return ""
 
 
 def extract_value_from_block(rows: List[List[str]], label: str, aliases: List[str] | None = None) -> str:
@@ -799,6 +881,23 @@ def extract_course_plan(path: Path, subject_override: str = "", semester_overrid
         label_norm = normalize_for_matching(label)
         return label_norm in cell_norm
 
+    def cell_matches_program_label_cell(cell_text: str, label: str) -> bool:
+        """Celda de etiqueta Programa (no 'Modalidad del programa' ni 'Tipo de programa')."""
+        head_tokens = normalize_label_token(cell_text).split()
+        need_tokens = normalize_label_token(label).split()
+        if not head_tokens or not need_tokens or need_tokens[0] != "PROGRAMA":
+            cell_norm = normalize_for_matching(cell_text)
+            lbl = normalize_for_matching(label)
+            return bool(cell_norm and lbl and lbl in cell_norm)
+        if head_tokens[0] != "PROGRAMA":
+            return False
+        if "MODALIDAD" in head_tokens:
+            return False
+        for i, tok in enumerate(need_tokens):
+            if i >= len(head_tokens) or head_tokens[i] != tok:
+                return False
+        return True
+
     def value_after_flexible(label: str, aliases: List[str] | None = None) -> str:
         all_labels = [label] + (aliases or [])
         for row in rows:
@@ -824,9 +923,10 @@ def extract_course_plan(path: Path, subject_override: str = "", semester_overrid
 
     def find_in_row_pattern(label: str, aliases: List[str] | None = None) -> str:
         all_labels = [label] + (aliases or [])
+        matcher = cell_matches_program_label_cell if normalize_for_matching(label) == "programa" else cell_contains
         for row in rows:
             for index, cell in enumerate(row):
-                if any(cell_contains(cell, lbl) for lbl in all_labels):
+                if any(matcher(cell, lbl) for lbl in all_labels):
                     if index + 1 < len(row):
                         val = clean_text(row[index + 1])
                         if val and len(val) > 1:
@@ -835,6 +935,8 @@ def extract_course_plan(path: Path, subject_override: str = "", semester_overrid
 
     escuela = find_in_row_pattern("Escuela")
     programa = find_in_row_pattern("Programa", ["Programa académico", "Programa de"])
+    if not programa:
+        programa = detect_program_from_school_program_stacked_rows(rows)
     asignatura = subject_override or find_in_row_pattern("Nombre", ["Nombre de la asignatura", "Nombre de la materia", "Asignatura", "Curso"])
     semestre = semester_override or find_in_row_pattern("Semestre", ["Semestre (Nivel)", "Nivel", "Semestre/Nivel"])
     modalidad = find_in_row_pattern("Modalidad", ["Modalidad del programa"])

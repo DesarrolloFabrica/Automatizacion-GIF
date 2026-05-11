@@ -5,6 +5,7 @@ import JobProgressPanel from '../components/JobProgressPanel'
 import PromptSelector from '../components/PromptSelector'
 import { CATEGORY_CONFIGS, getCategoryConfig } from '../data/categories'
 import { apiFetch, readApiErrorDetail } from '../lib/api'
+import { pickProgramFromPreview } from '../lib/pickProgramFromPreview'
 import type { CategoryConfig, DriveSyncSnapshot, DriveUploadResponse, GenerationStatus, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface DrivePackageViewProps {
@@ -60,6 +61,23 @@ function parseGranuleCodesFromJobFiles(files: string[]): Array<{ id: string; lab
   return Array.from(seen.entries())
     .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
     .map(([id, label]) => ({ id, label }))
+}
+
+/** Los archivos del job crecen durante la Fase 1; no debe reemplazar la lista del preview del syllabus. */
+function mergeDetectedGranulesFromJobFiles(
+  prev: Array<{ id: string; label: string }>,
+  files: string[],
+): Array<{ id: string; label: string }> {
+  const inferred = parseGranuleCodesFromJobFiles(files)
+  if (inferred.length === 0) return prev
+  if (prev.length === 0) return inferred
+  if (inferred.length < prev.length) return prev
+  if (inferred.length === prev.length) return prev
+  const byId = new Map(prev.map((g) => [g.id, g]))
+  for (const g of inferred) {
+    if (!byId.has(g.id)) byId.set(g.id, g)
+  }
+  return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
 }
 
 function loadDriveSession(): StoredDriveSession | null {
@@ -120,6 +138,26 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
   const canResumeDrivePackage = Boolean(
     packageJobId && driveFolderId.trim() && selectedPrompt && selectedCategory?.enabledForPackage && !isRunning && driveStage !== 'ready',
   )
+
+  /** Evita «Sin detectar» cuando aún no hay categoría/archivo: el preview del syllabus solo corre tras ambos. */
+  const previewSubjectDisplay = useMemo(() => {
+    if (!canUploadSyllabus || !selectedFile) return 'Pendiente'
+    if (isAnalyzingSyllabus) return 'Analizando...'
+    return subjectName.trim() || 'Sin detectar'
+  }, [canUploadSyllabus, selectedFile, isAnalyzingSyllabus, subjectName])
+
+  const previewProgramDisplay = useMemo(() => {
+    if (!canUploadSyllabus || !selectedFile) return 'Pendiente'
+    if (isAnalyzingSyllabus) return 'Analizando...'
+    return programName.trim() || 'Sin detectar'
+  }, [canUploadSyllabus, selectedFile, isAnalyzingSyllabus, programName])
+
+  const previewGranulesDisplay = useMemo(() => {
+    if (!canUploadSyllabus || !selectedFile) return 'Pendiente'
+    if (isAnalyzingSyllabus) return 'Analizando...'
+    return `${detectedGranules.length} detectados`
+  }, [canUploadSyllabus, selectedFile, isAnalyzingSyllabus, detectedGranules.length])
+
   const driveActionLabel: Record<DriveStage, string> = {
     idle: 'Generar y subir a Drive',
     granules: 'Generando gránulos...',
@@ -178,10 +216,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     if (payload.categoryKey) {
       setSelectedPrompt(payload.categoryKey as PromptType)
     }
-    const inferred = parseGranuleCodesFromJobFiles(payload.files ?? [])
-    if (inferred.length > 0) {
-      setDetectedGranules(inferred)
-    }
+    setDetectedGranules((prev) => mergeDetectedGranulesFromJobFiles(prev, payload.files ?? []))
     setDriveFolderId((prev) => {
       if (prev.trim()) return prev
       const ds = payload.driveSync
@@ -344,8 +379,10 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
         ? selectedCourse.temas.map((title, index) => ({ index: index + 1, title }))
         : preview.detectedTopics
 
+      const pickedProgram = pickProgramFromPreview(preview)
+
       setSubjectName(selectedCourse?.asignatura || preview.subjectName || '')
-      setProgramName(preview.programName ?? '')
+      setProgramName(pickedProgram)
       setDetectedGranules(selectedTopics.map((topic) => ({ id: `G${topic.index}`, label: topic.title })))
       setPreviewMessage(selectedTopics.length === 0 ? 'No se encontraron contenidos en la estructura temática. Revisa que el syllabus tenga la sección 5. ESTRUCTURA TEMÁTICA con columna Contenidos.' : '')
     } catch (error) {
@@ -728,9 +765,9 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
                 <div className="syllabus-preview-rows">
                   <div><span>Archivo original</span><strong>{selectedFile?.name ?? 'Pendiente'}</strong></div>
                   <div><span>Nombre interno</span><strong>{selectedFile ? 'syllabus.docx' : 'Pendiente'}</strong></div>
-                  <div><span>Asignatura</span><strong>{subjectName || 'Sin detectar'}</strong></div>
-                  <div><span>Programa</span><strong>{programName || 'Sin detectar'}</strong></div>
-                  <div><span>Gránulos</span><strong>{isAnalyzingSyllabus ? 'Analizando...' : `${detectedGranules.length || 0} detectados`}</strong></div>
+                  <div><span>Asignatura</span><strong>{previewSubjectDisplay}</strong></div>
+                  <div><span>Programa</span><strong>{previewProgramDisplay}</strong></div>
+                  <div><span>Gránulos</span><strong>{previewGranulesDisplay}</strong></div>
                 </div>
                 {previewMessage && <p className="preview-alert is-info">{previewMessage}</p>}
               </section>

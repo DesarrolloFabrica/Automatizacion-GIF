@@ -438,9 +438,15 @@ async def syllabus_preview(syllabus: UploadFile = File(...)) -> SyllabusPreviewR
     try:
         parsed = parse_syllabus_docx(tmp_path)
         courses = parsed.coursesDetected
-        primary_course = parsed.selectedCourse if parsed.selectedCourse else extract_course_plan(tmp_path)
+        plan_tables = extract_course_plan(tmp_path)
+        primary_course = parsed.selectedCourse if parsed.selectedCourse else plan_tables
+        program_merged = (
+            (parsed.program or "").strip()
+            or (getattr(primary_course, "programa", None) or "").strip()
+            or (getattr(plan_tables, "programa", None) or "").strip()
+        )
 
-        print(f"[preview] Programa global detectado: {parsed.program or primary_course.programa or ''}")
+        print(f"[preview] Programa global detectado: {program_merged}")
         print(f"[preview] Total coursesDetected: {len(courses)}")
         for index, course in enumerate(courses, start=1):
             first_topic = course.temas[0] if course.temas else ""
@@ -454,7 +460,7 @@ async def syllabus_preview(syllabus: UploadFile = File(...)) -> SyllabusPreviewR
         courses_detected = [
             DetectedCourse(
                 asignatura=c.asignatura,
-                programa=c.programa,
+                programa=(c.programa or "").strip() or program_merged,
                 escuela=c.escuela,
                 semestre=c.semestre,
                 temas=c.temas,
@@ -465,13 +471,13 @@ async def syllabus_preview(syllabus: UploadFile = File(...)) -> SyllabusPreviewR
         return SyllabusPreviewResponse(
             fileName=file_name,
             subjectName=primary_course.asignatura or "",
-            programName=parsed.program or primary_course.programa or "",
+            programName=program_merged,
             detectedTopics=topics,
             totalGranules=len(topics),
             coursesDetected=courses_detected,
             selectedCourse=DetectedCourse(
                 asignatura=primary_course.asignatura,
-                programa=parsed.program or primary_course.programa,
+                programa=program_merged,
                 escuela=parsed.school or primary_course.escuela,
                 semestre=primary_course.semestre,
                 temas=primary_course.temas,
