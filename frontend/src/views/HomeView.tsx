@@ -1,7 +1,7 @@
 ﻿import FlowCard from '../components/FlowCard'
 
 interface HomeViewProps {
-  onNavigate: (view: 'granules' | 'scripts') => void
+  onNavigate: (view: 'granules' | 'package-drive' | 'scripts') => void
 }
 
 const scriptShortcuts = [
@@ -28,7 +28,7 @@ function HomeView({ onNavigate }: HomeViewProps) {
       <div className="home-content">
         <header className="home-hero">
           <span className="home-badge">Plataforma académica</span>
-          <h1 className="home-title">Automatización académica inteligente</h1>
+          <h1 className="home-title">Automatización de contenidos</h1>
           <p className="home-subtitle">Genera paquetes académicos completos o ejecuta scripts individuales según tu necesidad.</p>
           <div className="home-hero-flow" aria-label="Flujo principal de generación">
             <span>Subir syllabus</span>
@@ -71,18 +71,17 @@ function HomeView({ onNavigate }: HomeViewProps) {
               </svg>
             }
             title="Generar paquete en Drive"
-            description="Este flujo creará la misma estructura directamente en Google Drive. Disponible próximamente."
+            description="Genera el mismo paquete académico y organízalo directamente en una carpeta de Google Drive."
             bullets={[
               'Misma estructura institucional',
               'Carpetas creadas en Google Drive',
               'Sin descarga manual intermedia',
-              'Disponible próximamente',
+              'Subida directa del paquete académico',
             ]}
-            ctaLabel="Próximamente"
-            statusLabel="PRÓXIMAMENTE"
+            ctaLabel="Iniciar paquete en Drive"
+            statusLabel="DISPONIBLE"
             statusVariant="preview"
-            onClick={() => undefined}
-            disabled
+            onClick={() => onNavigate('package-drive')}
           />
         </div>
 
@@ -107,7 +106,7 @@ function HomeView({ onNavigate }: HomeViewProps) {
           <span className="cap-chip">Word .docx</span>
           <span className="cap-chip">IA</span>
           <span className="cap-chip">FastAPI</span>
-          <span className="cap-chip">Google Drive próximamente</span>
+          <span className="cap-chip">Google Drive</span>
           <span className="cap-chip">Moodle-ready</span>
           <span className="cap-chip">Flujo académico</span>
         </div>

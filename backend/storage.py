@@ -61,9 +61,11 @@ def get_job_paths(job_id: str) -> dict[str, Path]:
     }
 
 
-def save_job_metadata(job_id: str, *, category: str) -> dict:
+def save_job_metadata(job_id: str, *, category: str, syllabus_original_name: str | None = None) -> dict:
     paths = ensure_job_dirs(job_id)
     payload = {"jobId": job_id, "category": category}
+    if syllabus_original_name:
+        payload["syllabusOriginalName"] = syllabus_original_name
     paths["metadata_path"].write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 

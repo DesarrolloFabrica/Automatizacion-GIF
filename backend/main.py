@@ -234,7 +234,14 @@ app = FastAPI(title="Automatizacion GIF API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://127.0.0.1:5175",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -352,7 +359,7 @@ async def create_generation_job(
 
     job_id = uuid.uuid4().hex[:12]
     paths = ensure_job_dirs(job_id)
-    save_job_metadata(job_id, category=category.key)
+    save_job_metadata(job_id, category=category.key, syllabus_original_name=file_name)
     save_syllabus_file(job_id, syllabus.file)
 
     job_kind = "granules_academic_package"

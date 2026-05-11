@@ -5,14 +5,14 @@ import JobProgressPanel from '../components/JobProgressPanel'
 import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
 import { CATEGORY_CONFIGS, getCategoryConfig } from '../data/categories'
-import type { AvailableNextAction, CategoryConfig, DriveUploadResponse, GenerationStatus, GranuleMaterials, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
+import { API_BASE_URL, apiFetch, readApiErrorDetail } from '../lib/api'
+import type { AvailableNextAction, CategoryConfig, GenerationStatus, GranuleMaterials, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
 }
 
 function GranulesView({ onBack }: GranulesViewProps) {
-  const apiBaseUrl = 'http://localhost:8000'
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>('')
   const [detectedGranules, setDetectedGranules] = useState<Array<{ id: string; label: string }>>([])
@@ -32,10 +32,6 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const [currentPhase, setCurrentPhase] = useState('pending')
   const [isFullPipelineRunning, setIsFullPipelineRunning] = useState(false)
   const [categories, setCategories] = useState<CategoryConfig[]>(CATEGORY_CONFIGS)
-  const [driveFolderId, setDriveFolderId] = useState('')
-  const [driveUploadStatus, setDriveUploadStatus] = useState<'pending' | 'uploading' | 'completed' | 'error'>('pending')
-  const [driveUploadMessage, setDriveUploadMessage] = useState('')
-  const [driveUploadResult, setDriveUploadResult] = useState<DriveUploadResponse | null>(null)
   const pollRef = useRef<number | null>(null)
   const pipelineCardRef = useRef<HTMLElement | null>(null)
   const resultsPanelRef = useRef<HTMLElement | null>(null)
@@ -115,9 +111,6 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setPhaseStatus(null)
     setCurrentPhase('pending')
     setIsFullPipelineRunning(false)
-    setDriveUploadStatus('pending')
-    setDriveUploadMessage('')
-    setDriveUploadResult(null)
     setSubjectName('')
     setProgramName('')
     setPreviewMessage('')
@@ -191,7 +184,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
       const formData = new FormData()
       formData.append('syllabus', file)
 
-      const response = await fetch(`${apiBaseUrl}/api/syllabus/preview`, {
+      const response = await apiFetch('/api/syllabus/preview', {
         method: 'POST',
         body: formData,
       })
@@ -241,7 +234,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
   }
 
   const fetchJobStatus = async (targetJobId: string): Promise<JobStatusResponse> => {
-    const statusResponse = await fetch(`${apiBaseUrl}/api/jobs/${targetJobId}`)
+    const statusResponse = await apiFetch(`/api/jobs/${targetJobId}`)
     if (!statusResponse.ok) throw new Error('No fue posible consultar el estado del job.')
     const payload = (await statusResponse.json()) as JobStatusResponse
     applyJobStatus(payload)
@@ -276,14 +269,13 @@ function GranulesView({ onBack }: GranulesViewProps) {
     formData.append('syllabus', selectedFile)
     formData.append('nivel', selectedPrompt)
 
-    const createResponse = await fetch(`${apiBaseUrl}/api/jobs`, {
+    const createResponse = await apiFetch('/api/jobs', {
       method: 'POST',
       body: formData,
     })
 
     if (!createResponse.ok) {
-      const payload = (await createResponse.json()) as { detail?: string }
-      throw new Error(payload.detail ?? 'No se pudo crear el job de generación.')
+      throw new Error(await readApiErrorDetail(createResponse, 'No se pudo crear el job de generación.'))
     }
 
     const createdJob = (await createResponse.json()) as { jobId: string; status: string }
@@ -295,10 +287,9 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setStatus(runningStatus)
     setGenerationMessage(message)
     setAvailableNextAction('none')
-    const response = await fetch(`${apiBaseUrl}${path}`, { method: 'POST' })
+    const response = await apiFetch(path, { method: 'POST' })
     if (!response.ok) {
-      const payload = (await response.json()) as { detail?: string }
-      throw new Error(payload.detail ?? 'No se pudo iniciar la fase.')
+      throw new Error(await readApiErrorDetail(response, 'No se pudo iniciar la fase.'))
     }
     return waitForJobIdle(targetJobId, message)
   }
@@ -307,7 +298,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
     clearPolling()
     pollRef.current = window.setInterval(async () => {
       try {
-        const statusResponse = await fetch(`${apiBaseUrl}/api/jobs/${createdJobId}`)
+        const statusResponse = await apiFetch(`/api/jobs/${createdJobId}`)
         if (!statusResponse.ok) return
 
         const payload = (await statusResponse.json()) as JobStatusResponse
@@ -369,10 +360,9 @@ function GranulesView({ onBack }: GranulesViewProps) {
     clearPolling()
 
     try {
-      const response = await fetch(`${apiBaseUrl}${path}`, { method: 'POST' })
+      const response = await apiFetch(path, { method: 'POST' })
       if (!response.ok) {
-        const payload = (await response.json()) as { detail?: string }
-        throw new Error(payload.detail ?? 'No se pudo iniciar la fase.')
+        throw new Error(await readApiErrorDetail(response, 'No se pudo iniciar la fase.'))
       }
       pollJobUntilIdle(jobId)
     } catch (error) {
@@ -456,31 +446,6 @@ function GranulesView({ onBack }: GranulesViewProps) {
     handleGenerate()
   }
 
-  const handleUploadDrive = async () => {
-    if (!jobId || !driveFolderId.trim() || isGenerating || driveUploadStatus === 'uploading') return
-    setDriveUploadStatus('uploading')
-    setDriveUploadMessage('Subiendo estructura PAQUETE_ACADEMICO a Google Drive...')
-    setDriveUploadResult(null)
-    try {
-      const formData = new FormData()
-      formData.append('driveFolderId', driveFolderId.trim())
-      formData.append('includeZip', 'true')
-      const response = await fetch(`${apiBaseUrl}/api/jobs/${jobId}/upload-drive`, {
-        method: 'POST',
-        body: formData,
-      })
-      const payload = (await response.json()) as DriveUploadResponse | { detail?: string }
-      if (!response.ok) throw new Error((payload as { detail?: string }).detail ?? 'No fue posible subir el paquete a Drive.')
-      setDriveUploadResult(payload as DriveUploadResponse)
-      setDriveUploadStatus('completed')
-      setDriveUploadMessage('Paquete subido a Drive correctamente.')
-      await fetchJobStatus(jobId)
-    } catch (error) {
-      setDriveUploadStatus('error')
-      setDriveUploadMessage(error instanceof Error ? error.message : 'Error subiendo a Drive.')
-    }
-  }
-
   const handleReset = () => {
     resetForNewSyllabus()
   }
@@ -494,7 +459,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
 
   useEffect(() => {
     let cancelled = false
-    fetch(`${apiBaseUrl}/api/categories`)
+    apiFetch('/api/categories')
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('No categories')))
       .then((payload: CategoryConfig[]) => {
         if (!cancelled && Array.isArray(payload) && payload.length > 0) setCategories(payload)
@@ -630,46 +595,12 @@ function GranulesView({ onBack }: GranulesViewProps) {
               <div className="console-secondary-actions">
                 <button type="button" className="secondary-button" onClick={handleGenerate} disabled={!canRunGranulesOnly}>Generar solo gránulos</button>
                 {jobId && generatedDocuments.length > 0 && (
-                  <a className="secondary-button link-button" href={`${apiBaseUrl}/api/jobs/${jobId}/download/granules`} target="_blank" rel="noreferrer">Descargar gránulos</a>
+                  <a className="secondary-button link-button" href={`${API_BASE_URL}/api/jobs/${jobId}/download/granules`} target="_blank" rel="noreferrer">Descargar gránulos</a>
                 )}
                 {jobId && availableNextAction === 'download_package' && (
-                  <a className="secondary-button link-button" href={`${apiBaseUrl}/api/jobs/${jobId}/download-all`} target="_blank" rel="noreferrer">Descargar paquete</a>
+                  <a className="secondary-button link-button" href={`${API_BASE_URL}/api/jobs/${jobId}/download-all`} target="_blank" rel="noreferrer">Descargar paquete</a>
                 )}
               </div>
-            </section>
-
-            <section className="action-card granule-card drive-upload-card">
-              <div>
-                <span className="view-kicker">Google Drive</span>
-                <h2>Replicar paquete en Drive</h2>
-                <p className="card-description">Pega el Folder ID destino. Se reutilizan carpetas existentes y se sobrescriben archivos con el mismo nombre.</p>
-              </div>
-              <input
-                type="text"
-                className="select-input"
-                value={driveFolderId}
-                onChange={(event) => setDriveFolderId(event.target.value)}
-                placeholder="Ej: 1AbCDefGhIjKlMnOpQrStUv"
-                disabled={driveUploadStatus === 'uploading'}
-              />
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={handleUploadDrive}
-                disabled={!jobId || availableNextAction !== 'download_package' || !driveFolderId.trim() || driveUploadStatus === 'uploading'}
-              >
-                {driveUploadStatus === 'uploading' ? 'Subiendo a Drive...' : 'Subir paquete a Drive'}
-              </button>
-              {driveUploadMessage && <p className={`preview-alert ${driveUploadStatus === 'error' ? 'is-error' : 'is-info'}`}>{driveUploadMessage}</p>}
-              {driveUploadResult && (
-                <div className="syllabus-preview-rows">
-                  <div><span>Archivos nuevos</span><strong>{driveUploadResult.filesUploaded}</strong></div>
-                  <div><span>Sobrescritos</span><strong>{driveUploadResult.filesOverwritten}</strong></div>
-                  <div><span>Carpetas creadas</span><strong>{driveUploadResult.foldersCreated}</strong></div>
-                  <div><span>Carpetas reutilizadas</span><strong>{driveUploadResult.foldersReused}</strong></div>
-                  <div><span>Carpeta Drive</span><strong><a href={driveUploadResult.folderLink} target="_blank" rel="noreferrer">Abrir PAQUETE_ACADEMICO</a></strong></div>
-                </div>
-              )}
             </section>
 
             <section ref={pipelineCardRef} className="granule-card syllabus-compact-preview granules-pipeline-scroll-target">
