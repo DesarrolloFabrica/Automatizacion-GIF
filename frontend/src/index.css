@@ -6281,6 +6281,24 @@ h2 {
   }
 }
 
+/* Prevent long Drive logs from widening the status column after completion. */
+.package-status-card,
+.status-console-shell,
+.job-progress-panel,
+.job-latest-log,
+.job-logs-details {
+  min-width: 0;
+}
+
+.job-latest-log code {
+  min-width: 0;
+}
+
+.job-logs-details pre {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 @keyframes premium-page-enter {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
