@@ -506,7 +506,15 @@ Estructura obligatoria:
 Cargas obligatorias:
 - Portada: título claro + bajada de 12 a 20 palabras.
 - Introducción: 60 a 80 palabras.
-- Conceptos clave: 90 a 130 palabras, 5 conceptos.
+- Conceptos clave: 450 a 600 palabras en total.
+  Debe iniciar con un parrafo general de 70 a 100 palabras que explique por que estos conceptos son necesarios para comprender el tema, conecte con el problema o situacion abordada y prepare la lectura de la revista.
+  Despues del parrafo general, desarrolla exactamente 5 conceptos clave.
+  Cada concepto debe tener nombre visible y una descripcion propia de 65 a 90 palabras.
+  No redactes los conceptos como una lista breve de definiciones ni como un solo parrafo continuo.
+  No uses descripciones de una sola frase.
+  Cada concepto debe explicar: que significa, por que importa en el tema, como se relaciona con el problema o ejemplo trabajado y como puede aplicarlo el estudiante en una actividad, analisis o decision basica.
+  En la celda "Texto final", separa el parrafo general y cada concepto con `<br><br>` y usa este formato:
+  `Parrafo general de apertura editorial.<br><br>Concepto 1. Nombre del concepto: descripcion clara con significado, importancia, relacion con el problema o ejemplo y aplicacion para el estudiante.<br><br>Concepto 2. Nombre del concepto: descripcion clara con significado, importancia, relacion con el problema o ejemplo y aplicacion para el estudiante.`
 - Explicación: 100 a 130 palabras.
 - Problema: 45 a 65 palabras.
 - Ejemplo: 45 a 65 palabras.
