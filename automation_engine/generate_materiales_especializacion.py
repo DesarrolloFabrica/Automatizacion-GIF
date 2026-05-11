@@ -145,6 +145,7 @@ def _clean_visible_text(text: str) -> str:
     if not text:
         return ""
     cleaned = text.strip()
+    cleaned = re.sub(r"<br\s*/?>", "\n", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bchecklist\b", "lista de criterios", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"</?(?:ul|ol)>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"</?li>", "", cleaned, flags=re.IGNORECASE)
@@ -1039,6 +1040,7 @@ REGLAS EDITORIALES MINIMAS:
 2. Evita fragmentos frios o telegraficos: usa parrafos naturales, legibles y listos para maquetacion academica.
 3. Revista, Podcast y Video deben sentirse como documentos profesionales reales desde su redaccion base.
 4. Las referencias, fuentes y conexiones de ruta deben mantenerse claras, pero sin saturar el texto principal.
+5. Si el material incluye un bloque llamado "Conceptos clave", no lo resumas como glosario. Desarrollalo como seccion editorial con apertura general y conceptos explicados en profundidad, respetando la extension indicada en el prompt particular.
 
 Genera unicamente el material solicitado.
 """.strip()

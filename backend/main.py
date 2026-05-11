@@ -59,6 +59,7 @@ from storage import (
     refresh_phase_files,
     accumulate_drive_counters,
     save_job_metadata,
+    save_granule_source_file,
     save_local_granules,
     save_syllabus_file,
     set_drive_phase_record,
@@ -843,6 +844,51 @@ async def create_scripts_local_job(
         files_listing_fn=lambda j: [p.name for p in list_generated_files(j)],
     )
     return ScriptsLocalJobCreateResponse(jobId=job_id, status="queued")
+
+
+@app.post("/api/materials/local/jobs", response_model=JobCreateResponse)
+async def create_local_materials_job(
+    granule: UploadFile = File(...),
+    nivel: str = Form(...),
+) -> JobCreateResponse:
+    validate_required_api_key()
+    if nivel not in ALLOWED_LEVELS:
+        raise HTTPException(status_code=400, detail="Nivel no válido.")
+    category = get_category(nivel)
+    if not category.enabled_for_package:
+        raise HTTPException(status_code=400, detail=category.disabled_reason or f"{category.label} no tiene prompt de materiales configurado.")
+    try:
+        validate_category_prompts(category)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    file_name = granule.filename or ""
+    validate_docx_filename(file_name)
+
+    job_id = uuid.uuid4().hex[:12]
+    paths = ensure_job_dirs(job_id)
+    save_job_metadata(job_id, category=category.key, syllabus_original_name=file_name)
+    saved_granule = save_granule_source_file(job_id, granule.file, file_name)
+
+    create_job(job_id=job_id, log_path=paths["log_path"], generated_dir=paths["generated_dir"], job_kind="single_granule_materials")
+    init_phase_status(job_id)
+    update_phase_status(job_id, "granules", status="completed", files=[saved_granule.name])
+
+    start_job_thread(
+        job_id=job_id,
+        command=_build_materiales_command(job_id, category.key, paths),
+        cwd=PROJECT_ROOT,
+        env_vars=os.environ.copy(),
+        initial_progress_step="generando materiales",
+        progress_map=ACADEMIC_PACKAGE_PROGRESS_MAP,
+        parse_drive_uploads=False,
+        job_kind="single_granule_materials",
+        files_listing_fn=lambda j: list_all_job_files(j),
+        on_start=_phase_start_callback("specializationMaterials"),
+        on_complete=_phase_complete_callback("specializationMaterials", lambda j: [f["relative_path"] for f in list_material_files(j)]),
+    )
+
+    return JobCreateResponse(jobId=job_id, status="queued")
 
 
 @app.get("/api/scripts/local/jobs/{job_id}", response_model=ScriptsLocalJobStatusResponse)

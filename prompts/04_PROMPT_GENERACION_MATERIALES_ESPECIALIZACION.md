@@ -410,7 +410,15 @@ Estructura obligatoria:
 Cargas obligatorias:
 - Portada: título de dossier + bajada de 20 a 30 palabras.
 - Introducción: 90 a 120 palabras.
-- Conceptos clave: 160 a 220 palabras, 6 conceptos con criterio de uso.
+- Conceptos clave: 650 a 850 palabras en total.
+  Debe iniciar con un parrafo general de 90 a 130 palabras que presente la importancia de los conceptos para comprender el tema, conecte con el problema profesional y prepare la lectura del dossier.
+  Despues del parrafo general, desarrolla exactamente 6 conceptos clave.
+  Cada concepto debe tener nombre visible y una descripcion propia de 80 a 110 palabras.
+  No redactes los conceptos como una lista de definiciones breves ni como un solo parrafo continuo.
+  No uses descripciones de una sola frase.
+  Cada concepto debe explicar: que significa, por que es importante en el tema, como se relaciona con el problema profesional y que criterio de uso aporta para analizar, decidir o implementar.
+  En la celda "Texto final", separa el parrafo general y cada concepto con `<br><br>` y usa este formato:
+  `Parrafo general de apertura editorial.<br><br>Concepto 1. Nombre del concepto: descripcion amplia con significado, importancia, relacion con el problema y criterio de uso profesional.<br><br>Concepto 2. Nombre del concepto: descripcion amplia con significado, importancia, relacion con el problema y criterio de uso profesional.`
 - Explicación: 150 a 200 palabras.
 - Problema: 100 a 140 palabras.
 - Análisis: 120 a 180 palabras.

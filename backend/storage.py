@@ -255,6 +255,25 @@ def save_syllabus_file(job_id: str, source_file) -> Path:
     return target_path
 
 
+def _normalize_uploaded_stem(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", normalized).strip("_")
+    return normalized.upper() or "GRANULO"
+
+
+def save_granule_source_file(job_id: str, source_file, original_name: str) -> Path:
+    paths = ensure_job_dirs(job_id)
+    original = Path(original_name or "G1_GRANULO.docx").name
+    if GRANULE_PATTERN.match(original):
+        target_name = original
+    else:
+        target_name = f"G1_{_normalize_uploaded_stem(Path(original).stem)}.docx"
+    target_path = paths["generated_dir"] / target_name
+    with target_path.open("wb") as destination:
+        shutil.copyfileobj(source_file, destination)
+    return target_path
+
+
 def list_generated_docx(job_id: str) -> list[str]:
     paths = get_job_paths(job_id)
     if not paths["generated_dir"].exists():

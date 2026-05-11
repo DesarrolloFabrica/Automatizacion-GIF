@@ -104,6 +104,7 @@ REGLAS EDITORIALES MINIMAS:
 2. Evita fragmentos frios o telegraficos: usa parrafos naturales, legibles y listos para maquetacion academica.
 3. Cada recurso debe sentirse autentico para la categoria {category.label}, no como otra categoria con nombre cambiado.
 4. Las referencias, fuentes y conexiones de ruta deben mantenerse claras, pero sin saturar el texto principal.
+5. Si el material incluye un bloque llamado "Conceptos clave", no lo resumas como glosario. Desarrollalo como seccion editorial con apertura general y conceptos explicados en profundidad, respetando la extension indicada en el prompt particular.
 
 Genera unicamente el material solicitado.
 """.strip()

@@ -8,15 +8,17 @@ interface ScriptsViewProps {
   onBack: () => void
 }
 
-type ScriptMode = 'granules' | 'txtdocx'
+type ScriptMode = 'granules' | 'txtdocx' | 'materials'
 
 const API_BASE = 'http://localhost:8000'
 
 const promptOptions: Array<{ value: PromptType; label: string }> = [
+  { value: 'curso_rapido', label: 'Curso rápido' },
+  { value: 'pregrado', label: 'Pregrado' },
+  { value: 'diplomado', label: 'Diplomado' },
   { value: 'especializacion', label: 'Especialización' },
-  { value: 'pregrado', label: 'Pregrado · disponible para pruebas' },
-  { value: 'diplomado', label: 'Diplomado · pendiente de validación' },
-  { value: 'maestria', label: 'Maestría · pendiente de validación' },
+  { value: 'curso_externos_profesional', label: 'Curso externos profesional' },
+  { value: 'maestria', label: 'Maestría · pendiente de prompt de materiales' },
 ]
 
 async function readApiErrorDetail(response: Response): Promise<string> {
@@ -42,6 +44,8 @@ function statusLabel(status: GenerationStatus | ScriptsLocalProgressStep): strin
     'leyendo granulos': 'Leyendo gránulos',
     'generando txt': 'Generando TXT',
     'generando docx': 'Generando DOCX',
+    'generando materiales': 'Generando materiales',
+    'generando materiales especialización': 'Generando materiales',
     'preparando descargas': 'Preparando descargas',
     finalizado: 'Completado',
     error: 'Error',
@@ -62,6 +66,16 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
   const [isGeneratingGranules, setIsGeneratingGranules] = useState(false)
   const granulesPollRef = useRef<number | null>(null)
 
+  const [materialsFile, setMaterialsFile] = useState<File | null>(null)
+  const [materialsPrompt, setMaterialsPrompt] = useState<PromptType>('especializacion')
+  const [materialsJobId, setMaterialsJobId] = useState<string | null>(null)
+  const [materialsStatus, setMaterialsStatus] = useState<GenerationStatus>('pendiente')
+  const [materialsMessage, setMaterialsMessage] = useState('Sube un gránulo .docx, elige el nivel y genera sus materiales editoriales.')
+  const [materialsLogs, setMaterialsLogs] = useState<string[]>([])
+  const [materialsFiles, setMaterialsFiles] = useState<string[]>([])
+  const [isGeneratingMaterials, setIsGeneratingMaterials] = useState(false)
+  const materialsPollRef = useRef<number | null>(null)
+
   const [localFiles, setLocalFiles] = useState<File[]>([])
   const [localAsignatura, setLocalAsignatura] = useState('')
   const [localPrograma, setLocalPrograma] = useState('')
@@ -78,6 +92,7 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
   const localFormValid = localValidation.ok && localAsignatura.trim().length > 0 && localPrograma.trim().length > 0
   const localTxtFiles = localGeneratedFiles.filter((f) => f.kind === 'txt')
   const localDocxFiles = localGeneratedFiles.filter((f) => f.kind === 'docx')
+  const materialsFormValid = Boolean(materialsFile && materialsPrompt)
 
   const clearGranulesPolling = () => {
     if (granulesPollRef.current !== null) {
@@ -95,6 +110,9 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
 
   useEffect(() => () => clearGranulesPolling(), [])
   useEffect(() => () => clearLocalPolling(), [])
+  useEffect(() => () => {
+    if (materialsPollRef.current !== null) window.clearInterval(materialsPollRef.current)
+  }, [])
 
   const addFiles = (incoming: FileList | File[]) => {
     const next = Array.from(incoming)
@@ -173,6 +191,76 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
       setGranulesStatus('error')
       setIsGeneratingGranules(false)
       setGranulesMessage(error instanceof Error ? error.message : 'Error al iniciar la generación de gránulos.')
+    }
+  }
+
+  const clearMaterialsPolling = () => {
+    if (materialsPollRef.current !== null) {
+      window.clearInterval(materialsPollRef.current)
+      materialsPollRef.current = null
+    }
+  }
+
+  const handleGenerateMaterialsOnly = async () => {
+    if (!materialsFormValid || !materialsFile || isGeneratingMaterials) return
+
+    clearMaterialsPolling()
+    setIsGeneratingMaterials(true)
+    setMaterialsStatus('generando materiales')
+    setMaterialsMessage('Generando materiales desde el gránulo cargado...')
+    setMaterialsLogs([])
+    setMaterialsFiles([])
+    setMaterialsJobId(null)
+
+    try {
+      const formData = new FormData()
+      formData.append('granule', materialsFile)
+      formData.append('nivel', materialsPrompt)
+
+      const createResponse = await fetch(`${API_BASE}/api/materials/local/jobs`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!createResponse.ok) throw new Error(await readApiErrorDetail(createResponse))
+
+      const created = (await createResponse.json()) as { jobId: string }
+      setMaterialsJobId(created.jobId)
+
+      materialsPollRef.current = window.setInterval(async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/jobs/${created.jobId}`)
+          if (!res.ok) return
+
+          const payload = (await res.json()) as JobStatusResponse
+          setMaterialsStatus(payload.progressStep)
+          setMaterialsLogs(payload.logs ?? [])
+          setMaterialsFiles((payload.files ?? []).filter((file) => file.includes('materiales_') || file.includes('materials')))
+
+          if (payload.status === 'completed') {
+            setMaterialsStatus('finalizado')
+            setIsGeneratingMaterials(false)
+            setMaterialsMessage('Materiales generados. Puedes descargar el paquete de materiales.')
+            clearMaterialsPolling()
+          }
+
+          if (payload.status === 'failed') {
+            setMaterialsStatus('error')
+            setIsGeneratingMaterials(false)
+            setMaterialsMessage('Error generando materiales. Revisa el registro de actividad.')
+            clearMaterialsPolling()
+          }
+        } catch {
+          setMaterialsStatus('error')
+          setIsGeneratingMaterials(false)
+          setMaterialsMessage('No fue posible consultar el estado del job de materiales.')
+          clearMaterialsPolling()
+        }
+      }, 3000)
+    } catch (error) {
+      setMaterialsStatus('error')
+      setIsGeneratingMaterials(false)
+      setMaterialsMessage(error instanceof Error ? error.message : 'Error al iniciar materiales por gránulo.')
     }
   }
 
@@ -274,12 +362,12 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
               <small>G1-G5 locales → actividades Moodle</small>
               <em>Conectado localmente</em>
             </button>
-            <article className="script-command-card is-dependent">
+            <button type="button" className={`script-command-card ${mode === 'materials' ? 'is-active' : ''}`} onClick={() => setMode('materials')}>
               <span className="script-command-icon">03</span>
               <strong>Materiales por gránulo</strong>
-              <small>Disponible después de generar gránulos dentro del flujo Paquete Local.</small>
-              <em>Dependiente del job local</em>
-            </article>
+              <small>Sube un gránulo y elige el nivel académico.</small>
+              <em>Conectado localmente</em>
+            </button>
           </div>
         </section>
 
@@ -431,6 +519,81 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
                 {localTxtFiles.length > 0 && <p className="card-description">TXT: {localTxtFiles.map((file) => file.name).join(', ')}</p>}
                 {localDocxFiles.length > 0 && <p className="card-description">DOCX: {localDocxFiles.map((file) => file.name).join(', ')}</p>}
                 <a className="primary-button link-button" href={`${API_BASE}/api/scripts/local/jobs/${localJobId}/download-all`} target="_blank" rel="noreferrer">Descargar TXT/DOCX (.zip)</a>
+              </article>
+            )}
+          </section>
+        )}
+
+        {mode === 'materials' && (
+          <section className="scripts-workspace-card">
+            <div className="scripts-workspace-header">
+              <div>
+                <span className="scripts-step-badge">Script local conectado</span>
+                <h2>Crear materiales por gránulo</h2>
+                <p>Sube un gránulo maestro .docx, selecciona el nivel y genera directamente los materiales editoriales de ese gránulo.</p>
+              </div>
+              <span className={`script-status-pill script-status-pill--${materialsStatus === 'error' ? 'error' : materialsStatus === 'finalizado' ? 'success' : isGeneratingMaterials ? 'active' : 'idle'}`}>
+                {statusLabel(materialsStatus)}
+              </span>
+            </div>
+
+            <div className="scripts-form-grid">
+              <label className="label-block">
+                Nivel académico
+                <select className="select-input" value={materialsPrompt} onChange={(event) => setMaterialsPrompt(event.target.value as PromptType)} disabled={isGeneratingMaterials}>
+                  {promptOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="scripts-local-dropzone scripts-file-selector">
+                <span className="file-input-label">Subir gránulo .docx</span>
+                <input
+                  type="file"
+                  accept=".docx"
+                  className="file-input"
+                  disabled={isGeneratingMaterials}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0] ?? null
+                    setMaterialsFile(file)
+                    setMaterialsFiles([])
+                    setMaterialsJobId(null)
+                    setMaterialsStatus('pendiente')
+                    setMaterialsMessage(file ? 'Gránulo cargado. Elige el nivel y genera sus materiales.' : 'Sube un gránulo .docx, elige el nivel y genera sus materiales editoriales.')
+                  }}
+                />
+                <p className="muted">{materialsFile ? materialsFile.name : 'Selecciona un gránulo fuente, por ejemplo G1_TEMA.docx.'}</p>
+              </label>
+            </div>
+
+            <section className="scripts-action-panel scripts-generate-section">
+              <p className="muted">{materialsMessage}</p>
+              <button type="button" className="primary-button primary-button--hero" onClick={handleGenerateMaterialsOnly} disabled={!materialsFormValid || isGeneratingMaterials}>
+                {isGeneratingMaterials ? 'Generando materiales...' : 'Generar materiales por gránulo'}
+              </button>
+            </section>
+
+            {(isGeneratingMaterials || materialsStatus !== 'pendiente') && (
+              <article className="script-progress-card">
+                <h3>Estado de materiales</h3>
+                <p>{statusLabel(materialsStatus)}</p>
+                {materialsLogs.length > 0 && <div className="logs-box"><pre>{materialsLogs.slice(-28).join('\n')}</pre></div>}
+              </article>
+            )}
+
+            {materialsJobId && materialsFiles.length > 0 && (
+              <article className="script-results-card">
+                <h3>Materiales generados ({materialsFiles.length})</h3>
+                <ul className="results-list compact-results-list">
+                  {materialsFiles.map((fileName) => (
+                    <li key={fileName}>
+                      <span><strong>DOCX</strong> · {fileName.replace(/^materiales_[^/]+\//, '')}</span>
+                    </li>
+                  ))}
+                </ul>
+                <a className="primary-button link-button" href={`${API_BASE}/api/jobs/${materialsJobId}/download/materials`} target="_blank" rel="noreferrer">
+                  Descargar materiales (.zip)
+                </a>
               </article>
             )}
           </section>
