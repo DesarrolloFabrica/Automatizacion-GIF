@@ -82,6 +82,20 @@ from automation_engine.config.categories import CATEGORIES, get_category, public
 
 load_dotenv(PROJECT_ROOT / ".env")
 
+
+def _normalize_secret_env_value(name: str) -> None:
+    value = os.getenv(name)
+    if value is None:
+        return
+    normalized = value.strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"'", '"'}:
+        normalized = normalized[1:-1].strip()
+    if normalized != value:
+        os.environ[name] = normalized
+
+
+_normalize_secret_env_value("OPENAI_API_KEY")
+
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 
