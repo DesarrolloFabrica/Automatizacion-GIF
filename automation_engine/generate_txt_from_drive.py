@@ -52,6 +52,7 @@ PROJECT_ROOT = ENGINE_DIR.parent
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 DEFAULT_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 DEFAULT_TOKEN_PATH = PROJECT_ROOT / "token_drive.json"
+TOKEN_JSON_ENV_NAMES = ("GOOGLE_DRIVE_TOKEN_JSON", "DRIVE_OAUTH_TOKEN_JSON")
 SUPPORTED_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/pdf": ".pdf",
@@ -63,8 +64,38 @@ def ensure_google_dependencies() -> None:
         raise RuntimeError("Faltan dependencias de Google Drive. Ejecuta: pip install -r requirements.txt")
 
 
+def _normalize_json_secret(value: str) -> str:
+    normalized = (value or "").strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"'", '"'}:
+        inner = normalized[1:-1].strip()
+        if inner.startswith("{"):
+            normalized = inner
+    return normalized
+
+
+def _credentials_from_env_token():
+    for env_name in TOKEN_JSON_ENV_NAMES:
+        raw = os.getenv(env_name)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(_normalize_json_secret(raw))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{env_name} no contiene un token OAuth JSON valido para Drive: {exc}") from exc
+        creds = Credentials.from_authorized_user_info(payload, SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return creds
+    return None
+
+
 def get_drive_service(credentials_path: Path, token_path: Path):
     ensure_google_dependencies()
+
+    oauth_creds = _credentials_from_env_token()
+    if oauth_creds is not None:
+        return build("drive", "v3", credentials=oauth_creds)
+
     service_account_path = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
         or os.getenv("DRIVE_SERVICE_ACCOUNT_FILE")

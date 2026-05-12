@@ -41,7 +41,7 @@ const JOB_POLL_INTERVAL_MS = 3500
 const JOB_POLL_MAX_MS = 120 * 60 * 1000
 
 const DRIVE_PACKAGE_SESSION_KEY = 'drivePackageJobSession.v1'
-const DRIVE_SERVICE_ACCOUNT_EMAIL = '550902908078-compute@developer.gserviceaccount.com'
+const DRIVE_ACCESS_EMAIL = 'fabricadecontenidos@cun.edu.co'
 
 export type DriveRunMode = 'full' | 'stepped'
 
@@ -977,9 +977,9 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
                 <div className="drive-service-account-alert" role="note">
                   <strong>Importante antes de iniciar</strong>
                   <span>
-                    Concede acceso de Editor a tu carpeta de Drive a la cuenta de servicio que ejecutará este flujo:
+                    Concede acceso de Editor a tu carpeta de Drive al correo que ejecutará este flujo:
                   </span>
-                  <code>{DRIVE_SERVICE_ACCOUNT_EMAIL}</code>
+                  <code>{DRIVE_ACCESS_EMAIL}</code>
                 </div>
 
                 <section className="action-card granule-card drive-mode-card">
