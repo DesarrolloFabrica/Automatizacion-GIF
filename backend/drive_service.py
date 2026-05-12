@@ -15,10 +15,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
+    import google.auth
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 except ImportError:  # pragma: no cover
+    google = None
     service_account = None
     build = None
     MediaFileUpload = None
@@ -84,9 +86,16 @@ def get_authenticated_drive_service():
     if DEFAULT_CREDENTIALS_PATH.exists() and DEFAULT_TOKEN_PATH.exists():
         return get_drive_service(DEFAULT_CREDENTIALS_PATH, DEFAULT_TOKEN_PATH)
 
+    if google is not None:
+        try:
+            credentials, _ = google.auth.default(scopes=DRIVE_SCOPES)
+            return build("drive", "v3", credentials=credentials)
+        except Exception:
+            pass
+
     raise FileNotFoundError(
-        "No hay credenciales Drive configuradas. Define GOOGLE_SERVICE_ACCOUNT_FILE en .env "
-        "o configura credentials.json + token_drive.json."
+        "No hay credenciales Drive configuradas. Define GOOGLE_SERVICE_ACCOUNT_FILE en .env, "
+        "configura credentials.json + token_drive.json, o ejecuta en Cloud Run con una service account con acceso a Drive."
     )
 
 

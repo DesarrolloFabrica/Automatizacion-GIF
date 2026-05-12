@@ -383,6 +383,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+if FRONTEND_DIST.exists():
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
+
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
@@ -1291,7 +1296,12 @@ def download_materials_phase(job_id: str) -> FileResponse:
     return FileResponse(path=zip_path, filename=f"{category.materials_dir}_{job_id}.zip", media_type="application/zip")
 
 
-FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+@app.get("/", include_in_schema=False)
+def serve_frontend_root() -> FileResponse:
+    index_path = FRONTEND_DIST / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend no compilado.")
+    return FileResponse(index_path)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
@@ -1314,22 +1324,3 @@ def serve_frontend(full_path: str) -> FileResponse:
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Frontend no compilado.")
     return FileResponse(index_path)
-
-
-if FRONTEND_DIST.exists():
-    assets_dir = FRONTEND_DIST / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
-
-    @app.get("/", include_in_schema=False)
-    def serve_frontend_root() -> FileResponse:
-        return FileResponse(FRONTEND_DIST / "index.html")
-
-    @app.get("/{full_path:path}", include_in_schema=False)
-    def serve_frontend(full_path: str) -> FileResponse:
-        if full_path.startswith("api/"):
-            raise HTTPException(status_code=404, detail="API endpoint no encontrado.")
-        requested_path = FRONTEND_DIST / full_path
-        if requested_path.is_file():
-            return FileResponse(requested_path)
-        return FileResponse(FRONTEND_DIST / "index.html")

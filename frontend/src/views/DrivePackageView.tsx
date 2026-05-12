@@ -977,17 +977,19 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
                   <div className="drive-mode-toggle" role="group" aria-label="Modo de ejecución Drive">
                     <button
                       type="button"
-                      className={driveRunMode === 'full' ? 'primary-button' : 'secondary-button'}
+                      className={['drive-mode-option', driveRunMode === 'full' ? 'is-selected' : ''].filter(Boolean).join(' ')}
                       onClick={() => handleDriveRunModeChange('full')}
                       disabled={isRunning}
+                      aria-pressed={driveRunMode === 'full'}
                     >
                       Todo en uno
                     </button>
                     <button
                       type="button"
-                      className={driveRunMode === 'stepped' ? 'primary-button' : 'secondary-button'}
+                      className={['drive-mode-option', driveRunMode === 'stepped' ? 'is-selected' : ''].filter(Boolean).join(' ')}
                       onClick={() => handleDriveRunModeChange('stepped')}
                       disabled={isRunning}
+                      aria-pressed={driveRunMode === 'stepped'}
                     >
                       Depuración por fases
                     </button>

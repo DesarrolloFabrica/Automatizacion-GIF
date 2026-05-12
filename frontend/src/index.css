@@ -6343,6 +6343,76 @@ h2 {
   word-break: break-word;
 }
 
+/* Final normalization for the Drive package mode panel. Keep this at the end so
+   older visual layers cannot reintroduce card jitter or width expansion. */
+.drive-mode-card,
+.drive-mode-card:hover,
+.config-console-shell .drive-mode-card:hover {
+  transform: none !important;
+  box-shadow: none;
+}
+
+.drive-mode-card {
+  contain: layout paint;
+  overflow: clip;
+}
+
+.drive-mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.drive-mode-option {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0.72rem 1rem;
+  border: 1px solid rgba(37, 99, 235, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #1d4ed8;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.drive-mode-option:hover,
+.drive-mode-option:focus-visible,
+.drive-mode-option.is-selected {
+  transform: none !important;
+}
+
+.drive-mode-option:hover {
+  border-color: rgba(37, 99, 235, 0.26);
+  background: rgba(239, 246, 255, 0.86);
+}
+
+.drive-mode-option.is-selected {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+}
+
+.drive-mode-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.drive-mode-card .primary-button:not(:disabled):hover,
+.drive-mode-card .secondary-button:not(:disabled):hover,
+.drive-mode-card button:not(:disabled):hover {
+  transform: none !important;
+}
+
+@media (max-width: 520px) {
+  .drive-mode-toggle {
+    grid-template-columns: 1fr;
+  }
+}
+
 @keyframes premium-page-enter {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }

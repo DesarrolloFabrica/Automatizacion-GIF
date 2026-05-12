@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from automation_engine.config.categories import CATEGORIES, get_category  # noqa: E402
 
-JOBS_ROOT = PROJECT_ROOT / "outputs" / "jobs"
+JOBS_ROOT = Path(os.getenv("AUTOMATIZACION_GIF_JOBS_ROOT") or PROJECT_ROOT / "outputs" / "jobs")
 DRIVE_JOB_CONTENT_ROOT = Path(
     os.getenv("AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT")
     or Path(tempfile.gettempdir()) / "automatizacion_gif_drive_content"

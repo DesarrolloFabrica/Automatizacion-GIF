@@ -9,6 +9,7 @@ frontend/dist/
 
 # Runtime/generated artifacts
 outputs/
+docker-data/
 jobs/
 entrada_guiones_txt/
 salidas_txt/

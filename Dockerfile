@@ -18,7 +18,10 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \
-    PYTHONIOENCODING=utf-8
+    PYTHONIOENCODING=utf-8 \
+    PORT=8000 \
+    AUTOMATIZACION_GIF_JOBS_ROOT=/tmp/automatizacion-gif/jobs \
+    AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT=/tmp/automatizacion-gif/drive_content
 
 WORKDIR /app
 
@@ -36,13 +39,13 @@ COPY prompts ./prompts
 COPY README.md ./README.md
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-RUN mkdir -p /app/outputs/jobs /app/credentials
+RUN mkdir -p /tmp/automatizacion-gif/jobs /tmp/automatizacion-gif/drive_content /app/credentials
 
 WORKDIR /app/backend
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/api/health' % os.getenv('PORT', '8000'), timeout=3).read()"
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

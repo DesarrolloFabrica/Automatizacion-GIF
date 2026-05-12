@@ -4,6 +4,8 @@
 credentials.json
 token_drive.json
 credentials/
+docker-compose.yml
+docker-data/
 outputs/
 jobs/
 inputs/

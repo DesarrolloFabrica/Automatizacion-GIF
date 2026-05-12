@@ -1,0 +1,84 @@
+name: Deploy Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+      - Alejo-rama
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE || 'automatizacion-gif' }}
+  GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY || 'cloud-run' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'automatizacion-gif' }}
+
+jobs:
+  deploy:
+    name: Build and deploy monolith
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Enable Docker auth
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          gcloud artifacts repositories describe "${GAR_REPOSITORY}" \
+            --project="${PROJECT_ID}" \
+            --location="${REGION}" \
+          || gcloud artifacts repositories create "${GAR_REPOSITORY}" \
+            --project="${PROJECT_ID}" \
+            --location="${REGION}" \
+            --repository-format=docker \
+            --description="Cloud Run container images"
+
+      - name: Build container image
+        run: |
+          IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
+          docker build --tag "${IMAGE_URI}" .
+
+      - name: Push container image
+        run: docker push "${IMAGE_URI}"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE_NAME}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --image="${IMAGE_URI}" \
+            --platform=managed \
+            --port=8000 \
+            --memory="${CLOUD_RUN_MEMORY:-2Gi}" \
+            --cpu="${CLOUD_RUN_CPU:-2}" \
+            --timeout="${CLOUD_RUN_TIMEOUT:-3600}" \
+            --concurrency="${CLOUD_RUN_CONCURRENCY:-1}" \
+            --max-instances="${CLOUD_RUN_MAX_INSTANCES:-3}" \
+            --set-env-vars="OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o},AUTOMATIZACION_GIF_JOBS_ROOT=/tmp/automatizacion-gif/jobs,AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT=/tmp/automatizacion-gif/drive_content" \
+            --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest" \
+            --quiet
+        env:
+          CLOUD_RUN_MEMORY: ${{ vars.CLOUD_RUN_MEMORY }}
+          CLOUD_RUN_CPU: ${{ vars.CLOUD_RUN_CPU }}
+          CLOUD_RUN_TIMEOUT: ${{ vars.CLOUD_RUN_TIMEOUT }}
+          CLOUD_RUN_CONCURRENCY: ${{ vars.CLOUD_RUN_CONCURRENCY }}
+          CLOUD_RUN_MAX_INSTANCES: ${{ vars.CLOUD_RUN_MAX_INSTANCES }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
