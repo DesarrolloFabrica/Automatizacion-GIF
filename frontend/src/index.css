@@ -6484,6 +6484,41 @@ h2 {
   flex: 1 1 220px;
 }
 
+/* Hover stability for the local and Drive side panels. Older theme layers still
+   target these cards; keeping transforms out prevents layout re-entry flicker. */
+.config-console-shell .prompt-console-card,
+.config-console-shell .syllabus-console-card,
+.config-console-shell .syllabus-compact-preview,
+.config-console-shell .console-primary-action,
+.config-console-shell .console-hint-card,
+.config-console-shell .file-input-label,
+.config-console-shell .primary-button,
+.config-console-shell .secondary-button,
+.config-console-shell .drive-mode-card,
+.config-console-shell .drive-mode-option {
+  transform: none;
+  will-change: auto;
+}
+
+.config-console-shell .prompt-console-card:hover,
+.config-console-shell .syllabus-console-card:hover,
+.config-console-shell .syllabus-compact-preview:hover,
+.config-console-shell .console-primary-action:hover,
+.config-console-shell .console-hint-card:hover,
+.config-console-shell .file-input-label:hover,
+.config-console-shell .primary-button:not(:disabled):hover,
+.config-console-shell .secondary-button:not(:disabled):hover,
+.config-console-shell .drive-mode-card:hover,
+.config-console-shell .drive-mode-option:hover {
+  transform: none;
+}
+
+.config-console-shell .file-input-label,
+.config-console-shell .primary-button,
+.config-console-shell .secondary-button {
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, filter 180ms ease;
+}
+
 .drive-service-account-alert {
   display: grid;
   gap: 0.35rem;
