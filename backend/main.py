@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from jobs import append_log, create_job, get_job, start_job_thread, terminate_job_subprocess
@@ -80,6 +81,8 @@ from automation_engine.generate_guiones import extract_course_plan, parse_syllab
 from automation_engine.config.categories import CATEGORIES, get_category, public_categories_payload, validate_category_prompts  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
+
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 
 ALLOWED_LEVELS = set(CATEGORIES.keys())
@@ -1311,3 +1314,22 @@ def serve_frontend(full_path: str) -> FileResponse:
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Frontend no compilado.")
     return FileResponse(index_path)
+
+
+if FRONTEND_DIST.exists():
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
+
+    @app.get("/", include_in_schema=False)
+    def serve_frontend_root() -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_frontend(full_path: str) -> FileResponse:
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API endpoint no encontrado.")
+        requested_path = FRONTEND_DIST / full_path
+        if requested_path.is_file():
+            return FileResponse(requested_path)
+        return FileResponse(FRONTEND_DIST / "index.html")
