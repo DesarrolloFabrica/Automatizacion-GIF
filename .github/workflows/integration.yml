@@ -46,6 +46,8 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: |
+          set -euo pipefail
+
           required_vars=(
             PROJECT_ID
             GCP_SA_KEY
@@ -57,6 +59,29 @@ jobs:
               exit 1
             fi
           done
+
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          raw = os.environ.get("GCP_SA_KEY", "")
+          try:
+              payload = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print(f"::error::GCP_SA_KEY is not valid JSON: {exc}")
+              sys.exit(1)
+
+          required = ("type", "project_id", "client_email", "private_key")
+          missing = [key for key in required if not payload.get(key)]
+          if missing:
+              print(f"::error::GCP_SA_KEY is missing required service account fields: {', '.join(missing)}")
+              sys.exit(1)
+
+          if payload.get("type") != "service_account":
+              print("::error::GCP_SA_KEY must be a Google service account JSON key.")
+              sys.exit(1)
+          PY
 
       - name: Normalize deployment variables
         run: |
@@ -215,7 +240,7 @@ jobs:
           git push origin "${IMAGE_VERSION_TAG}"
 
       - name: Show Cloud Run logs on failure
-        if: failure()
+        if: failure() && env.GOOGLE_GHA_CREDS_PATH != ''
         run: |
           gcloud logging read \
             "resource.type=cloud_run_revision AND resource.labels.service_name=${SERVICE_NAME}" \
