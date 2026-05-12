@@ -242,14 +242,6 @@ jobs:
           secrets: |
             OPENAI_API_KEY=${{ env.OPENAI_SECRET_NAME }}:latest
 
-      - name: Allow public access
-        run: |
-          gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
-            --project "${PROJECT_ID}" \
-            --region "${REGION}" \
-            --member="allUsers" \
-            --role="roles/run.invoker"
-
       - name: Show service URL
         run: |
           gcloud run services describe "${SERVICE_NAME}" \
