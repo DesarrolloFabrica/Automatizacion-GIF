@@ -7,7 +7,7 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
   try {
     return await fetch(`${API_BASE_URL}${path}`, init)
   } catch (error) {
-    if (error instanceof TypeError) throw new Error(BACKEND_CONNECTION_ERROR)
+    if (error instanceof TypeError) throw new Error(BACKEND_CONNECTION_ERROR, { cause: error })
     throw error
   }
 }

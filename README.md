@@ -153,17 +153,41 @@ docker run --rm -p 8000:8000 `
   automatizacion-gif:latest
 ```
 
-## Deploy en Cloud Run con GitHub Actions
+## Branching y Deploy en Cloud Run
 
-El workflow `.github/workflows/deploy-cloud-run.yml` construye la imagen monolitica, la sube a Artifact Registry y la despliega en Cloud Run.
+La estrategia de ramas es:
 
-Configura en GitHub:
+- `main`: produccion.
+- `integration`: desarrollo/integracion y despliegue automatico a Cloud Run de integracion.
 
-- Variables: `GCP_PROJECT_ID`, `GCP_REGION`, `GAR_REPOSITORY`, `CLOUD_RUN_SERVICE`.
-- Secretos: `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`.
-- En Google Secret Manager: secreto `OPENAI_API_KEY` con la API key de OpenAI.
+El workflow `.github/workflows/integration.yml` se llama `integration`. Construye la imagen monolitica, la sube a Artifact Registry y despliega Cloud Run cuando hay push a la rama `integration`.
 
-Para Google Drive en Cloud Run, comparte la carpeta destino con el service account que ejecuta Cloud Run. El backend usa credenciales ADC cuando no encuentra `GOOGLE_SERVICE_ACCOUNT_FILE` ni `credentials.json`/`token_drive.json`.
+Configura estas variables en GitHub Actions:
+
+- `GCP_PROJECT_ID`: ID del proyecto GCP.
+- `GCP_REGION`: region de Cloud Run, por ejemplo `us-central1`.
+- `GAR_REPOSITORY`: repositorio Docker de Artifact Registry, por ejemplo `cloud-run`.
+- `CLOUD_RUN_SERVICE`: nombre del servicio de integracion, por ejemplo `automatizacion-gif-integration`.
+- `IMAGE_NAME`: nombre base de la imagen, por ejemplo `automatizacion-gif`.
+- `OPENAI_MODEL`: modelo OpenAI, por ejemplo `gpt-4o`.
+- `CLOUD_RUN_MEMORY`, `CLOUD_RUN_CPU`, `CLOUD_RUN_TIMEOUT`, `CLOUD_RUN_CONCURRENCY`, `CLOUD_RUN_MAX_INSTANCES`: opcionales para dimensionar el servicio.
+- `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT`: opcional si quieres que Cloud Run ejecute con un service account distinto al que usa GitHub para desplegar.
+
+Configura estos secretos en GitHub Actions:
+
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`: recurso completo del provider de Workload Identity Federation.
+- `GCP_SERVICE_ACCOUNT`: email del service account que GitHub Actions impersona para construir y desplegar.
+
+Configura este secreto en Google Secret Manager:
+
+- `OPENAI_API_KEY`: API key de OpenAI. El workflow lo monta en Cloud Run como variable de entorno usando `--set-secrets`.
+
+Autenticacion de Google Drive:
+
+- En Cloud Run no hay login OAuth de usuario en la interfaz. La app se autentica desde el backend con el service account del servicio.
+- El usuario pega el ID de la carpeta Drive en la interfaz.
+- Para que la app pueda leer/crear/actualizar archivos, comparte esa carpeta Drive con el email del service account de Cloud Run y dale permiso de Editor.
+- En local se puede seguir usando `credentials.json` + `token_drive.json` o `GOOGLE_SERVICE_ACCOUNT_FILE`.
 
 ## Flujos Disponibles
 

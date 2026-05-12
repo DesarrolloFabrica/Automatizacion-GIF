@@ -1,10 +1,9 @@
-name: Deploy Cloud Run
+name: integration
 
 on:
   push:
     branches:
-      - main
-      - Alejo-rama
+      - integration
   workflow_dispatch:
 
 permissions:
@@ -14,18 +13,25 @@ permissions:
 env:
   PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   REGION: ${{ vars.GCP_REGION || 'us-central1' }}
-  SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE || 'automatizacion-gif' }}
+  SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE || 'automatizacion-gif-integration' }}
   GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY || 'cloud-run' }}
   IMAGE_NAME: ${{ vars.IMAGE_NAME || 'automatizacion-gif' }}
 
 jobs:
   deploy:
-    name: Build and deploy monolith
+    name: Build and deploy integration
     runs-on: ubuntu-latest
+    environment: integration
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate required configuration
+        run: |
+          test -n "${PROJECT_ID}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
+          test -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" || (echo "Missing secret GCP_WORKLOAD_IDENTITY_PROVIDER" && exit 1)
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}" || (echo "Missing secret GCP_SERVICE_ACCOUNT" && exit 1)
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -52,7 +58,7 @@ jobs:
 
       - name: Build container image
         run: |
-          IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
+          IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:integration-${GITHUB_SHA}"
           echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
           docker build --tag "${IMAGE_URI}" .
 
@@ -72,6 +78,7 @@ jobs:
             --timeout="${CLOUD_RUN_TIMEOUT:-3600}" \
             --concurrency="${CLOUD_RUN_CONCURRENCY:-1}" \
             --max-instances="${CLOUD_RUN_MAX_INSTANCES:-3}" \
+            --service-account="${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT:-${GCP_SERVICE_ACCOUNT}}" \
             --set-env-vars="OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o},AUTOMATIZACION_GIF_JOBS_ROOT=/tmp/automatizacion-gif/jobs,AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT=/tmp/automatizacion-gif/drive_content" \
             --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest" \
             --quiet
@@ -81,4 +88,6 @@ jobs:
           CLOUD_RUN_TIMEOUT: ${{ vars.CLOUD_RUN_TIMEOUT }}
           CLOUD_RUN_CONCURRENCY: ${{ vars.CLOUD_RUN_CONCURRENCY }}
           CLOUD_RUN_MAX_INSTANCES: ${{ vars.CLOUD_RUN_MAX_INSTANCES }}
+          CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}

@@ -891,20 +891,6 @@ async def create_scripts_job(
 ) -> ScriptsJobCreateResponse:
     validate_required_api_key()
 
-    if not (PROJECT_ROOT / "credentials.json").exists():
-        raise HTTPException(
-            status_code=400,
-            detail="Falta credentials.json en la raiz del proyecto.",
-        )
-    if not (PROJECT_ROOT / "token_drive.json").exists():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Falta token_drive.json. Genera el token ejecutando una vez por CLI: "
-                "python -m automation_engine.generate_txt_from_drive --drive-folder-id <ID> --dry-run"
-            ),
-        )
-
     if not asignatura.strip() or not programa.strip():
         raise HTTPException(status_code=400, detail="Asignatura y programa son obligatorios.")
 

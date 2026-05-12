@@ -108,8 +108,9 @@ function buildDriveSession(jobId: string, driveFolderId: string, prompt: PromptT
 }
 
 function DrivePackageView({ onBack }: DrivePackageViewProps) {
+  const [initialDriveSession] = useState<StoredDriveSession | null>(() => loadDriveSession())
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>('')
+  const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>((initialDriveSession?.prompt ?? '') as PromptType | '')
   const [detectedGranules, setDetectedGranules] = useState<Array<{ id: string; label: string }>>([])
   const [subjectName, setSubjectName] = useState('')
   const [programName, setProgramName] = useState('')
@@ -124,17 +125,16 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
   const [phaseStatus, setPhaseStatus] = useState<JobPhaseStatus | null>(null)
   const [currentPhase, setCurrentPhase] = useState('pending')
   const [categories, setCategories] = useState<CategoryConfig[]>(CATEGORY_CONFIGS)
-  const [driveFolderId, setDriveFolderId] = useState('')
+  const [driveFolderId, setDriveFolderId] = useState(initialDriveSession?.driveFolderId ?? '')
   const [driveMessage, setDriveMessage] = useState('')
   const [driveSync, setDriveSync] = useState<DriveSyncSnapshot | null>(null)
   const [driveResult, setDriveResult] = useState<DriveUploadResponse | null>(null)
   const pollRef = useRef<number | null>(null)
   const runLockRef = useRef(false)
   const resultsPanelRef = useRef<HTMLElement | null>(null)
-  const [packageJobId, setPackageJobId] = useState<string | null>(null)
-  const [driveRunMode, setDriveRunMode] = useState<DriveRunMode>('full')
+  const [packageJobId, setPackageJobId] = useState<string | null>(initialDriveSession?.jobId ?? null)
+  const [driveRunMode, setDriveRunMode] = useState<DriveRunMode>(initialDriveSession?.runMode === 'stepped' ? 'stepped' : 'full')
   const driveRunModeRef = useRef(driveRunMode)
-  driveRunModeRef.current = driveRunMode
   const executeDrivePipelineRef = useRef<(jobId: string | null, opts?: { force?: boolean }) => Promise<void>>(async () => {})
   const steppedHydratePollRef = useRef<number | null>(null)
 
@@ -193,6 +193,10 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       pollRef.current = null
     }
   }
+
+  useEffect(() => {
+    driveRunModeRef.current = driveRunMode
+  }, [driveRunMode])
 
   const resetForNewSyllabus = () => {
     setSelectedFile(null)
@@ -378,7 +382,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
 
   const ensurePipelinePhase = async (jobId: string) => {
     setDriveStage('activities')
-    let payload = await fetchJobStatus(jobId)
+    const payload = await fetchJobStatus(jobId)
     if (getBackendPhaseStatus(payload, 'pipelineLocal') === 'completed') return
     if (getBackendPhaseStatus(payload, 'pipelineLocal') === 'failed') {
       throw new Error('La fase de actividades falló. Usa «Volver a generar actividades» o «Nuevo paquete».')
@@ -393,7 +397,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
 
   const ensureMaterialsPhase = async (jobId: string) => {
     setDriveStage('resources')
-    let payload = await fetchJobStatus(jobId)
+    const payload = await fetchJobStatus(jobId)
     if (getBackendPhaseStatus(payload, 'specializationMaterials') === 'completed') return
     if (getBackendPhaseStatus(payload, 'specializationMaterials') === 'failed') {
       throw new Error('La fase de recursos complementarios falló. Usa «Volver a generar recursos».')
@@ -527,7 +531,9 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       }
   }
 
-  executeDrivePipelineRef.current = executeDrivePipeline
+  useEffect(() => {
+    executeDrivePipelineRef.current = executeDrivePipeline
+  })
 
   const persistDriveSessionJob = (jobId: string) => {
     saveDriveSession(buildDriveSession(jobId, driveFolderId, selectedPrompt as PromptType, driveRunModeRef.current))
@@ -776,49 +782,51 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
 
   useEffect(() => {
     let cancelled = false
+    let hydrateTimer: number | null = null
     if (steppedHydratePollRef.current) {
       window.clearInterval(steppedHydratePollRef.current)
       steppedHydratePollRef.current = null
     }
-    const s = loadDriveSession()
+    const s = initialDriveSession
     if (!s) return
-    setPackageJobId(s.jobId)
-    if (s.driveFolderId) setDriveFolderId(s.driveFolderId)
-    if (s.prompt) setSelectedPrompt(s.prompt)
     const mode: DriveRunMode = s.runMode === 'stepped' ? 'stepped' : 'full'
-    setDriveRunMode(mode)
-    void fetchJobStatus(s.jobId)
-      .then((payload) => {
-        if (cancelled) return
-        applyJobStatus(payload)
-        if (isPhasedDrivePackageComplete(payload.driveSync)) {
-          setDriveStage('ready')
-          setDriveResult(snapshotToDriveUploadResponse(payload.driveSync!, s.jobId))
-          setStatus('finalizado')
-          setDriveMessage('Paquete Drive listo (sincronizado por fases).')
-          return
-        }
-        if (payload.status === 'running') {
-          if (mode === 'stepped') {
-            steppedHydratePollRef.current = window.setInterval(() => {
-              void fetchJobStatus(s.jobId).catch(() => {})
-            }, JOB_POLL_INTERVAL_MS)
-          } else {
-            void executeDrivePipelineRef.current(s.jobId, { force: true })
+    hydrateTimer = window.setTimeout(() => {
+      void fetchJobStatus(s.jobId)
+        .then((payload) => {
+          if (cancelled) return
+          applyJobStatus(payload)
+          if (isPhasedDrivePackageComplete(payload.driveSync)) {
+            setDriveStage('ready')
+            setDriveResult(snapshotToDriveUploadResponse(payload.driveSync!, s.jobId))
+            setStatus('finalizado')
+            setDriveMessage('Paquete Drive listo (sincronizado por fases).')
+            return
           }
-        }
-      })
-      .catch(() => {
-        clearDriveSession()
-        setPackageJobId(null)
-      })
+          if (payload.status === 'running') {
+            if (mode === 'stepped') {
+              steppedHydratePollRef.current = window.setInterval(() => {
+                void fetchJobStatus(s.jobId).catch(() => {})
+              }, JOB_POLL_INTERVAL_MS)
+            } else {
+              void executeDrivePipelineRef.current(s.jobId, { force: true })
+            }
+          }
+        })
+        .catch(() => {
+          clearDriveSession()
+          setPackageJobId(null)
+        })
+    }, 0)
     return () => {
       cancelled = true
+      if (hydrateTimer) window.clearTimeout(hydrateTimer)
       if (steppedHydratePollRef.current) {
         window.clearInterval(steppedHydratePollRef.current)
         steppedHydratePollRef.current = null
       }
     }
+    // Hydrates one persisted browser session on mount; dependencies are intentionally frozen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handlePromptChange = (prompt: PromptType | '') => {

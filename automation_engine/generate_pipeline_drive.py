@@ -1,7 +1,7 @@
 """
 Orquestador unificado del proyecto Automatizacion-GIF.
 
-Descarga 5 archivos .docx desde una carpeta de Google Drive, genera en una sola
+Descarga 5 archivos .docx o .pdf desde una carpeta de Google Drive, genera en una sola
 ejecucion los 4 TXT del flujo del companero (PDA + QUIZ 1-3) y los 3 DOCX del
 flujo de documentos academicos (ACA, PRESENTACION, FORO), y sube todo a Drive
 dentro de `contenido complementario/` en la carpeta fuente:
@@ -299,7 +299,7 @@ def _print_uploads(label: str, uploads: List[Dict[str, str]]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Pipeline unificado: descarga 5 .docx desde Drive y genera "
+            "Pipeline unificado: descarga 5 .docx o .pdf desde Drive y genera "
             "PDA + QUIZ 1-3 (TXT) y ACA + PRESENTACION + FORO (DOCX) en "
             "`contenido complementario/` dentro de la carpeta fuente."
         )
@@ -307,7 +307,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--drive-folder-id",
         required=True,
-        help="ID de la carpeta de Google Drive con los 5 archivos fuente .docx",
+        help="ID de la carpeta de Google Drive con los 5 archivos fuente .docx o .pdf",
     )
     parser.add_argument(
         "--output-folder-name",
@@ -441,9 +441,9 @@ def main() -> None:
 
     if len(files) != EXPECTED_FILE_COUNT:
         raise ValueError(
-            f"Se esperan exactamente {EXPECTED_FILE_COUNT} archivos .docx en la "
+            f"Se esperan exactamente {EXPECTED_FILE_COUNT} archivos .docx o .pdf en la "
             f"carpeta fuente, se encontraron {len(files)}. Ajusta la carpeta o "
-            f"verifica que todos los archivos sean .docx."
+            f"verifica que todos los archivos sean .docx o .pdf."
         )
 
     with tempfile.TemporaryDirectory(prefix="pipeline_drive_") as temp_name:
