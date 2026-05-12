@@ -1,0 +1,55 @@
+services:
+  automatizacion-gif-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: automatizacion-gif:latest
+    ports:
+      - "8011:8000"
+    env_file:
+      - .env
+    environment:
+      AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT: /app/outputs/drive_content
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token_drive.json:/app/token_drive.json
+      - ./outputs/instance-1:/app/outputs
+      - ./credentials:/app/credentials:ro
+    restart: unless-stopped
+
+  automatizacion-gif-2:
+    image: automatizacion-gif:latest
+    ports:
+      - "8012:8000"
+    env_file:
+      - .env
+    environment:
+      AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT: /app/outputs/drive_content
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token_drive.json:/app/token_drive.json
+      - ./outputs/instance-2:/app/outputs
+      - ./credentials:/app/credentials:ro
+    restart: unless-stopped
+    depends_on:
+      - automatizacion-gif-1
+
+  automatizacion-gif-3:
+    image: automatizacion-gif:latest
+    ports:
+      - "8013:8000"
+    env_file:
+      - .env
+    environment:
+      AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT: /app/outputs/drive_content
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token_drive.json:/app/token_drive.json
+      - ./outputs/instance-3:/app/outputs
+      - ./credentials:/app/credentials:ro
+    restart: unless-stopped
+    depends_on:
+      - automatizacion-gif-1

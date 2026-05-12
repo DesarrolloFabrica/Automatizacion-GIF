@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from storage import get_job_paths, list_generated_docx, read_job_metadata
+from storage import get_job_paths, list_generated_docx, read_job_metadata, read_phase_status, write_phase_status
 
 
 MAX_LOG_LINES = 1000
@@ -83,10 +83,28 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
             logs = text.splitlines()[-MAX_LOG_LINES:]
         except OSError:
             logs = []
+    phase_status = read_phase_status(job_id)
+    running_phases = [
+        phase_key
+        for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")
+        if phase_status.get(phase_key, {}).get("status") == "running"
+    ]
+    if running_phases:
+        now = datetime.utcnow().isoformat()
+        for phase_key in running_phases:
+            phase_status[phase_key]["status"] = "failed"
+            phase_status[phase_key]["finishedAt"] = now
+        write_phase_status(job_id, phase_status)
+        logs.append("=== Job marcado como fallido: el servidor se reinicio mientras habia una fase en ejecucion ===")
+
+    phases = [phase_status.get(key, {}) for key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")]
+    status = "failed" if running_phases or any(phase.get("status") == "failed" for phase in phases) else "completed"
+    progress_step = "error" if status == "failed" else "finalizado"
+
     record = JobRecord(
         job_id=job_id,
-        status="completed",
-        progress_step="finalizado",
+        status=status,
+        progress_step=progress_step,
         log_path=paths["log_path"],
         generated_dir=paths["generated_dir"],
         job_kind="granules_academic_package",

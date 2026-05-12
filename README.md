@@ -120,6 +120,55 @@ npm install
 npm run dev
 ```
 
+## Ejecutar con Docker
+
+La imagen Docker es monolitica: compila el frontend React y lo sirve desde FastAPI junto con la API en el puerto `8000`.
+
+Construir imagen:
+
+```powershell
+docker build -t automatizacion-gif:latest .
+```
+
+Ejecutar un contenedor:
+
+```powershell
+docker run --rm -p 8000:8000 `
+  -e OPENAI_API_KEY="TU_API_KEY" `
+  -e OPENAI_MODEL="gpt-4o" `
+  -v "${PWD}\outputs:/app/outputs" `
+  automatizacion-gif:latest
+```
+
+Con Docker Compose se levantan tres instancias listas:
+
+```powershell
+docker compose up --build
+```
+
+Abre:
+
+```text
+http://localhost:8011
+http://localhost:8012
+http://localhost:8013
+```
+
+Cada instancia monta automaticamente `.env`, `credentials.json` y `token_drive.json`; sus salidas quedan separadas en `outputs/instance-1`, `outputs/instance-2` y `outputs/instance-3`. El contenido temporal de depuracion por fases con Drive queda persistido en `outputs/instance-*/drive_content`, para que un reinicio del contenedor no deje el job sin insumos locales.
+
+Dentro de cada instancia tambien se pueden lanzar varios jobs simultaneos desde la interfaz. No uses multiples workers de Uvicorn por ahora: el estado de jobs activos vive en memoria del proceso, aunque los resultados se escriben en `outputs/jobs`.
+
+Para Drive con service account, monta credenciales como secreto/volumen y apunta la variable:
+
+```powershell
+docker run --rm -p 8000:8000 `
+  -e OPENAI_API_KEY="TU_API_KEY" `
+  -e GOOGLE_SERVICE_ACCOUNT_FILE="/app/credentials/service-account.json" `
+  -v "${PWD}\credentials:/app/credentials:ro" `
+  -v "${PWD}\outputs:/app/outputs" `
+  automatizacion-gif:latest
+```
+
 ## Flujos Disponibles
 
 ### Crear Granulos

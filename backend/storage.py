@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sys
 import tempfile
@@ -19,7 +20,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from automation_engine.config.categories import CATEGORIES, get_category  # noqa: E402
 
 JOBS_ROOT = PROJECT_ROOT / "outputs" / "jobs"
-DRIVE_JOB_CONTENT_ROOT = Path(tempfile.gettempdir()) / "automatizacion_gif_drive_content"
+DRIVE_JOB_CONTENT_ROOT = Path(
+    os.getenv("AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT")
+    or Path(tempfile.gettempdir()) / "automatizacion_gif_drive_content"
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -44,16 +48,32 @@ def _job_metadata_path(job_id: str) -> Path:
     return JOBS_ROOT / job_id / "job_metadata.json"
 
 
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _read_json_or_none(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return None
+        payload = json.loads(text)
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        LOGGER.warning("No se pudo leer JSON runtime %s: %s", path, exc)
+        return None
+
+
 def job_uses_drive_temp_content(job_id: str) -> bool:
     """Si True, input/generated/pipeline/materiales viven en temp del SO, no en outputs/jobs."""
     mp = _job_metadata_path(job_id)
-    if not mp.exists():
-        return False
-    try:
-        data = json.loads(mp.read_text(encoding="utf-8"))
-        return bool(data.get("drivePhasedSync"))
-    except (OSError, json.JSONDecodeError):
-        return False
+    data = _read_json_or_none(mp)
+    return bool(data and data.get("drivePhasedSync"))
 
 
 def get_job_paths(job_id: str) -> dict[str, Path]:
@@ -122,7 +142,7 @@ def save_job_metadata(
         payload.setdefault("driveFilesUploaded", 0)
         payload.setdefault("driveFilesOverwritten", 0)
     metadata_path = state_dir / "job_metadata.json"
-    metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(metadata_path, payload)
     return payload
 
 
@@ -133,15 +153,15 @@ def merge_job_metadata(job_id: str, updates: dict) -> dict:
     base.update(updates)
     if "driveWorkspaceFolderId" not in base and base.get("driveParentFolderId"):
         base["driveWorkspaceFolderId"] = str(base["driveParentFolderId"]).strip()
-    (state_dir / "job_metadata.json").write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(state_dir / "job_metadata.json", base)
     return base
 
 
 def read_job_metadata(job_id: str) -> dict:
     mp = _job_metadata_path(job_id)
-    if not mp.exists():
+    data = _read_json_or_none(mp)
+    if data is None:
         return {"jobId": job_id, "category": "especializacion"}
-    data = json.loads(mp.read_text(encoding="utf-8"))
     if data.get("drivePhasedSync"):
         data.setdefault("drivePhaseStatus", default_drive_phase_status())
         for key in ("structure", "syllabus", "granules", "activities", "resources"):
@@ -358,15 +378,23 @@ def init_phase_status(job_id: str) -> dict:
         "specializationMaterials": _empty_phase("pending"),
         "uploadDrive": _empty_phase("pending"),
     }
-    paths["phase_status_path"].write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(paths["phase_status_path"], payload)
     return payload
 
 
 def read_phase_status(job_id: str) -> dict:
     paths = get_job_paths(job_id)
-    if not paths["phase_status_path"].exists():
-        return init_phase_status(job_id)
-    payload = json.loads(paths["phase_status_path"].read_text(encoding="utf-8"))
+    payload = _read_json_or_none(paths["phase_status_path"])
+    if payload is None:
+        payload = {
+            "jobId": job_id,
+            "granules": _empty_phase("pending"),
+            "pipelineLocal": _empty_phase("pending"),
+            "specializationMaterials": _empty_phase("pending"),
+            "uploadDrive": _empty_phase("pending"),
+        }
+        write_phase_status(job_id, payload)
+        return payload
     payload.setdefault("uploadDrive", _empty_phase("pending"))
     return payload
 
@@ -374,7 +402,7 @@ def read_phase_status(job_id: str) -> dict:
 def write_phase_status(job_id: str, payload: dict) -> dict:
     paths = get_job_paths(job_id)
     paths["state_dir"].mkdir(parents=True, exist_ok=True)
-    paths["phase_status_path"].write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(paths["phase_status_path"], payload)
     return payload
 
 
@@ -700,7 +728,7 @@ def save_local_granules(job_id: str, upload_files) -> list[Path]:
     for index, upload in enumerate(upload_files, start=1):
         original = upload.filename or f"granule_{index}.docx"
         target_name = _safe_local_name(original)
-        if not target_name.lower().endswith(".docx"):
+        if Path(target_name).suffix.lower() not in {".docx", ".pdf"}:
             target_name = f"{Path(target_name).stem}.docx"
         target_path = paths["input_dir"] / target_name
         with target_path.open("wb") as destination:

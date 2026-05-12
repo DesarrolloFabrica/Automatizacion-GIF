@@ -93,23 +93,24 @@ export function extractFolderId(value: string): string | null {
   return null
 }
 
-export function isDocxFileName(name: string): boolean {
-  return name.trim().toLowerCase().endsWith('.docx')
+export function isSupportedGranuleFileName(name: string): boolean {
+  const lower = name.trim().toLowerCase()
+  return lower.endsWith('.docx') || lower.endsWith('.pdf')
 }
 
 export function validateLocalGranulesSelection(files: File[]): { ok: boolean; reason?: string; level?: 'error' | 'warning' | 'success' } {
   if (files.length === 0) {
-    return { ok: false, reason: 'Sube los gránulos del curso (4 o 5 archivos .docx).' }
+    return { ok: false, reason: 'Sube los gránulos del curso (4 o 5 archivos .docx o .pdf).' }
   }
-  const hasNonDocx = files.some((file) => !isDocxFileName(file.name))
-  if (hasNonDocx) {
-    return { ok: false, reason: 'Todos los archivos deben ser .docx.', level: 'error' }
+  const hasUnsupportedFile = files.some((file) => !isSupportedGranuleFileName(file.name))
+  if (hasUnsupportedFile) {
+    return { ok: false, reason: 'Todos los archivos deben ser .docx o .pdf.', level: 'error' }
   }
   if (files.length < 4) {
-    return { ok: false, reason: 'Faltan archivos. Selecciona al menos 4 gránulos .docx.', level: 'error' }
+    return { ok: false, reason: 'Faltan archivos. Selecciona al menos 4 gránulos .docx o .pdf.', level: 'error' }
   }
   if (files.length > 5) {
-    return { ok: false, reason: 'Demasiados archivos. Selecciona máximo 5 gránulos .docx.', level: 'error' }
+    return { ok: false, reason: 'Demasiados archivos. Selecciona máximo 5 gránulos .docx o .pdf.', level: 'error' }
   }
   if (files.length === 4) {
     return { ok: true, reason: 'Tienes 4 gránulos. Es válido, pero lo ideal son 5.', level: 'warning' }

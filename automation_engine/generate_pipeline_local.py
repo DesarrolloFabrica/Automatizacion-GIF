@@ -1,7 +1,7 @@
 """
 Pipeline local unificado del proyecto Automatizacion-GIF.
 
-Lee 4 o 5 archivos .docx desde una carpeta local, genera en una sola
+Lee 4 o 5 archivos .docx o .pdf desde una carpeta local, genera en una sola
 ejecucion los 4 TXT (PDA + QUIZ 1-3) y los 3 DOCX (ACA, PRESENTACION, FORO),
 y guarda todo en una carpeta local de salida.
 """
@@ -50,19 +50,20 @@ from automation_engine.generate_documentos_academicos import (
 
 LOCAL_GRANULES_MIN = 4
 LOCAL_GRANULES_MAX = 5
+SUPPORTED_SOURCE_EXTENSIONS = {".docx", ".pdf"}
 
 
-def collect_local_docx_files(input_dir: Path) -> List[Path]:
+def collect_local_source_files(input_dir: Path) -> List[Path]:
     if not input_dir.exists() or not input_dir.is_dir():
         raise FileNotFoundError(f"No existe la carpeta de entrada: {input_dir}")
     files = sorted(
         path
         for path in input_dir.iterdir()
-        if path.is_file() and path.suffix.lower() == ".docx" and not path.name.startswith("~$")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_SOURCE_EXTENSIONS and not path.name.startswith("~$")
     )
     if not (LOCAL_GRANULES_MIN <= len(files) <= LOCAL_GRANULES_MAX):
         raise ValueError(
-            f"Se esperan entre {LOCAL_GRANULES_MIN} y {LOCAL_GRANULES_MAX} archivos .docx "
+            f"Se esperan entre {LOCAL_GRANULES_MIN} y {LOCAL_GRANULES_MAX} archivos .docx o .pdf "
             f"en {input_dir}, se encontraron {len(files)}."
         )
     return files
@@ -71,11 +72,11 @@ def collect_local_docx_files(input_dir: Path) -> List[Path]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Pipeline local unificado: toma 4 o 5 .docx locales y genera "
+            "Pipeline local unificado: toma 4 o 5 .docx o .pdf locales y genera "
             "PDA + QUIZ 1-3 (TXT) y ACA + PRESENTACION + FORO (DOCX)."
         )
     )
-    parser.add_argument("--input-dir", required=True, help="Carpeta local con 4 o 5 .docx")
+    parser.add_argument("--input-dir", required=True, help="Carpeta local con 4 o 5 .docx o .pdf")
     parser.add_argument("--output-dir", required=True, help="Carpeta local donde se guardaran TXT y DOCX")
     parser.add_argument("--asignatura", default="", help="Nombre de la asignatura (si se omite intenta inferir)")
     parser.add_argument("--programa", default="", help="Nombre del programa (si se omite intenta inferir)")
@@ -114,7 +115,7 @@ def main() -> None:
     if not args.skip_docx and not prompt_docx_path.exists():
         raise FileNotFoundError(f"No existe el prompt DOCX: {prompt_docx_path}")
 
-    local_files = collect_local_docx_files(input_dir)
+    local_files = collect_local_source_files(input_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("leyendo granulos locales")

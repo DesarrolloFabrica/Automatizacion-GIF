@@ -1,4 +1,5 @@
 import { forwardRef, useMemo } from 'react'
+import { API_BASE_URL } from '../lib/api'
 import type { AvailableNextAction, CategoryConfig, GranuleMaterials, JobPhaseStatus } from '../types/granules'
 
 interface ResultsPanelProps {
@@ -29,7 +30,7 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
   },
   ref,
 ) {
-  const apiBase = 'http://localhost:8000'
+  const apiBase = API_BASE_URL
   const hasDocs = documents.length > 0
   const hasMateriales = materialesByGranule.length > 0
   const totalMateriales = materialesByGranule.reduce((sum, g) => sum + g.totalMaterials, 0)

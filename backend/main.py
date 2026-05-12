@@ -100,6 +100,7 @@ SCRIPTS_PROGRESS_MAP = {
 LOCAL_GRANULES_MIN = 4
 LOCAL_GRANULES_MAX = 5
 LOCAL_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+LOCAL_GRANULE_EXTENSIONS = {".docx", ".pdf"}
 
 SCRIPTS_LOCAL_PROGRESS_MAP = {
     "[infer]": "validando estructura",
@@ -393,6 +394,11 @@ def list_categories() -> list[dict]:
 def validate_docx_filename(file_name: str) -> None:
     if not file_name.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="El archivo debe ser .docx")
+
+
+def validate_local_granule_filename(file_name: str) -> None:
+    if Path(file_name).suffix.lower() not in LOCAL_GRANULE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Los gránulos deben ser archivos .docx o .pdf")
 
 
 def validate_required_api_key() -> None:
@@ -960,16 +966,16 @@ async def create_scripts_local_job(
         if len(granules) < LOCAL_GRANULES_MIN:
             raise HTTPException(
                 status_code=400,
-                detail=f"Faltan gránulos: sube al menos {LOCAL_GRANULES_MIN} archivos .docx.",
+                detail=f"Faltan gránulos: sube al menos {LOCAL_GRANULES_MIN} archivos .docx o .pdf.",
             )
         raise HTTPException(
             status_code=400,
-            detail=f"Demasiados gránulos: máximo {LOCAL_GRANULES_MAX} archivos .docx.",
+            detail=f"Demasiados gránulos: máximo {LOCAL_GRANULES_MAX} archivos .docx o .pdf.",
         )
 
     for granule in granules:
         filename = granule.filename or ""
-        validate_docx_filename(filename)
+        validate_local_granule_filename(filename)
         size = get_upload_size(granule)
         if size > LOCAL_MAX_FILE_SIZE_BYTES:
             raise HTTPException(
@@ -1280,3 +1286,28 @@ def download_materials_phase(job_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail=f"No hay materiales de {category.label} para descargar.")
     zip_path = create_phase_zip(job_id, "materials")
     return FileResponse(path=zip_path, filename=f"{category.materials_dir}_{job_id}.zip", media_type="application/zip")
+
+
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_frontend(full_path: str) -> FileResponse:
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Ruta no encontrada.")
+    if not FRONTEND_DIST.exists():
+        raise HTTPException(status_code=404, detail="Frontend no compilado.")
+
+    requested_path = (FRONTEND_DIST / full_path).resolve()
+    try:
+        requested_path.relative_to(FRONTEND_DIST.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado.") from exc
+
+    if requested_path.is_file():
+        return FileResponse(requested_path)
+
+    index_path = FRONTEND_DIST / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend no compilado.")
+    return FileResponse(index_path)

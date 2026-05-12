@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import BackButton from '../components/BackButton'
 import { SCRIPTS_LOCAL_PIPELINE_STEPS, validateLocalGranulesSelection } from '../data/mockScripts'
+import { API_BASE_URL } from '../lib/api'
 import type { LocalGeneratedFile, ScriptsLocalJobStatusResponse, ScriptsLocalProgressStep } from '../data/mockScripts'
 import type { GenerationStatus, JobStatusResponse, PromptType } from '../types/granules'
 
@@ -10,7 +11,7 @@ interface ScriptsViewProps {
 
 type ScriptMode = 'granules' | 'txtdocx' | 'materials'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = API_BASE_URL
 
 const promptOptions: Array<{ value: PromptType; label: string }> = [
   { value: 'curso_rapido', label: 'Curso rápido' },
@@ -81,7 +82,7 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
   const [localPrograma, setLocalPrograma] = useState('')
   const [localStatus, setLocalStatus] = useState<ScriptsLocalProgressStep>('pendiente')
   const [localIsGenerating, setLocalIsGenerating] = useState(false)
-  const [localMessage, setLocalMessage] = useState('Sube G1-G5 en .docx para generar TXT/DOCX académicos.')
+  const [localMessage, setLocalMessage] = useState('Sube G1-G5 en .docx o .pdf para generar TXT/DOCX académicos.')
   const [localLogs, setLocalLogs] = useState<string[]>([])
   const [localGeneratedFiles, setLocalGeneratedFiles] = useState<LocalGeneratedFile[]>([])
   const [localJobId, setLocalJobId] = useState<string | null>(null)
@@ -464,8 +465,8 @@ function ScriptsView({ onBack }: ScriptsViewProps) {
               }}
               className={['scripts-local-dropzone', 'scripts-local-dropzone--large', isDragging ? 'scripts-local-dropzone--drag' : ''].filter(Boolean).join(' ')}
             >
-              <label className="file-input-label" htmlFor="local-granules-input">Subir G1-G5 en .docx</label>
-              <input id="local-granules-input" type="file" multiple accept=".docx" onChange={(event) => addFiles(event.target.files ?? [])} className="file-input" />
+              <label className="file-input-label" htmlFor="local-granules-input">Subir G1-G5 en .docx o .pdf</label>
+              <input id="local-granules-input" type="file" multiple accept=".docx,.pdf,application/pdf" onChange={(event) => addFiles(event.target.files ?? [])} className="file-input" />
               <p className="muted">Arrastra aquí tus gránulos o haz clic para seleccionarlos.</p>
               {localValidation.reason && <p className={`script-validation script-validation--${localValidation.level ?? 'error'}`}>{localValidation.reason}</p>}
               {localFiles.length > 0 && (

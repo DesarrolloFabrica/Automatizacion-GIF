@@ -23,7 +23,7 @@ PROJECT_ROOT = ENGINE_DIR.parent
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "entrada_guiones_txt"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "salidas_txt"
 DEFAULT_PROMPT_PATH = PROJECT_ROOT / "prompts" / "txt_desde_guiones.md"
-SUPPORTED_EXTENSIONS = {".docx"}
+SUPPORTED_EXTENSIONS = {".docx", ".pdf"}
 
 
 def read_text_file(path: Path) -> str:
@@ -158,7 +158,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Genera archivos TXT usando como entrada una carpeta de guiones ya creados."
     )
-    parser.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR), help="Carpeta con guiones .docx")
+    parser.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR), help="Carpeta con guiones .docx o .pdf")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Carpeta donde se guardan los .txt generados")
     parser.add_argument("--prompt", default=str(DEFAULT_PROMPT_PATH), help="Prompt maestro para generar los TXT")
     parser.add_argument("--count", type=int, default=4, help="Cantidad de archivos TXT a generar")
