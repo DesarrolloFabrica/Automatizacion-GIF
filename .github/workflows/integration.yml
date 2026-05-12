@@ -2,92 +2,223 @@ name: integration
 
 on:
   push:
-    branches:
-      - integration
+    branches: [integration]
   workflow_dispatch:
+    inputs:
+      version_bump:
+        description: Version bump for this deployment
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
-permissions:
-  contents: read
-  id-token: write
+concurrency:
+  group: integration-deploy
+  cancel-in-progress: false
 
 env:
   PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY || 'cloud-run' }}
   SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE || 'automatizacion-gif-integration' }}
-  GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY || 'cloud-run' }}
-  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'automatizacion-gif' }}
+  CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
+  OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o' }}
+  IMAGE_NAME: automatizacion-gif/app
 
 jobs:
   deploy:
-    name: Build and deploy integration
     runs-on: ubuntu-latest
     environment: integration
+    permissions:
+      contents: write
+      pull-requests: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate required configuration
+      - name: Validate GitHub configuration
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: |
-          test -n "${PROJECT_ID}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
-          test -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" || (echo "Missing secret GCP_WORKLOAD_IDENTITY_PROVIDER" && exit 1)
-          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}" || (echo "Missing secret GCP_SERVICE_ACCOUNT" && exit 1)
+          required_vars=(
+            PROJECT_ID
+            GCP_SA_KEY
+          )
+
+          for name in "${required_vars[@]}"; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub variable or secret: ${name}"
+              exit 1
+            fi
+          done
+
+      - name: Normalize deployment variables
+        run: |
+          trim_value() {
+            printf '%s' "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+          }
+
+          {
+            echo "PROJECT_ID=$(trim_value "${PROJECT_ID}")"
+            echo "REGION=$(trim_value "${REGION}")"
+            echo "ARTIFACT_REPOSITORY=$(trim_value "${ARTIFACT_REPOSITORY}")"
+            echo "SERVICE_NAME=$(trim_value "${SERVICE_NAME}")"
+            echo "CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=$(trim_value "${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT}")"
+            echo "OPENAI_MODEL=$(trim_value "${OPENAI_MODEL}")"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve image version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_BUMP: ${{ inputs.version_bump }}
+        run: |
+          set -euo pipefail
+
+          bump="${MANUAL_BUMP:-}"
+
+          if [ -z "${bump}" ]; then
+            labels="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+              -H "Accept: application/vnd.github+json" \
+              --jq '.[0].labels[].name' 2>/dev/null || true)"
+
+            if printf '%s\n' "${labels}" | grep -Eiq '(^|:|/|-)major$|^major$'; then
+              bump="major"
+            elif printf '%s\n' "${labels}" | grep -Eiq '(^|:|/|-)minor$|^minor$'; then
+              bump="minor"
+            elif printf '%s\n' "${labels}" | grep -Eiq '(^|:|/|-)patch$|^patch$'; then
+              bump="patch"
+            else
+              bump="patch"
+            fi
+          fi
+
+          latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+
+          if [ -z "${latest_tag}" ]; then
+            next_version="1.0.0"
+          else
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "${version}"
+
+            case "${bump}" in
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              patch)
+                patch=$((patch + 1))
+                ;;
+              *)
+                echo "::error::Invalid version bump: ${bump}"
+                exit 1
+                ;;
+            esac
+
+            next_version="${major}.${minor}.${patch}"
+          fi
+
+          {
+            echo "VERSION_BUMP=${bump}"
+            echo "IMAGE_VERSION=${next_version}"
+            echo "IMAGE_VERSION_TAG=v${next_version}"
+          } >> "$GITHUB_ENV"
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
 
-      - name: Enable Docker auth
+      - name: Configure Docker auth
         run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
       - name: Ensure Artifact Registry repository exists
         run: |
-          gcloud artifacts repositories describe "${GAR_REPOSITORY}" \
+          gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" \
             --project="${PROJECT_ID}" \
             --location="${REGION}" \
-          || gcloud artifacts repositories create "${GAR_REPOSITORY}" \
+          || gcloud artifacts repositories create "${ARTIFACT_REPOSITORY}" \
             --project="${PROJECT_ID}" \
             --location="${REGION}" \
             --repository-format=docker \
             --description="Cloud Run container images"
 
-      - name: Build container image
+      - name: Build image
         run: |
-          IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:integration-${GITHUB_SHA}"
-          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
-          docker build --tag "${IMAGE_URI}" .
+          IMAGE_BASE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+          IMAGE_URI_LATEST="${IMAGE_BASE_URI}:latest"
+          IMAGE_URI_VERSION="${IMAGE_BASE_URI}:${IMAGE_VERSION_TAG}"
 
-      - name: Push container image
-        run: docker push "${IMAGE_URI}"
+          docker build \
+            -t "${IMAGE_URI_LATEST}" \
+            -t "${IMAGE_URI_VERSION}" \
+            .
+
+          {
+            echo "IMAGE_URI=${IMAGE_URI_VERSION}"
+            echo "IMAGE_URI_LATEST=${IMAGE_URI_LATEST}"
+            echo "IMAGE_URI_VERSION=${IMAGE_URI_VERSION}"
+          } >> "$GITHUB_ENV"
+
+      - name: Push image
+        run: |
+          docker push "${IMAGE_URI_LATEST}"
+          docker push "${IMAGE_URI_VERSION}"
 
       - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          image: ${{ env.IMAGE_URI }}
+          region: ${{ env.REGION }}
+          flags: >-
+            --allow-unauthenticated
+            --port=8000
+            --memory=2Gi
+            --cpu=2
+            --timeout=3600
+            --concurrency=1
+            --max-instances=3
+            ${{ env.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT != '' && format('--service-account={0}', env.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT) || '' }}
+          env_vars: |
+            OPENAI_MODEL=${{ env.OPENAI_MODEL }}
+            AUTOMATIZACION_GIF_JOBS_ROOT=/tmp/automatizacion-gif/jobs
+            AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT=/tmp/automatizacion-gif/drive_content
+          secrets: |
+            OPENAI_API_KEY=OPENAI_API_KEY:latest
+
+      - name: Show service URL
         run: |
-          gcloud run deploy "${SERVICE_NAME}" \
-            --project="${PROJECT_ID}" \
-            --region="${REGION}" \
-            --image="${IMAGE_URI}" \
-            --platform=managed \
-            --port=8000 \
-            --memory="${CLOUD_RUN_MEMORY:-2Gi}" \
-            --cpu="${CLOUD_RUN_CPU:-2}" \
-            --timeout="${CLOUD_RUN_TIMEOUT:-3600}" \
-            --concurrency="${CLOUD_RUN_CONCURRENCY:-1}" \
-            --max-instances="${CLOUD_RUN_MAX_INSTANCES:-3}" \
-            --service-account="${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT:-${GCP_SERVICE_ACCOUNT}}" \
-            --set-env-vars="OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o},AUTOMATIZACION_GIF_JOBS_ROOT=/tmp/automatizacion-gif/jobs,AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT=/tmp/automatizacion-gif/drive_content" \
-            --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest" \
-            --quiet
-        env:
-          CLOUD_RUN_MEMORY: ${{ vars.CLOUD_RUN_MEMORY }}
-          CLOUD_RUN_CPU: ${{ vars.CLOUD_RUN_CPU }}
-          CLOUD_RUN_TIMEOUT: ${{ vars.CLOUD_RUN_TIMEOUT }}
-          CLOUD_RUN_CONCURRENCY: ${{ vars.CLOUD_RUN_CONCURRENCY }}
-          CLOUD_RUN_MAX_INSTANCES: ${{ vars.CLOUD_RUN_MAX_INSTANCES }}
-          CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
-          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          gcloud run services describe "${SERVICE_NAME}" \
+            --region "${REGION}" \
+            --project "${PROJECT_ID}" \
+            --format "value(status.url)"
+
+      - name: Create GitHub version tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${IMAGE_VERSION_TAG}" -m "integration ${IMAGE_VERSION_TAG} (${VERSION_BUMP})"
+          git push origin "${IMAGE_VERSION_TAG}"
+
+      - name: Show Cloud Run logs on failure
+        if: failure()
+        run: |
+          gcloud logging read \
+            "resource.type=cloud_run_revision AND resource.labels.service_name=${SERVICE_NAME}" \
+            --project "${PROJECT_ID}" \
+            --limit 50 \
+            --format "value(timestamp,severity,textPayload)"

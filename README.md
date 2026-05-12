@@ -165,22 +165,26 @@ El workflow `.github/workflows/integration.yml` se llama `integration`. Construy
 Configura estas variables en GitHub Actions:
 
 - `GCP_PROJECT_ID`: ID del proyecto GCP.
-- `GCP_REGION`: region de Cloud Run, por ejemplo `us-central1`.
-- `GAR_REPOSITORY`: repositorio Docker de Artifact Registry, por ejemplo `cloud-run`.
-- `CLOUD_RUN_SERVICE`: nombre del servicio de integracion, por ejemplo `automatizacion-gif-integration`.
-- `IMAGE_NAME`: nombre base de la imagen, por ejemplo `automatizacion-gif`.
-- `OPENAI_MODEL`: modelo OpenAI, por ejemplo `gpt-4o`.
-- `CLOUD_RUN_MEMORY`, `CLOUD_RUN_CPU`, `CLOUD_RUN_TIMEOUT`, `CLOUD_RUN_CONCURRENCY`, `CLOUD_RUN_MAX_INSTANCES`: opcionales para dimensionar el servicio.
-- `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT`: opcional si quieres que Cloud Run ejecute con un service account distinto al que usa GitHub para desplegar.
+- `GCP_REGION`: opcional. Si no existe usa `us-central1`.
+- `GCP_ARTIFACT_REPOSITORY`: opcional. Si no existe usa `cloud-run`.
+- `CLOUD_RUN_SERVICE`: opcional. Si no existe usa `automatizacion-gif-integration`.
+- `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT`: opcional. Si no existe Cloud Run usa su service account por defecto.
+- `OPENAI_MODEL`: opcional. Si no existe usa `gpt-4o`.
 
-Configura estos secretos en GitHub Actions:
+Configura este secreto en GitHub Actions:
 
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`: recurso completo del provider de Workload Identity Federation.
-- `GCP_SERVICE_ACCOUNT`: email del service account que GitHub Actions impersona para construir y desplegar.
+- `GCP_SA_KEY`: JSON completo del service account que GitHub Actions usa para construir, subir la imagen y desplegar.
 
 Configura este secreto en Google Secret Manager:
 
 - `OPENAI_API_KEY`: API key de OpenAI. El workflow lo monta en Cloud Run como variable de entorno usando `--set-secrets`.
+
+Versionamiento de imagenes:
+
+- Cada despliegue a `integration` crea una imagen `latest` y otra versionada `vMAJOR.MINOR.PATCH`.
+- Si el despliegue viene de un PR, el workflow lee labels `major`, `minor` o `patch`. Si no encuentra label, usa `patch`.
+- Si se ejecuta manualmente (`workflow_dispatch`), puedes escoger `major`, `minor` o `patch`.
+- Tambien crea el tag Git anotado correspondiente, por ejemplo `v1.2.3`.
 
 Autenticacion de Google Drive:
 
