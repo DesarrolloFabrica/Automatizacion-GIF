@@ -45,12 +45,14 @@ jobs:
       - name: Validate GitHub configuration
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
 
           required_vars=(
             PROJECT_ID
             GCP_SA_KEY
+            OPENAI_API_KEY
           )
 
           for name in "${required_vars[@]}"; do
@@ -66,6 +68,13 @@ jobs:
           import sys
 
           raw = os.environ.get("GCP_SA_KEY", "")
+          if not raw.lstrip().startswith("{"):
+              print(
+                  "::error::GCP_SA_KEY must contain the full Google service account JSON. "
+                  "It cannot be a Secret Manager secret name because GitHub must authenticate "
+                  "to Google before it can read Secret Manager."
+              )
+              sys.exit(1)
           try:
               payload = json.loads(raw)
           except json.JSONDecodeError as exc:
@@ -83,6 +92,11 @@ jobs:
               sys.exit(1)
           PY
 
+          if [[ "${OPENAI_API_KEY}" == "{"* ]]; then
+            echo "::error::OPENAI_API_KEY must contain the Secret Manager secret name, not the OpenAI key value."
+            exit 1
+          fi
+
       - name: Normalize deployment variables
         run: |
           trim_value() {
@@ -96,7 +110,10 @@ jobs:
             echo "SERVICE_NAME=$(trim_value "${SERVICE_NAME}")"
             echo "CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=$(trim_value "${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT}")"
             echo "OPENAI_MODEL=$(trim_value "${OPENAI_MODEL}")"
+            echo "OPENAI_SECRET_NAME=$(trim_value "${OPENAI_SECRET_NAME}")"
           } >> "$GITHUB_ENV"
+        env:
+          OPENAI_SECRET_NAME: ${{ secrets.OPENAI_API_KEY }}
 
       - name: Resolve image version
         env:
@@ -223,7 +240,7 @@ jobs:
             AUTOMATIZACION_GIF_JOBS_ROOT=/tmp/automatizacion-gif/jobs
             AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT=/tmp/automatizacion-gif/drive_content
           secrets: |
-            OPENAI_API_KEY=OPENAI_API_KEY:latest
+            OPENAI_API_KEY=${{ env.OPENAI_SECRET_NAME }}:latest
 
       - name: Show service URL
         run: |
