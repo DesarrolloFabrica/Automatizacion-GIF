@@ -1,35 +1,53 @@
 import type { PromptType } from '../types/granules'
+import type { CategoryConfig } from '../types/granules'
+import { CATEGORY_CONFIGS } from '../data/categories'
 
 interface PromptSelectorProps {
-  selectedPrompt: PromptType
-  onSelectPrompt: (prompt: PromptType) => void
+  selectedPrompt: PromptType | ''
+  onSelectPrompt: (prompt: PromptType | '') => void
+  categories?: CategoryConfig[]
 }
 
-const promptOptions: Array<{ value: PromptType; label: string }> = [
-  { value: 'pregrado', label: 'Pregrado' },
-  { value: 'especializacion', label: 'Especialización' },
-  { value: 'maestria', label: 'Maestría' },
-  { value: 'diplomado', label: 'Diplomado' },
-]
+function buildPromptOptions(categories: CategoryConfig[]): Array<{ value: PromptType | ''; label: string; disabled: boolean }> {
+  return [{ value: '', label: 'Selecciona un tipo de prompt', disabled: false }, ...categories.map((category) => ({
+    value: category.key,
+    label: category.enabledForPackage ? category.label : `${category.label} — Pendiente de prompt de materiales`,
+    disabled: !category.enabledForPackage,
+  }))]
+}
 
-function PromptSelector({ selectedPrompt, onSelectPrompt }: PromptSelectorProps) {
+function PromptSelector({ selectedPrompt, onSelectPrompt, categories = CATEGORY_CONFIGS }: PromptSelectorProps) {
+  const promptOptions = buildPromptOptions(categories)
   return (
-    <article className="card">
-      <h2>Tipo de prompt</h2>
-      <p className="card-description">Selecciona el nivel académico para definir el prompt que se usará en la generación.</p>
+    <article className="config-choice-card config-choice-card--prompt prompt-console-card">
+      <div className="config-choice-top">
+        <span className="config-choice-badge">CONFIGURACIÓN</span>
+        <span className="config-choice-step">Nivel</span>
+      </div>
 
-      {/* Select controlado para reflejar siempre el estado actual en el preview. */}
+      <div className="config-choice-content">
+        <h2>Categoría académica</h2>
+        <p>Selecciona la categoría activa. Maestría queda visible, pero bloqueada hasta tener prompt de materiales.</p>
+      </div>
+
       <select
         value={selectedPrompt}
-        onChange={(event) => onSelectPrompt(event.target.value as PromptType)}
-        className="select-input"
+        onChange={(event) => onSelectPrompt(event.target.value as PromptType | '')}
+        className="config-choice-select"
       >
         {promptOptions.map((option) => (
-          <option key={option.value} value={option.value}>
+          <option key={option.value || 'placeholder'} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
         ))}
       </select>
+      <div className="prompt-level-pills" aria-label="Niveles académicos disponibles">
+        {promptOptions.filter((option) => option.value).map((option) => (
+          <span key={option.value} className={option.disabled ? 'is-disabled' : selectedPrompt === option.value ? 'is-active' : ''}>
+            {option.label.replace(' — Próximamente', '')}
+          </span>
+        ))}
+      </div>
     </article>
   )
 }

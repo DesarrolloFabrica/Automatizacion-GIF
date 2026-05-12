@@ -3,7 +3,18 @@ credentials.json
 token_drive.json
 __pycache__/
 *.pyc
-outputs/*.docx
-outputs/*.json
+.venv/
+frontend/node_modules/
+frontend/dist/
+
+# Runtime/generated artifacts
+outputs/
+docker-data/
+jobs/
+entrada_guiones_txt/
+salidas_txt/
+inputs/
+samples/
+notebooks/
+
 .ipynb_checkpoints/
-notebooks/.ipynb_checkpoints/

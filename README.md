@@ -1,217 +1,252 @@
-# Generador semiautomatizado de guiones académicos
+# Automatizacion GIF
 
-Este proyecto toma un sílabo en Word (`.docx`) o PDF (`.pdf`), identifica la información principal de la asignatura, divide el curso en cinco temas y genera cinco documentos base con una estructura homogénea tipo guion editorial.
+Aplicacion para generar materiales academicos con IA a partir de archivos de entrada.
 
-## Archivos principales
+La app tiene tres capas:
 
-- `generate_guiones.py`: script principal para extraer el sílabo y generar los documentos.
-- `prompts/`: carpeta de prompts por nivel academico (`pregrado.md`, `especializacion.md`, `diplomado.md`, `maestria.md`).
-- `notebooks/generador_guiones.ipynb`: flujo en Jupyter para el equipo.
-- `outputs/`: carpeta donde quedan los `.docx` generados.
+- `frontend/`: interfaz web en React + Vite + TypeScript.
+- `backend/`: API FastAPI que recibe archivos, crea jobs y expone estados/descargas.
+- `automation_engine/`: motor Python que lee documentos, llama a OpenAI y genera archivos de salida.
+- `prompts/`: prompts editables usados por el motor.
 
-## Instalación
+## Flujo General
 
-```powershell
-pip install -r requirements.txt
+1. El usuario carga archivos desde la interfaz web o indica una carpeta de Google Drive.
+2. El backend crea un job temporal.
+3. El backend ejecuta un script del motor Python.
+4. El motor lee los archivos fuente, construye el prompt y llama a OpenAI.
+5. Los resultados se guardan temporalmente para descarga o se suben a Drive.
+
+## Estructura Actual
+
+```text
+./
+├── automation_engine/
+│   ├── generate_guiones.py
+│   ├── generate_txt_from_drive.py
+│   ├── generate_txt_from_guiones.py
+│   ├── generate_documentos_academicos.py
+│   ├── generate_pipeline_drive.py
+│   ├── generate_pipeline_local.py
+│   └── repair_generated_docs.py
+├── backend/
+│   ├── main.py
+│   ├── jobs.py
+│   ├── schemas.py
+│   └── storage.py
+├── frontend/
+├── prompts/
+├── requirements.txt
+└── README.md
 ```
 
-Configura la API key como variable de entorno. No la dejes escrita dentro del código.
+## Carpetas de Entrada y Salida
+
+Estas carpetas se eliminaron del repositorio porque no son necesarias como parte fija de la app:
+
+- `inputs/`
+- `entrada_guiones_txt/`
+- `salidas_txt/`
+- `samples/`
+- `jobs/`
+- `outputs/`
+- `notebooks/`
+
+La app web no necesita que esas carpetas existan antes de ejecutarse. Cuando corre un job local, el backend crea automaticamente carpetas temporales bajo:
+
+```text
+outputs/jobs/<job_id>/
+```
+
+Ese directorio es runtime: sirve para guardar insumos subidos, logs, archivos generados y ZIPs mientras el job esta disponible.
+
+## Uso en Nube
+
+Para despliegue en nube, no conviene depender de carpetas persistentes dentro del repo para entradas o salidas.
+
+Recomendado:
+
+- Entradas: subir por HTTP, leer desde Drive o recibirlas desde storage externo.
+- Salidas temporales: usar disco efimero del servidor solo durante el job.
+- Salidas definitivas: subir a Drive, S3, Cloud Storage, base de datos de archivos o devolver un ZIP descargable.
+- Credenciales: configurar variables de entorno o secretos del proveedor cloud.
+
+El backend actual usa `outputs/jobs` como almacenamiento temporal local. Funciona para desarrollo y para un servidor simple, pero en produccion deberia limpiarse periodicamente o reemplazarse por storage externo si se van a conservar resultados.
+
+## Variables de Entorno
+
+Configura:
 
 ```powershell
 $env:OPENAI_API_KEY="TU_API_KEY"
 $env:OPENAI_MODEL="gpt-4o"
 ```
 
-## Prueba sin consumir API
+Para Google Drive, en desarrollo local se usan:
+
+- `credentials.json`
+- `token_drive.json`
+
+Para subir el paquete academico final a Drive se recomienda service account:
 
 ```powershell
-python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --dry-run
+$env:GOOGLE_SERVICE_ACCOUNT_FILE="C:\\ruta\\service-account.json"
 ```
 
-También puedes probar un PDF:
-
-```powershell
-python generate_guiones.py --syllabus "Mi Silabo.pdf" --dry-run
-```
-
-Por defecto el script usa `--nivel auto`: intenta detectar si el silabo corresponde a pregrado, especializacion, diplomado o maestria, y carga el prompt de `prompts/<nivel>.md`.
-
-Si quieres elegir el prompt manualmente, usa `--nivel`:
-
-```powershell
-python generate_guiones.py --syllabus "Silabo Especializacion.docx" --nivel especializacion --dry-run
-python generate_guiones.py --syllabus "Silabo Diplomado.pdf" --nivel diplomado --dry-run
-python generate_guiones.py --syllabus "Silabo Maestria.docx" --nivel maestria --dry-run
-python generate_guiones.py --syllabus "Silabo Pregrado.docx" --nivel pregrado --dry-run
-```
-
-Tambien puedes usar un prompt externo puntual con `--prompt`:
-
-```powershell
-python generate_guiones.py --syllabus "Mi Silabo.docx" --nivel especializacion --prompt "prompts/especializacion.md"
-```
-
-## Generación real
-
-```powershell
-python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --semester "Semestre N°1" --subject "Habilidades Comunicativas"
-```
-
-Ejemplo para especializacion:
-
-```powershell
-python generate_guiones.py --syllabus "Silabo Especializacion.docx" --nivel especializacion
-```
-
-Si el PDF o el sílabo tiene un formato difícil y no detecta los cinco temas, puedes forzarlos manualmente:
-
-```powershell
-python generate_guiones.py --syllabus "Mi Silabo.pdf" --subject "Nombre de la materia" --semester "Semestre N°2" --topics "Tema 1; Tema 2; Tema 3; Tema 4; Tema 5"
-```
-
-El generador crea cada documento largo por secciones. Para cada tema hace varias llamadas a la API: introducción, ejes articuladores, tres ensayos de profundización, conclusiones y bibliografía. Esto evita que el modelo entregue documentos demasiado cortos.
-
-Además, el script valida la extensión mínima de cada sección. Si una sección queda corta, solicita automáticamente una ampliación antes de ensamblar el `.docx`.
-
-La bibliografía se ajusta al nivel seleccionado: pregrado usa 20 a 30 referencias, especializacion 30 a 40, diplomado 15 a 25 y maestria 40 a 55. El generador filtra la bibliografía del sílabo para priorizar fuentes posteriores a 2020 y reescribe la sección si detecta referencias de 2020 o anteriores.
-
-El script genera un archivo por cada tema detectado. Para este sílabo, los temas esperados son:
-
-1. Escucha activa
-2. Comunicación verbal
-3. Comunicación no verbal
-4. Empatía
-5. Asertividad
-
-Los documentos se nombran con el formato:
+Tambien puede configurarse en `.env`:
 
 ```text
-G[numero]_nombre-del-tema.docx
+GOOGLE_SERVICE_ACCOUNT_FILE=credentials/service-account.json
 ```
 
-Ejemplo:
+Comparte la carpeta destino de Drive con el email `client_email` del service account y dale permiso de Editor. El usuario pega el Folder ID en la interfaz; esa carpeta es la raíz académica en Drive (`SYLLABUS`, `CONTENIDOS`, etc.). El ZIP local puede seguir usando la carpeta lógica `PAQUETE_ACADEMICO` solo como empaquetado en archivo.
+
+En nube, esos valores deberian manejarse como secretos, no como archivos versionados.
+
+## Ejecutar Backend
+
+```powershell
+pip install -r requirements.txt
+pip install -r backend/requirements.txt
+cd backend
+uvicorn main:app --reload --port 8000
+```
+
+## Ejecutar Frontend
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+## Ejecutar con Docker
+
+La imagen Docker es monolitica: compila el frontend React y lo sirve desde FastAPI junto con la API en el puerto `8000`.
+
+Construir imagen:
+
+```powershell
+docker build -t automatizacion-gif:latest .
+```
+
+Ejecutar un contenedor:
+
+```powershell
+docker run --rm -p 8000:8000 `
+  -e OPENAI_API_KEY="TU_API_KEY" `
+  -e OPENAI_MODEL="gpt-4o" `
+  -v "${PWD}\outputs:/tmp/automatizacion-gif" `
+  automatizacion-gif:latest
+```
+
+La configuracion anterior de Docker Compose se retiro para evitar mantener dos caminos de ejecucion. El camino oficial es una unica imagen monolitica, lista para ejecutar localmente o desplegar en Cloud Run.
+
+Para Drive con service account, monta credenciales como secreto/volumen y apunta la variable:
+
+```powershell
+docker run --rm -p 8000:8000 `
+  -e OPENAI_API_KEY="TU_API_KEY" `
+  -e GOOGLE_SERVICE_ACCOUNT_FILE="/app/credentials/service-account.json" `
+  -v "${PWD}\credentials:/app/credentials:ro" `
+  -v "${PWD}\outputs:/tmp/automatizacion-gif" `
+  automatizacion-gif:latest
+```
+
+## Branching y Deploy en Cloud Run
+
+La estrategia de ramas es:
+
+- `main`: produccion.
+- `integration`: desarrollo/integracion y despliegue automatico a Cloud Run de integracion.
+
+El workflow `.github/workflows/integration.yml` se llama `integration`. Construye la imagen monolitica, la sube a Artifact Registry y despliega Cloud Run cuando hay push a la rama `integration`.
+
+Configura estas variables en GitHub Actions:
+
+- `GCP_PROJECT_ID`: ID del proyecto GCP.
+- `GCP_REGION`: region de Cloud Run, por ejemplo `us-central1`.
+- `GAR_REPOSITORY`: repositorio Docker de Artifact Registry, por ejemplo `cloud-run`.
+- `CLOUD_RUN_SERVICE`: nombre del servicio de integracion, por ejemplo `automatizacion-gif-integration`.
+- `IMAGE_NAME`: nombre base de la imagen, por ejemplo `automatizacion-gif`.
+- `OPENAI_MODEL`: modelo OpenAI, por ejemplo `gpt-4o`.
+- `CLOUD_RUN_MEMORY`, `CLOUD_RUN_CPU`, `CLOUD_RUN_TIMEOUT`, `CLOUD_RUN_CONCURRENCY`, `CLOUD_RUN_MAX_INSTANCES`: opcionales para dimensionar el servicio.
+- `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT`: opcional si quieres que Cloud Run ejecute con un service account distinto al que usa GitHub para desplegar.
+
+Configura estos secretos en GitHub Actions:
+
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`: recurso completo del provider de Workload Identity Federation.
+- `GCP_SERVICE_ACCOUNT`: email del service account que GitHub Actions impersona para construir y desplegar.
+
+Configura este secreto en Google Secret Manager:
+
+- `OPENAI_API_KEY`: API key de OpenAI. El workflow lo monta en Cloud Run como variable de entorno usando `--set-secrets`.
+
+Autenticacion de Google Drive:
+
+- En Cloud Run no hay login OAuth de usuario en la interfaz. La app se autentica desde el backend con el service account del servicio.
+- El usuario pega el ID de la carpeta Drive en la interfaz.
+- Para que la app pueda leer/crear/actualizar archivos, comparte esa carpeta Drive con el email del service account de Cloud Run y dale permiso de Editor.
+- En local se puede seguir usando `credentials.json` + `token_drive.json` o `GOOGLE_SERVICE_ACCOUNT_FILE`.
+
+## Flujos Disponibles
+
+### Crear Granulos
+
+Endpoint principal:
 
 ```text
-G1_marco-logico.docx
-G2_viabilidad-del-mercado-internacional.docx
+POST /api/jobs
 ```
 
-## Extensión esperada
-
-Cada documento queda diseñado para aproximarse a 20 a 30 páginas, dependiendo del interlineado y formato final de Word. Si un archivo sigue quedando corto, aumenta `--max-tokens` por sección:
+Ejecuta:
 
 ```powershell
-python generate_guiones.py --syllabus "7. Habilidades Comunicativas.docx" --max-tokens 6000
+python -m automation_engine.generate_guiones
 ```
 
-## Flujo 2: generar TXT desde guiones ya creados
+Entrada: un syllabus `.docx`.
 
-Este flujo usa como entrada los guiones `.docx` que ya tengas generados y produce varios archivos `.txt` nuevos usando un prompt específico.
+Salida: documentos `.docx` descargables.
 
-Carpeta de entrada:
+### Crear Materiales Desde Drive
+
+Endpoint principal:
 
 ```text
-entrada_guiones_txt
+POST /api/scripts/jobs
 ```
 
-Carpeta de salida:
+Ejecuta:
+
+```powershell
+python -m automation_engine.generate_pipeline_drive
+```
+
+Entrada: carpeta de Google Drive con granulos fuente.
+
+Salida: TXT y DOCX subidos a Drive.
+
+### Crear Materiales Desde Archivos Locales
+
+Endpoint principal:
 
 ```text
-salidas_txt
+POST /api/scripts/local/jobs
 ```
 
-Coloca en `entrada_guiones_txt` los 4 o 5 guiones `.docx` ya creados. Luego crea el prompt específico en:
-
-```text
-prompts/txt_desde_guiones.md
-```
-
-Prueba sin consumir API:
+Ejecuta:
 
 ```powershell
-python generate_txt_from_guiones.py --dry-run
+python -m automation_engine.generate_pipeline_local
 ```
 
-Generación real:
+Entrada: 4 o 5 archivos `.docx` o `.pdf` subidos desde la interfaz.
 
-```powershell
-python generate_txt_from_guiones.py
-```
+Salida: TXT y DOCX descargables.
 
-Por defecto genera estos 4 TXT:
+## Notas de Mantenimiento
 
-```text
-PDA.txt
-QUIZ 1.txt
-QUIZ 2.txt
-QUIZ 3.txt
-```
-
-Si quieres indicar otros nombres o enfoques para los 4 TXT:
-
-```powershell
-python generate_txt_from_guiones.py --titles "Guion 1; Guion 2; Guion 3; Guion 4"
-```
-
-También puedes cambiar la cantidad:
-
-```powershell
-python generate_txt_from_guiones.py --count 5
-```
-
-## Flujo 3: generar TXT leyendo desde Google Drive
-
-Este flujo usa OAuth con el correo que tiene acceso a la carpeta de Drive. La primera vez abre el navegador para iniciar sesión y autorizar permisos. Luego guarda el acceso en `token_drive.json`.
-
-Archivos necesarios:
-
-```text
-credentials.json
-```
-
-Ese archivo es el OAuth Client JSON descargado desde Google Cloud. Déjalo en la raíz del proyecto, junto a `generate_txt_from_drive.py`.
-
-El script lee únicamente archivos Word `.docx` desde una carpeta de Drive por ID, ignora otros formatos como `.mpr`, crea o reutiliza una subcarpeta llamada `contenido complementario`, y sube allí los TXT generados.
-
-El ID de carpeta sale de la URL de Drive. Ejemplo:
-
-```text
-https://drive.google.com/drive/folders/ID_DE_LA_CARPETA
-```
-
-Prueba sin consumir OpenAI ni subir resultados:
-
-```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --dry-run
-```
-
-Generación real:
-
-```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA"
-```
-
-Por defecto genera o actualiza estos archivos en la subcarpeta `contenido complementario`:
-
-```text
-PDA.txt
-QUIZ 1.txt
-QUIZ 2.txt
-QUIZ 3.txt
-```
-
-Si el programa o la asignatura no se detectan bien desde los Word, indícalos manualmente:
-
-```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --programa "ADMINISTRACIÓN DEPORTIVA" --asignatura "Macroeconomía"
-```
-
-Con nombres/enfoques personalizados:
-
-```powershell
-python generate_txt_from_drive.py --drive-folder-id "ID_DE_LA_CARPETA" --titles "PDA; Quiz 1; Quiz 2; Quiz 3"
-```
-
-## Nota de seguridad
-
-Si una API key fue compartida en un chat o documento, conviene revocarla y crear una nueva desde el panel de OpenAI. Este proyecto espera la key desde `OPENAI_API_KEY` para evitar dejar secretos guardados en archivos.
+- `automation_engine/generate_txt_from_guiones.py` conserva defaults historicos para uso CLI, pero la app web usa rutas temporales generadas por el backend.
+- `automation_engine/generate_documentos_academicos.py` conserva defaults historicos para uso CLI, pero los pipelines web le pasan archivos explicitamente.
+- `outputs/jobs/` se crea en tiempo de ejecucion y esta ignorado por Git.

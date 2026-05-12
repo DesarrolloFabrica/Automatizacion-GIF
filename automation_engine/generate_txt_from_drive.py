@@ -12,14 +12,18 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 try:
+    import google.auth
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
+    from google.oauth2 import service_account
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 except ImportError:  # pragma: no cover
+    google = None
     Request = None
     Credentials = None
+    service_account = None
     InstalledAppFlow = None
     build = None
     MediaFileUpload = None
@@ -30,9 +34,9 @@ try:
 except ImportError:  # pragma: no cover
     OpenAI = None
 
-from generate_guiones import generate_document, word_count
-from generate_txt_from_guiones import (
-    BASE_DIR,
+from automation_engine.generate_guiones import generate_document, word_count
+from automation_engine.generate_txt_from_guiones import (
+    ENGINE_DIR,
     DEFAULT_PROMPT_PATH,
     build_corpus,
     build_user_prompt,
@@ -43,11 +47,14 @@ from generate_txt_from_guiones import (
 )
 
 
+ENGINE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = ENGINE_DIR.parent
 SCOPES = ["https://www.googleapis.com/auth/drive"]
-DEFAULT_CREDENTIALS_PATH = BASE_DIR / "credentials.json"
-DEFAULT_TOKEN_PATH = BASE_DIR / "token_drive.json"
+DEFAULT_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
+DEFAULT_TOKEN_PATH = PROJECT_ROOT / "token_drive.json"
 SUPPORTED_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/pdf": ".pdf",
 }
 
 
@@ -58,6 +65,29 @@ def ensure_google_dependencies() -> None:
 
 def get_drive_service(credentials_path: Path, token_path: Path):
     ensure_google_dependencies()
+    service_account_path = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+        or os.getenv("DRIVE_SERVICE_ACCOUNT_FILE")
+        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    )
+    if service_account_path:
+        path = Path(service_account_path)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        if not path.exists():
+            raise FileNotFoundError(f"No existe el archivo de service account: {path}")
+        if service_account is None:
+            raise RuntimeError("Falta google-auth para service account. Ejecuta: pip install -r requirements.txt")
+        creds = service_account.Credentials.from_service_account_file(str(path), scopes=SCOPES)
+        return build("drive", "v3", credentials=creds)
+
+    if google is not None and not credentials_path.exists() and not token_path.exists():
+        try:
+            creds, _ = google.auth.default(scopes=SCOPES)
+            return build("drive", "v3", credentials=creds)
+        except Exception:
+            pass
+
     creds = None
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
@@ -76,9 +106,12 @@ def get_drive_service(credentials_path: Path, token_path: Path):
 
 
 def list_source_files(service, folder_id: str) -> List[Dict[str, str]]:
+    supported_mimes = " or ".join(
+        f"mimeType = '{mime_type}'" for mime_type in SUPPORTED_MIME_TYPES
+    )
     query = (
         f"'{folder_id}' in parents and trashed = false and "
-        "mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'"
+        f"({supported_mimes})"
     )
     files = []
     page_token = None
