@@ -15,6 +15,9 @@ export type GenerationStatus =
   | 'organizando archivos'
   | 'finalizado'
   | 'error'
+  | 'cancelado'
+  | 'missing_job'
+  | 'recoverable_error'
 
 export interface GranuleTopic {
   id: string
@@ -44,8 +47,8 @@ export interface SyllabusPreviewResponse {
   selectedCourse?: DetectedCourse | null
 }
 
-export type BackendJobStatus = 'queued' | 'running' | 'completed' | 'failed'
-export type PhaseStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+export type BackendJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type PhaseStatus = 'pending' | 'ready' | 'running' | 'completed' | 'failed' | 'cancelled' | 'stale' | 'skipped'
 export type AvailableNextAction =
   | 'generate_granules'
   | 'generate_pipeline_local'

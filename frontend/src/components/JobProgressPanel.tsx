@@ -1,4 +1,4 @@
-import type { CategoryDeliverable, GenerationStatus, GranuleTopic } from '../types/granules'
+import type { AvailableNextAction, CategoryDeliverable, GenerationStatus, GranuleTopic, JobPhaseStatus } from '../types/granules'
 
 const PHASES = [
   { key: 'syllabus', label: 'Syllabus recibido' },
@@ -20,6 +20,10 @@ interface JobProgressPanelProps {
   deliverables?: CategoryDeliverable[]
   categoryLabel?: string
   backendCurrentPhase?: string
+  phaseStatus?: JobPhaseStatus | null
+  availableNextAction?: AvailableNextAction
+  uiState?: string
+  message?: string
   onRetry: () => void
 }
 
@@ -53,6 +57,7 @@ function inferCurrentPhase(status: GenerationStatus, logs: string[]): string {
 }
 
 function mapBackendPhase(backendCurrentPhase?: string): string | null {
+  if (backendCurrentPhase === 'uploadDrive') return 'package'
   if (backendCurrentPhase === 'completed') return 'package'
   if (backendCurrentPhase === 'specializationMaterials') return 'materials'
   if (backendCurrentPhase === 'pipelineLocal') return 'documents'
@@ -162,6 +167,21 @@ function stepClass(stepKey: string, currentPhase: string, isError: boolean): str
   return 'is-pending'
 }
 
+function phaseFromStatus(phaseStatus?: JobPhaseStatus | null, availableNextAction?: AvailableNextAction): string | null {
+  if (!phaseStatus) return null
+  if (phaseStatus.specializationMaterials.status === 'running') return 'materials'
+  if (phaseStatus.pipelineLocal.status === 'running') return 'documents'
+  if (phaseStatus.granules.status === 'running') return 'granules'
+  if (phaseStatus.specializationMaterials.status === 'failed' || phaseStatus.specializationMaterials.status === 'cancelled') return 'materials'
+  if (phaseStatus.pipelineLocal.status === 'failed' || phaseStatus.pipelineLocal.status === 'cancelled') return 'documents'
+  if (phaseStatus.granules.status === 'failed' || phaseStatus.granules.status === 'cancelled') return 'granules'
+  if (availableNextAction === 'download_package') return 'package'
+  if (phaseStatus.specializationMaterials.status === 'completed') return 'package'
+  if (phaseStatus.pipelineLocal.status === 'completed') return 'documents'
+  if (phaseStatus.granules.status === 'completed') return 'granules'
+  return null
+}
+
 function MaterialList({ currentMaterial, deliverables }: { currentMaterial: string; deliverables: CategoryDeliverable[] }) {
   return (
     <div className="job-material-list">
@@ -186,15 +206,22 @@ function JobProgressPanel({
   deliverables = [],
   categoryLabel = 'la categoría',
   backendCurrentPhase,
+  phaseStatus,
+  availableNextAction,
+  uiState,
+  message,
   onRetry,
 }: JobProgressPanelProps) {
   const parsed = parseProgress(logs, granules)
-  const hasStarted = isGenerating || logs.length > 0 || status !== 'pendiente' || Boolean(backendCurrentPhase && backendCurrentPhase !== 'pending')
-  const currentPhase = hasStarted ? mapBackendPhase(backendCurrentPhase) ?? inferCurrentPhase(status, logs) : 'idle'
-  const latestLog = hasStarted ? getLatestRelevantLog(logs) : 'Listo para iniciar. Carga o valida el syllabus y ejecuta el paquete completo.'
+  const hasStarted = isGenerating || logs.length > 0 || status !== 'pendiente' || Boolean(backendCurrentPhase && backendCurrentPhase !== 'pending') || Boolean(phaseStatus)
+  const currentPhase = hasStarted ? phaseFromStatus(phaseStatus, availableNextAction) ?? mapBackendPhase(backendCurrentPhase) ?? inferCurrentPhase(status, logs) : 'idle'
+  const latestLog = message || (hasStarted ? getLatestRelevantLog(logs) : 'Listo para iniciar. Carga o valida el syllabus y avanza por pasos.')
   const progressPercent = calculateProgressPercent(currentPhase, parsed.materialsSaved, totalMaterialsExpected, isError, hasStarted)
   const currentMaterialName = parsed.currentMaterial ? deliverables.find((material) => material.nn === parsed.currentMaterial)?.name.replaceAll('_', ' ').toLowerCase() ?? '' : ''
-  const isCompleted = status === 'finalizado'
+  const isCancelled = status === 'cancelado' || uiState === 'cancelled'
+  const isMissing = status === 'missing_job' || uiState === 'missing_job'
+  const isRecoverable = status === 'recoverable_error' || uiState === 'recoverable_error'
+  const isCompleted = status === 'finalizado' || availableNextAction === 'download_package'
   const completedTitle = currentPhase === 'package'
     ? 'Paquete listo para descargar'
     : currentPhase === 'documents'
@@ -202,12 +229,12 @@ function JobProgressPanel({
       : 'Gránulos listos para revisar'
 
   return (
-    <section className={`job-progress-panel ${isError ? 'is-error' : ''} ${isCompleted ? 'is-complete' : ''}`}>
+    <section className={`job-progress-panel ${isError || isMissing || isRecoverable ? 'is-error' : ''} ${isCompleted ? 'is-complete' : ''}`}>
       <div className="job-progress-header">
         <div>
           <span className="job-progress-kicker">ESTADO DEL PAQUETE</span>
-          <h3>{isError ? 'Generación detenida' : isCompleted ? completedTitle : isGenerating ? 'Sistema procesando' : granules.length > 0 ? 'Syllabus listo' : 'Listo para iniciar'}</h3>
-          <p>{isError ? 'Revisa el último evento y vuelve a intentar.' : isCompleted ? 'Los entregables ya están disponibles.' : isGenerating ? 'La fase activa se actualiza con los eventos del job.' : 'Sin progreso hasta iniciar un job real.'}</p>
+          <h3>{isMissing ? 'Proceso no disponible' : isRecoverable ? 'Seguimiento detenido' : isCancelled ? 'Proceso cancelado' : isError ? 'Generación detenida' : isCompleted ? completedTitle : isGenerating ? 'Sistema procesando' : granules.length > 0 ? 'Syllabus listo' : 'Listo para iniciar'}</h3>
+          <p>{isMissing ? 'El job ya no existe o el backend se reinició.' : isRecoverable ? 'No se seguirá consultando hasta iniciar o validar otro proceso.' : isCancelled ? 'Puedes iniciar uno nuevo o continuar desde una fase válida.' : isError ? 'Revisa el último evento y vuelve a intentar.' : isCompleted ? 'Los entregables ya están disponibles.' : isGenerating ? 'La fase activa se actualiza con los eventos del job.' : 'Sin progreso hasta iniciar un job real.'}</p>
         </div>
         <div className="job-progress-percent">{progressPercent}%</div>
       </div>
@@ -290,7 +317,7 @@ function JobProgressPanel({
         </details>
       )}
 
-      {isError && (
+      {isError && !isMissing && !isCancelled && (
         <button type="button" className="secondary-button link-button" onClick={onRetry}>
           Intentar nuevamente
         </button>

@@ -1838,6 +1838,8 @@ h2 {
 .file-input-label,
 .primary-button,
 .secondary-button {
+  position: relative;
+  overflow: hidden;
   border: 0;
   border-radius: 10px;
   padding: 0.65rem 1rem;
@@ -1888,6 +1890,7 @@ h2 {
 .primary-button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+  filter: grayscale(0.12);
 }
 
 .preview-grid {
@@ -3504,6 +3507,7 @@ h2 {
   transform: translateX(-120%);
   background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
   transition: transform 0.52s ease;
+  pointer-events: none;
 }
 
 .flow-card-button:hover::after,
@@ -4830,6 +4834,15 @@ h2 {
   transform: translateY(-1px);
   border-color: rgba(49,87,213,0.24);
   background: rgba(239,246,255,0.72);
+}
+
+.console-advanced-action {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.console-advanced-action .secondary-button {
+  width: 100%;
 }
 
 .syllabus-preview-rows {

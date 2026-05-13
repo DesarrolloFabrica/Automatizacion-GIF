@@ -8,9 +8,13 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zipfile import ZIP_DEFLATED, ZipFile
 import re
 import unicodedata
+
+if TYPE_CHECKING:
+    from job_store_gcs import GCSFileStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -427,7 +431,7 @@ def update_phase_status(job_id: str, phase_key: str, *, status: str | None = Non
         if status == "running":
             phase["startedAt"] = _utc_now()
             phase["finishedAt"] = None
-        if status in {"completed", "failed", "skipped"}:
+        if status in {"completed", "failed", "skipped", "cancelled"}:
             phase["finishedAt"] = _utc_now()
     if files is not None:
         phase["files"] = files
@@ -494,6 +498,86 @@ def create_full_outputs_zip(job_id: str) -> Path:
     with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zip_file:
         for file_path, arcname in package_files:
             zip_file.write(file_path, arcname=arcname)
+
+    return zip_path
+
+
+def _unique_zip_name(used: set[str], arcname: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_./-]+", "_", arcname).replace("-", "_")
+    folder, name = safe.rsplit("/", 1) if "/" in safe else ("", safe)
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    candidate = f"{folder}/{stem}{suffix}" if folder else f"{stem}{suffix}"
+    counter = 2
+    while candidate in used:
+        numbered = f"{stem}_{counter}{suffix}"
+        candidate = f"{folder}/{numbered}" if folder else numbered
+        counter += 1
+    used.add(candidate)
+    return candidate
+
+
+def _granule_code_from_name(path: Path, fallback_index: int) -> str:
+    match = re.search(r"\bG([1-5])\b|^G([1-5])[_\-. ]", path.stem, re.IGNORECASE)
+    if match:
+        return f"G{match.group(1) or match.group(2)}".upper()
+    return f"G{fallback_index}"
+
+
+def _short_pipeline_arcname(path: Path, fallback_index: int) -> str:
+    normalized = re.sub(r"[^A-Z0-9]+", "_", path.stem.upper()).strip("_")
+    granule_match = re.search(r"\bG([1-5])\b", normalized)
+    granule = f"G{granule_match.group(1)}" if granule_match else f"G{fallback_index}"
+    if "PDA" in normalized:
+        kind = "PDA"
+    elif "QUIZ" in normalized:
+        quiz_match = re.search(r"QUIZ_?([1-3])", normalized)
+        kind = f"QUIZ{quiz_match.group(1)}" if quiz_match else "QUIZ"
+    elif "PRESENT" in normalized:
+        kind = "PRESENTACION"
+    elif "FORO" in normalized:
+        kind = "FORO"
+    elif "ACA" in normalized:
+        kind = "ACA"
+    else:
+        kind = f"ARCHIVO{fallback_index}"
+    return f"TXT_DOCX/{granule}_{kind}{path.suffix.lower()}"
+
+
+def _short_material_arcname(path: Path, fallback_index: int) -> str:
+    parts = path.parts
+    haystack = "_".join(parts).upper()
+    granule_match = re.search(r"\bG([1-5])\b|G([1-5])_", haystack)
+    material_match = re.search(r"(?:^|_)(0[2-7])(?:_|\b)", path.name.upper())
+    granule = f"G{granule_match.group(1) or granule_match.group(2)}" if granule_match else f"G{fallback_index}"
+    material = material_match.group(1) if material_match else f"{fallback_index:02d}"
+    return f"Materiales/{granule}_{material}{path.suffix.lower()}"
+
+
+def create_local_full_outputs_zip(job_id: str) -> Path:
+    """ZIP local compatible con Windows: nombres internos cortos, sin tocar archivos originales ni Drive."""
+    paths = get_job_paths(job_id)
+    zip_path = paths["content_root"] / "full_outputs_local_safe.zip"
+    used: set[str] = set()
+
+    with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zip_file:
+        syllabus_path = paths["input_dir"] / "syllabus.docx"
+        if syllabus_path.is_file():
+            zip_file.write(syllabus_path, arcname=_unique_zip_name(used, "Syllabus/syllabus.docx"))
+
+        for index, docx_file in enumerate(sorted(paths["generated_dir"].glob("*.docx"), key=lambda item: item.name.lower()), start=1):
+            code = _granule_code_from_name(docx_file, index)
+            zip_file.write(docx_file, arcname=_unique_zip_name(used, f"Granulos/{code}.docx"))
+
+        for index, output_file in enumerate(list_pipeline_local_files(job_id), start=1):
+            zip_file.write(output_file, arcname=_unique_zip_name(used, _short_pipeline_arcname(output_file, index)))
+
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            material_files = sorted(materials_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materials_dir)).lower())
+            for index, material_file in enumerate(material_files, start=1):
+                rel = material_file.relative_to(materials_dir)
+                zip_file.write(material_file, arcname=_unique_zip_name(used, _short_material_arcname(rel, index)))
 
     return zip_path
 
@@ -694,22 +778,23 @@ def academic_package_filename(program_name: str | None = None) -> str:
 def create_phase_zip(job_id: str, phase: str) -> Path:
     paths = get_job_paths(job_id)
     zip_path = paths["content_root"] / f"{phase}.zip"
+    used: set[str] = set()
 
     with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zip_file:
         if phase == "granules":
-            for docx_file in sorted(paths["generated_dir"].glob("*.docx")):
-                zip_file.write(docx_file, arcname=f"generated/{docx_file.name}")
+            for index, docx_file in enumerate(sorted(paths["generated_dir"].glob("*.docx"), key=lambda item: item.name.lower()), start=1):
+                code = _granule_code_from_name(docx_file, index)
+                zip_file.write(docx_file, arcname=_unique_zip_name(used, f"Granulos/{code}.docx"))
         elif phase == "pipeline_local":
-            for output_file in sorted(paths["pipeline_local_dir"].iterdir()) if paths["pipeline_local_dir"].exists() else []:
+            for index, output_file in enumerate(sorted(paths["pipeline_local_dir"].iterdir(), key=lambda item: item.name.lower()) if paths["pipeline_local_dir"].exists() else [], start=1):
                 if output_file.is_file() and output_file.suffix.lower() in {".docx", ".txt"}:
-                    zip_file.write(output_file, arcname=f"pipeline_local/{output_file.name}")
+                    zip_file.write(output_file, arcname=_unique_zip_name(used, _short_pipeline_arcname(output_file, index)))
         elif phase in {"materiales_especializacion", "materials"}:
-            category = get_category(get_job_category(job_id))
             materials_dir = get_materials_dir(job_id)
-            for granule_dir in sorted(materials_dir.iterdir()) if materials_dir.exists() else []:
-                if granule_dir.is_dir():
-                    for docx_file in sorted(granule_dir.glob("*.docx")):
-                        zip_file.write(docx_file, arcname=f"{category.materials_dir}/{granule_dir.name}/{docx_file.name}")
+            material_files = sorted(materials_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materials_dir)).lower()) if materials_dir.exists() else []
+            for index, docx_file in enumerate(material_files, start=1):
+                rel = docx_file.relative_to(materials_dir)
+                zip_file.write(docx_file, arcname=_unique_zip_name(used, _short_material_arcname(rel, index)))
         else:
             raise ValueError(f"Fase no soportada: {phase}")
 
@@ -756,3 +841,86 @@ def create_outputs_zip(job_id: str, suffixes: tuple[str, ...] = (".docx", ".txt"
         for file_path in files:
             zip_file.write(file_path, arcname=file_path.name)
     return paths["zip_path"]
+
+
+# ──────────────────────────────────────────────
+# GCS Sync helpers (Fase 2: persistencia opcional)
+# ──────────────────────────────────────────────
+
+_gcs_store_cache: GCSFileStore | None = None
+
+
+def _get_gcs_store() -> GCSFileStore:
+    global _gcs_store_cache
+    if _gcs_store_cache is None:
+        from job_store_factory import get_gcs_store
+        _gcs_store_cache = get_gcs_store()
+    return _gcs_store_cache
+
+
+def sync_phase_files_to_gcs(job_id: str, phase_key: str) -> list[str]:
+    """Sube archivos de una fase completada a GCS.
+
+    Retorna lista de URLs subidas (vacia si GCS no esta disponible).
+    """
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return []
+
+    paths = get_job_paths(job_id)
+    uploaded = []
+
+    phase_dir_map = {
+        "granules": ("generated", "generated"),
+        "pipelineLocal": ("pipeline_local_dir", "pipeline_local"),
+        "specializationMaterials": ("materials", "materials"),
+    }
+
+    if phase_key not in phase_dir_map:
+        return []
+
+    dir_attr, gcs_prefix = phase_dir_map[phase_key]
+    local_dir = paths.get(dir_attr)
+    if local_dir is None or not local_dir.exists():
+        return []
+
+    uploaded = gcs.upload_directory(job_id, local_dir, gcs_prefix)
+    if uploaded:
+        LOGGER.info("GCS sync phase %s: %d archivos subidos para job %s", phase_key, len(uploaded), job_id)
+    return uploaded
+
+
+def sync_syllabus_to_gcs(job_id: str) -> str | None:
+    """Sube el syllabus original a GCS."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    paths = get_job_paths(job_id)
+    syllabus_path = paths["input_dir"] / "syllabus.docx"
+    if not syllabus_path.exists():
+        return None
+    return gcs.upload_file(job_id, syllabus_path, "input/syllabus.docx")
+
+
+def sync_zip_to_gcs(job_id: str, zip_path: Path, zip_name: str) -> str | None:
+    """Sube un ZIP generado a GCS."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    if not zip_path.exists():
+        return None
+    return gcs.upload_file(job_id, zip_path, f"zips/{zip_name}")
+
+
+def download_file_from_gcs(job_id: str, gcs_path: str, local_path: Path) -> bool:
+    """Descarga un archivo desde GCS a ruta local (fallback para descargas)."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return False
+    return gcs.download_file(job_id, gcs_path, local_path)
+
+
+def file_exists_in_gcs(job_id: str, gcs_path: str) -> bool:
+    """Verifica si un archivo existe en GCS."""
+    gcs = _get_gcs_store()
+    return gcs.file_exists(job_id, gcs_path)

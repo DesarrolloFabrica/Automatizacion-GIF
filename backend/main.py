@@ -38,10 +38,13 @@ from storage import (
     collect_partial_package_files_for_drive_phase,
     create_docs_zip,
     create_full_outputs_zip,
+    create_local_full_outputs_zip,
     create_outputs_zip,
     create_phase_zip,
     default_drive_phase_status,
+    download_file_from_gcs,
     ensure_job_dirs,
+    file_exists_in_gcs,
     get_available_next_action,
     get_current_phase,
     get_drive_sync_snapshot,
@@ -65,6 +68,9 @@ from storage import (
     save_local_granules,
     save_syllabus_file,
     set_drive_phase_record,
+    sync_phase_files_to_gcs,
+    sync_syllabus_to_gcs,
+    sync_zip_to_gcs,
     update_phase_status,
 )
 from drive_service import (  # noqa: E402
@@ -295,21 +301,22 @@ def run_phased_drive_sync(job_id: str, drive_phase: str) -> None:
 
 
 def _phase_complete_callback(phase_key: str, files_fn):
-    """Tras terminar la generación local de una fase: sube a Drive y luego marca la fase completada.
-
-    Así los archivos solo aparecen en Drive cuando esa fase ya terminó de generarse (no durante el proceso).
-    """
+    """Tras terminar la generacion local de una fase: sube a Drive, sync a GCS, luego marca la fase completada."""
 
     def _callback(job_id: str, success: bool) -> None:
         refresh_phase_files(job_id)
         if success:
-            append_log(job_id, "=== Sincronización con Drive: la subida ocurre solo después de terminar esta fase en local ===")
+            append_log(job_id, "=== Sincronizacion con Drive: la subida ocurre solo despues de terminar esta fase en local ===")
             if phase_key == "granules":
                 run_phased_drive_sync(job_id, "granules")
             elif phase_key == "pipelineLocal":
                 run_phased_drive_sync(job_id, "activities")
             elif phase_key == "specializationMaterials":
                 run_phased_drive_sync(job_id, "resources")
+
+            # Fase 2: persistir archivos de fase en GCS
+            sync_phase_files_to_gcs(job_id, phase_key)
+
         update_phase_status(job_id, phase_key, status="completed" if success else "failed", files=files_fn(job_id))
 
     return _callback
@@ -558,6 +565,9 @@ async def create_generation_job(
     paths = ensure_job_dirs(job_id)
     save_syllabus_file(job_id, syllabus.file)
 
+    # Fase 2: persistir syllabus en GCS si esta configurado
+    sync_syllabus_to_gcs(job_id)
+
     job_kind = "granules_academic_package"
 
     create_job(job_id=job_id, log_path=paths["log_path"], generated_dir=paths["generated_dir"], job_kind=job_kind)
@@ -698,6 +708,10 @@ def cancel_generation_job(job_id: str) -> JobCancelResponse:
     if job.job_kind != "granules_academic_package":
         raise HTTPException(status_code=400, detail="Este endpoint solo aplica a jobs de paquete académico.")
     terminated = terminate_job_subprocess(job_id)
+    phase_status = read_phase_status(job_id)
+    for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive"):
+        if phase_status.get(phase_key, {}).get("status") == "running":
+            update_phase_status(job_id, phase_key, status="cancelled", files=phase_status.get(phase_key, {}).get("files", []))
     append_log(job_id, "=== Cancelación solicitada por el usuario ===")
     msg = (
         "Proceso local detenido. Puedes reanudar más tarde desde la misma carpeta del job si las fases siguen pendientes."
@@ -876,7 +890,7 @@ def retry_materials_phase_endpoint(job_id: str) -> JobCreateResponse:
 @app.get("/api/jobs/{job_id}/files/{filename}")
 def download_generated_file(job_id: str, filename: str) -> FileResponse:
     if "/" in filename or "\\" in filename:
-        raise HTTPException(status_code=400, detail="Nombre de archivo inválido.")
+        raise HTTPException(status_code=400, detail="Nombre de archivo invalido.")
 
     job = get_job(job_id)
     if not job:
@@ -891,6 +905,22 @@ def download_generated_file(job_id: str, filename: str) -> FileResponse:
         matches = [path for path in materials_dir.glob(f"*/{filename}") if path.is_file()]
         if matches:
             file_path = matches[0]
+
+    # Fallback a GCS si el archivo no existe localmente
+    if not file_path.exists() or not file_path.is_file():
+        gcs_paths = [
+            f"generated/{filename}",
+            f"pipeline_local/{filename}",
+        ]
+        # Buscar en materiales
+        for gcs_prefix in ("materials",):
+            gcs_path = f"{gcs_prefix}/{filename}"
+            if file_exists_in_gcs(job_id, gcs_path):
+                tmp_path = paths["state_dir"] / "gcs_fallback" / filename
+                if download_file_from_gcs(job_id, gcs_path, tmp_path):
+                    file_path = tmp_path
+                    break
+
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Archivo no encontrado.")
 
@@ -1130,13 +1160,21 @@ def download_all_generated_files(job_id: str) -> FileResponse:
 
     if job.job_kind == "granules_academic_package":
         try:
-            zip_path = create_full_outputs_zip(job_id)
+            zip_path = create_local_full_outputs_zip(job_id)
         except AcademicPackageError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         package_name = academic_package_filename(infer_program_name_for_package(job_id))
+
+        # Fase 2: persistir ZIP en GCS
+        sync_zip_to_gcs(job_id, zip_path, package_name)
+
         return FileResponse(path=zip_path, filename=package_name, media_type="application/zip")
 
     zip_path = create_docs_zip(job_id)
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, f"granulos_{job_id}.zip")
+
     return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
 
 
@@ -1267,8 +1305,12 @@ def upload_package_to_drive(
 def download_granules_phase(job_id: str) -> FileResponse:
     _ensure_job_exists(job_id)
     if not list_generated_docx(job_id):
-        raise HTTPException(status_code=404, detail="No hay gránulos para descargar.")
+        raise HTTPException(status_code=404, detail="No hay granulos para descargar.")
     zip_path = create_phase_zip(job_id, "granules")
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, "granules.zip")
+
     return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
 
 
@@ -1276,8 +1318,12 @@ def download_granules_phase(job_id: str) -> FileResponse:
 def download_pipeline_local_phase(job_id: str) -> FileResponse:
     _ensure_job_exists(job_id)
     if not list_pipeline_local_files(job_id):
-        raise HTTPException(status_code=404, detail="No hay archivos TXT/DOCX académicos para descargar.")
+        raise HTTPException(status_code=404, detail="No hay archivos TXT/DOCX academicos para descargar.")
     zip_path = create_phase_zip(job_id, "pipeline_local")
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, "pipeline_local.zip")
+
     return FileResponse(path=zip_path, filename=f"pipeline_local_{job_id}.zip", media_type="application/zip")
 
 
@@ -1293,6 +1339,10 @@ def download_materials_phase(job_id: str) -> FileResponse:
     if not list_material_files(job_id):
         raise HTTPException(status_code=404, detail=f"No hay materiales de {category.label} para descargar.")
     zip_path = create_phase_zip(job_id, "materials")
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, "materials.zip")
+
     return FileResponse(path=zip_path, filename=f"{category.materials_dir}_{job_id}.zip", media_type="application/zip")
 
 
