@@ -31,9 +31,9 @@ class GCSFileStore:
             from google.cloud import storage
             self._client = storage.Client()
             self._bucket = self._client.bucket(self._bucket_name)
-            LOGGER.info("GCSFileStore inicializado con bucket: %s", self._bucket_name)
+            LOGGER.info("GCS_BUCKET detectado: %s — GCSFileStore inicializado", self._bucket_name)
         except Exception as exc:
-            LOGGER.warning("No se pudo inicializar GCSFileStore: %s", exc)
+            LOGGER.warning("No se pudo inicializar GCSFileStore para bucket %s: %s", self._bucket_name, exc)
             self._client = None
             self._bucket = None
 
@@ -59,7 +59,7 @@ class GCSFileStore:
             LOGGER.info("GCS upload: %s -> gs://%s/%s", local.name, self._bucket_name, blob_path)
             return f"gs://{self._bucket_name}/{blob_path}"
         except Exception as exc:
-            LOGGER.error("GCS upload error: %s", exc)
+            LOGGER.error("GCS upload error para %s: %s", gcs_path, exc)
             return None
 
     def download_file(self, job_id: str, gcs_path: str, local_path: Path | str) -> bool:
@@ -166,6 +166,7 @@ class GCSFileStore:
 
         Returns:
             Lista de URLs de los archivos subidos.
+            No falla toda la operacion si un archivo individual falla.
         """
         if not self.is_available:
             return []
@@ -173,6 +174,7 @@ class GCSFileStore:
         if not local.exists() or not local.is_dir():
             return []
         uploaded = []
+        failed = []
         for file_path in sorted(local.rglob("*")):
             if file_path.is_file():
                 relative = file_path.relative_to(local)
@@ -180,4 +182,8 @@ class GCSFileStore:
                 url = self.upload_file(job_id, file_path, gcs_path)
                 if url:
                     uploaded.append(url)
+                else:
+                    failed.append(gcs_path)
+        if failed:
+            LOGGER.warning("GCS upload_directory: %d archivos fallaron para job %s: %s", len(failed), job_id, failed[:5])
         return uploaded
