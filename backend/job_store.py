@@ -11,7 +11,6 @@ class JobStore(ABC):
 
     Implementaciones:
     - LocalDiskJobStore: desarrollo local (JSON en disco)
-    - FirestoreJobStore: produccion (fase futura)
     """
 
     @abstractmethod

@@ -71,6 +71,9 @@ from storage import (
     sync_phase_files_to_gcs,
     sync_syllabus_to_gcs,
     sync_zip_to_gcs,
+    sync_metadata_to_gcs,
+    reconstruct_job_from_gcs,
+    cleanup_old_gcs_jobs,
     update_phase_status,
 )
 from drive_service import (  # noqa: E402
@@ -318,6 +321,9 @@ def _phase_complete_callback(phase_key: str, files_fn):
             sync_phase_files_to_gcs(job_id, phase_key)
 
         update_phase_status(job_id, phase_key, status="completed" if success else "failed", files=files_fn(job_id))
+
+        # Fase 3: persistir metadata en GCS para recovery
+        sync_metadata_to_gcs(job_id)
 
     return _callback
 
@@ -673,20 +679,49 @@ def retry_granules_generation(job_id: str) -> JobCreateResponse:
 @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str) -> JobStatusResponse:
     job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    is_academic = job is not None and job.job_kind == "granules_academic_package"
 
-    phase_status = refresh_phase_files(job_id) if job.job_kind == "granules_academic_package" else read_phase_status(job_id)
-    files = list_all_job_files(job_id) if job.job_kind == "granules_academic_package" else job.files
+    if job is None:
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state is None:
+            raise HTTPException(status_code=404, detail="Job no encontrado.")
+        return _build_response_from_gcs_state(job_id, gcs_state)
 
-    drive_sync = get_drive_sync_snapshot(job.job_id) if job.job_kind == "granules_academic_package" else None
-    category_key = get_job_category(job.job_id) if job.job_kind == "granules_academic_package" else None
+    if is_academic:
+        phase_status = refresh_phase_files(job_id)
+        files = list_all_job_files(job_id)
+        drive_sync = get_drive_sync_snapshot(job.job_id)
+        category_key = get_job_category(job.job_id)
+        meta = read_job_metadata(job_id)
+    else:
+        phase_status = read_phase_status(job_id)
+        files = job.files
+        drive_sync = None
+        category_key = None
+        meta = {}
 
-    # Metadata del syllabus desde job_metadata.json
-    meta = read_job_metadata(job_id) if job.job_kind == "granules_academic_package" else {}
     syllabus_original_name = meta.get("syllabusOriginalName")
     syllabus_stored_name = "syllabus.docx" if syllabus_original_name else None
     syllabus_gcs_path = f"jobs/{job_id}/input/syllabus.docx" if syllabus_original_name else None
+
+    if is_academic and not syllabus_original_name:
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state:
+            syllabus_original_name = gcs_state.get("syllabus_original_name")
+            syllabus_stored_name = gcs_state.get("syllabus_stored_name") or syllabus_stored_name
+            syllabus_gcs_path = gcs_state.get("syllabus_gcs_path") or syllabus_gcs_path
+            if not category_key:
+                category_key = gcs_state.get("category")
+
+    if is_academic and not phase_status.get("granules"):
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state:
+            phase_status = gcs_state["phase_status"]
+
+    if is_academic and not files:
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state:
+            files = gcs_state["files"] or job.files
 
     return JobStatusResponse(
         jobId=job.job_id,
@@ -702,6 +737,38 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         availableNextAction=get_available_next_action(phase_status, job.status),
         phaseStatus=phase_status,
         driveSync=drive_sync,
+        categoryKey=category_key,
+        syllabusOriginalName=syllabus_original_name,
+        syllabusStoredName=syllabus_stored_name,
+        syllabusGcsPath=syllabus_gcs_path,
+    )
+
+
+def _build_response_from_gcs_state(job_id: str, gcs_state: dict) -> JobStatusResponse:
+    """Construye JobStatusResponse desde estado reconstruido de GCS."""
+    phase_status = gcs_state["phase_status"]
+    files = gcs_state["files"]
+    status = gcs_state["status"]
+    progress_step = gcs_state["progress_step"]
+    category_key = gcs_state.get("category")
+    syllabus_original_name = gcs_state.get("syllabus_original_name")
+    syllabus_stored_name = gcs_state.get("syllabus_stored_name")
+    syllabus_gcs_path = gcs_state.get("syllabus_gcs_path")
+
+    return JobStatusResponse(
+        jobId=job_id,
+        status=status,
+        progressStep=progress_step,
+        logs=gcs_state.get("logs", []),
+        files=files,
+        granulesStatus=phase_status["granules"]["status"],
+        pipelineLocalStatus=phase_status["pipelineLocal"]["status"],
+        specializationMaterialsStatus=phase_status["specializationMaterials"]["status"],
+        uploadDriveStatus=phase_status.get("uploadDrive", {"status": "pending"})["status"],
+        currentPhase=get_current_phase(phase_status),
+        availableNextAction=get_available_next_action(phase_status, status),
+        phaseStatus=phase_status,
+        driveSync=None,
         categoryKey=category_key,
         syllabusOriginalName=syllabus_original_name,
         syllabusStoredName=syllabus_stored_name,
@@ -1353,6 +1420,21 @@ def download_materials_phase(job_id: str) -> FileResponse:
     sync_zip_to_gcs(job_id, zip_path, "materials.zip")
 
     return FileResponse(path=zip_path, filename=f"{category.materials_dir}_{job_id}.zip", media_type="application/zip")
+
+
+@app.post("/api/admin/cleanup-old-jobs")
+def cleanup_old_jobs(max_age_hours: int = 48) -> dict:
+    """Elimina jobs de GCS mas antiguos que max_age_hours.
+
+    Solo elimina archivos del bucket, no metadata local.
+    """
+    validate_required_api_key()
+    deleted = cleanup_old_gcs_jobs(max_age_hours=max_age_hours)
+    return {
+        "deletedJobs": deleted,
+        "count": len(deleted),
+        "maxAgeHours": max_age_hours,
+    }
 
 
 @app.get("/", include_in_schema=False)

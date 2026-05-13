@@ -135,7 +135,6 @@ def save_job_metadata(
     if drive_parent_folder_id:
         pid = drive_parent_folder_id.strip()
         payload["driveParentFolderId"] = pid
-        # Raíz estable del paquete en Drive (no sobrescribir con subcarpetas en merges posteriores).
         payload["driveWorkspaceFolderId"] = pid
     effective_sync = drive_phased_sync if drive_phased_sync is not None else bool(drive_parent_folder_id)
     if effective_sync and payload.get("driveParentFolderId"):
@@ -949,3 +948,261 @@ def file_exists_in_gcs(job_id: str, gcs_path: str) -> bool:
     """Verifica si un archivo existe en GCS."""
     gcs = _get_gcs_store()
     return gcs.file_exists(job_id, gcs_path)
+
+
+# ──────────────────────────────────────────────
+# GCS State Reconstruction (Fase 3: fuente persistente)
+# ──────────────────────────────────────────────
+
+def list_gcs_job_files(job_id: str) -> list[str]:
+    """Lista todos los archivos de un job en GCS.
+
+    Retorna lista de paths relativos al prefijo jobs/{job_id}/.
+    """
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return []
+    return gcs.list_files(job_id)
+
+
+def sync_metadata_to_gcs(job_id: str) -> bool:
+    """Sube job_metadata.json y phase_status.json a GCS para persistencia."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return False
+
+    paths = get_job_paths(job_id)
+    uploaded = 0
+
+    meta_path = paths["metadata_path"]
+    if meta_path.exists():
+        url = gcs.upload_file(job_id, meta_path, "metadata/job_metadata.json")
+        if url:
+            uploaded += 1
+
+    ps_path = paths["phase_status_path"]
+    if ps_path.exists():
+        url = gcs.upload_file(job_id, ps_path, "metadata/phase_status.json")
+        if url:
+            uploaded += 1
+
+    if uploaded > 0:
+        LOGGER.info("GCS sync metadata: %d archivos subidos para job %s", uploaded, job_id)
+    return uploaded > 0
+
+
+def download_metadata_from_gcs(job_id: str) -> dict | None:
+    """Descarga job_metadata.json desde GCS a ruta local.
+
+    Retorna el dict de metadata o None si no existe en GCS.
+    """
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+
+    paths = get_job_paths(job_id)
+    local_meta = paths["metadata_path"]
+
+    if gcs.download_file(job_id, "metadata/job_metadata.json", local_meta):
+        LOGGER.info("GCS download metadata: job_metadata.json restaurado para job %s", job_id)
+        return _read_json_or_none(local_meta)
+    return None
+
+
+def download_phase_status_from_gcs(job_id: str) -> dict | None:
+    """Descarga phase_status.json desde GCS a ruta local.
+
+    Retorna el dict de phase_status o None si no existe en GCS.
+    """
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+
+    paths = get_job_paths(job_id)
+    local_ps = paths["phase_status_path"]
+
+    if gcs.download_file(job_id, "metadata/phase_status.json", local_ps):
+        LOGGER.info("GCS download phase_status: phase_status.json restaurado para job %s", job_id)
+        return _read_json_or_none(local_ps)
+    return None
+
+
+def infer_phase_status_from_gcs(job_id: str, gcs_files: list[str]) -> dict:
+    """Infiere phaseStatus basandose en archivos existentes en GCS.
+
+    Reglas:
+    - generated/*.docx existe → granules completed
+    - pipeline_local/*.txt o *.docx existe → pipelineLocal completed
+    - materials/*.docx existe → specializationMaterials completed
+    - zips/*.zip existe → package downloadable
+    """
+    has_granules = any(
+        f.startswith("generated/") and f.lower().endswith(".docx")
+        for f in gcs_files
+    )
+    has_pipeline = any(
+        f.startswith("pipeline_local/") and (f.lower().endswith(".txt") or f.lower().endswith(".docx"))
+        for f in gcs_files
+    )
+    has_materials = any(
+        f.startswith("materials/") and f.lower().endswith(".docx")
+        for f in gcs_files
+    )
+    has_zips = any(
+        f.startswith("zips/") and f.lower().endswith(".zip")
+        for f in gcs_files
+    )
+
+    granules_status = "completed" if has_granules else "pending"
+    pipeline_status = "completed" if has_pipeline else "pending"
+    materials_status = "completed" if has_materials else "pending"
+    drive_status = "pending"
+
+    pipeline_files = [f[len("pipeline_local/"):] for f in gcs_files if f.startswith("pipeline_local/")] if has_pipeline else []
+    granules_files = [f[len("generated/"):] for f in gcs_files if f.startswith("generated/")] if has_granules else []
+    materials_files = [f[len("materials/"):] for f in gcs_files if f.startswith("materials/")] if has_materials else []
+
+    return {
+        "jobId": job_id,
+        "granules": {
+            "status": granules_status,
+            "startedAt": None,
+            "finishedAt": datetime.utcnow().isoformat() if has_granules else None,
+            "files": granules_files,
+        },
+        "pipelineLocal": {
+            "status": pipeline_status,
+            "startedAt": None,
+            "finishedAt": datetime.utcnow().isoformat() if has_pipeline else None,
+            "files": pipeline_files,
+        },
+        "specializationMaterials": {
+            "status": materials_status,
+            "startedAt": None,
+            "finishedAt": datetime.utcnow().isoformat() if has_materials else None,
+            "files": materials_files,
+        },
+        "uploadDrive": {
+            "status": drive_status,
+            "startedAt": None,
+            "finishedAt": None,
+            "files": [],
+        },
+    }
+
+
+def reconstruct_job_from_gcs(job_id: str) -> dict | None:
+    """Reconstruye estado completo del job desde GCS.
+
+    Intenta en orden:
+    1. Descargar metadata y phase_status desde GCS
+    2. Si no hay metadata, inferir desde archivos GCS
+    3. Si no hay phase_status, inferir desde archivos GCS
+
+    Retorna dict con toda la info necesaria para el endpoint, o None si no hay nada en GCS.
+    """
+    gcs_files = list_gcs_job_files(job_id)
+    if not gcs_files:
+        return None
+
+    has_syllabus = any(f.startswith("input/") and f.endswith("syllabus.docx") for f in gcs_files)
+    has_granules = any(f.startswith("generated/") and f.lower().endswith(".docx") for f in gcs_files)
+    has_pipeline = any(f.startswith("pipeline_local/") and (f.lower().endswith(".txt") or f.lower().endswith(".docx")) for f in gcs_files)
+    has_materials = any(f.startswith("materials/") and f.lower().endswith(".docx") for f in gcs_files)
+    has_zips = any(f.startswith("zips/") and f.lower().endswith(".zip") for f in gcs_files)
+
+    all_files = []
+    for f in gcs_files:
+        if f.startswith("generated/"):
+            all_files.append(f[len("generated/"):])
+        elif f.startswith("pipeline_local/"):
+            all_files.append(f[len("pipeline_local/"):])
+        elif f.startswith("materials/"):
+            all_files.append(f[len("materials/"):])
+        elif f.startswith("zips/"):
+            all_files.append(f[len("zips/"):])
+
+    phase_status = None
+    category = None
+    syllabus_original_name = None
+
+    meta = download_metadata_from_gcs(job_id)
+    if meta:
+        category = meta.get("category")
+        syllabus_original_name = meta.get("syllabusOriginalName")
+
+    ps = download_phase_status_from_gcs(job_id)
+    if ps:
+        phase_status = ps
+    else:
+        phase_status = infer_phase_status_from_gcs(job_id, gcs_files)
+
+    phases_completed = sum(1 for key in ("granules", "pipelineLocal", "specializationMaterials") if phase_status.get(key, {}).get("status") == "completed")
+    if phases_completed >= 3:
+        status = "completed"
+        progress_step = "finalizado"
+    elif phases_completed >= 2:
+        status = "completed"
+        progress_step = "finalizado"
+    elif phases_completed >= 1:
+        status = "completed"
+        progress_step = "finalizado"
+    else:
+        status = "completed"
+        progress_step = "finalizado"
+
+    return {
+        "job_id": job_id,
+        "status": status,
+        "progress_step": progress_step,
+        "job_kind": "granules_academic_package",
+        "logs": [],
+        "files": sorted(all_files),
+        "phase_status": phase_status,
+        "category": category or "especializacion",
+        "syllabus_original_name": syllabus_original_name,
+        "syllabus_stored_name": "syllabus.docx" if has_syllabus else None,
+        "syllabus_gcs_path": f"jobs/{job_id}/input/syllabus.docx" if has_syllabus else None,
+        "has_syllabus": has_syllabus,
+        "has_granules": has_granules,
+        "has_pipeline": has_pipeline,
+        "has_materials": has_materials,
+        "has_zips": has_zips,
+    }
+
+
+def cleanup_old_gcs_jobs(max_age_hours: int = 48) -> list[str]:
+    """Elimina jobs de GCS mas antiguos que max_age_hours.
+
+    Retorna lista de job_ids eliminados.
+    """
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return []
+
+    try:
+        from google.cloud import storage
+        client = storage.Client()
+        bucket = client.bucket(os.getenv("GCS_BUCKET"))
+        cutoff = datetime.utcnow().timestamp() - (max_age_hours * 3600)
+
+        blobs = list(bucket.list_blobs(prefix="jobs/"))
+        job_prefixes: dict[str, list] = {}
+        for blob in blobs:
+            parts = blob.name.split("/")
+            if len(parts) >= 2 and parts[0] == "jobs":
+                job_id = parts[1]
+                job_prefixes.setdefault(job_id, []).append(blob)
+
+        deleted = []
+        for job_id, blobs_list in job_prefixes.items():
+            oldest = min(b.time_created.timestamp() for b in blobs_list if b.time_created)
+            if oldest < cutoff:
+                bucket.delete_blobs(blobs_list)
+                deleted.append(job_id)
+                LOGGER.info("GCS cleanup: job %s eliminado (%d blobs)", job_id, len(blobs_list))
+
+        return deleted
+    except Exception as exc:
+        LOGGER.error("GCS cleanup error: %s", exc)
+        return []

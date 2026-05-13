@@ -53,7 +53,6 @@ class JobRecord:
 
 _JOBS: dict[str, JobRecord] = {}
 _LOCK = threading.Lock()
-# Subprocesos activos (granulos / fases) para poder cancelar sin reiniciar el servidor.
 _ACTIVE_SUBPROCESSES: dict[str, subprocess.Popen] = {}
 _CANCEL_REQUESTED: set[str] = set()
 
@@ -73,7 +72,7 @@ def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str =
 
 
 def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
-    """Reconstruye el JobRecord tras reinicio del servidor o pérdida de memoria, desde disco."""
+    """Reconstruye el JobRecord tras reinicio del servidor o perdida de memoria, desde disco."""
     paths = get_job_paths(job_id)
     if not paths["metadata_path"].exists() or not paths["phase_status_path"].exists():
         return None
