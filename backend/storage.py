@@ -865,28 +865,37 @@ def sync_phase_files_to_gcs(job_id: str, phase_key: str) -> list[str]:
     """
     gcs = _get_gcs_store()
     if not gcs.is_available:
+        LOGGER.info("GCS sync phase %s: GCS no disponible (GCS_BUCKET no configurado)", phase_key)
         return []
 
+    LOGGER.info("GCS sync phase %s: iniciado para job %s", phase_key, job_id)
     paths = get_job_paths(job_id)
     uploaded = []
 
-    phase_dir_map = {
-        "granules": ("generated", "generated"),
-        "pipelineLocal": ("pipeline_local_dir", "pipeline_local"),
-        "specializationMaterials": ("materials", "materials"),
-    }
-
-    if phase_key not in phase_dir_map:
+    if phase_key == "granules":
+        local_dir = paths["generated_dir"]
+        gcs_prefix = "generated"
+    elif phase_key == "pipelineLocal":
+        local_dir = paths["pipeline_local_dir"]
+        gcs_prefix = "pipeline_local"
+    elif phase_key == "specializationMaterials":
+        local_dir = get_materials_dir(job_id)
+        gcs_prefix = "materials"
+    else:
+        LOGGER.warning("GCS sync phase %s: fase no soportada", phase_key)
         return []
 
-    dir_attr, gcs_prefix = phase_dir_map[phase_key]
-    local_dir = paths.get(dir_attr)
     if local_dir is None or not local_dir.exists():
+        LOGGER.warning("GCS sync phase %s: directorio local no existe: %s", phase_key, local_dir)
         return []
+
+    LOGGER.info("GCS sync phase %s: directorio local encontrado: %s", phase_key, local_dir)
 
     uploaded = gcs.upload_directory(job_id, local_dir, gcs_prefix)
     if uploaded:
         LOGGER.info("GCS sync phase %s: %d archivos subidos para job %s", phase_key, len(uploaded), job_id)
+    else:
+        LOGGER.warning("GCS sync phase %s: no se subieron archivos para job %s", phase_key, job_id)
     return uploaded
 
 
@@ -898,8 +907,13 @@ def sync_syllabus_to_gcs(job_id: str) -> str | None:
     paths = get_job_paths(job_id)
     syllabus_path = paths["input_dir"] / "syllabus.docx"
     if not syllabus_path.exists():
+        LOGGER.warning("GCS sync syllabus: archivo no existe: %s", syllabus_path)
         return None
-    return gcs.upload_file(job_id, syllabus_path, "input/syllabus.docx")
+    LOGGER.info("GCS sync syllabus: subiendo para job %s", job_id)
+    url = gcs.upload_file(job_id, syllabus_path, "input/syllabus.docx")
+    if url:
+        LOGGER.info("GCS sync syllabus: subido exitosamente para job %s", job_id)
+    return url
 
 
 def sync_zip_to_gcs(job_id: str, zip_path: Path, zip_name: str) -> str | None:
@@ -908,8 +922,13 @@ def sync_zip_to_gcs(job_id: str, zip_path: Path, zip_name: str) -> str | None:
     if not gcs.is_available:
         return None
     if not zip_path.exists():
+        LOGGER.warning("GCS sync zip: archivo no existe: %s", zip_path)
         return None
-    return gcs.upload_file(job_id, zip_path, f"zips/{zip_name}")
+    LOGGER.info("GCS sync zip: subiendo %s para job %s", zip_name, job_id)
+    url = gcs.upload_file(job_id, zip_path, f"zips/{zip_name}")
+    if url:
+        LOGGER.info("GCS sync zip: subido exitosamente %s para job %s", zip_name, job_id)
+    return url
 
 
 def download_file_from_gcs(job_id: str, gcs_path: str, local_path: Path) -> bool:
@@ -917,7 +936,13 @@ def download_file_from_gcs(job_id: str, gcs_path: str, local_path: Path) -> bool
     gcs = _get_gcs_store()
     if not gcs.is_available:
         return False
-    return gcs.download_file(job_id, gcs_path, local_path)
+    LOGGER.info("GCS download fallback: intentando %s para job %s", gcs_path, job_id)
+    result = gcs.download_file(job_id, gcs_path, local_path)
+    if result:
+        LOGGER.info("GCS download fallback: exitoso %s -> %s", gcs_path, local_path.name)
+    else:
+        LOGGER.warning("GCS download fallback: fallo %s para job %s", gcs_path, job_id)
+    return result
 
 
 def file_exists_in_gcs(job_id: str, gcs_path: str) -> bool:

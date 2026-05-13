@@ -29,6 +29,9 @@ class JobStatusResponse(BaseModel):
     phaseStatus: dict | None = None
     driveSync: dict | None = None
     categoryKey: str | None = None
+    syllabusOriginalName: str | None = None
+    syllabusStoredName: str | None = None
+    syllabusGcsPath: str | None = None
 
 
 class PreviewTopic(BaseModel):

@@ -73,6 +73,7 @@ function parseMaterialesFromFiles(files: string[], matDir: string): GranuleMater
 
 function GranulesView({ onBack }: GranulesViewProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [syllabusFileName, setSyllabusFileName] = useState<string>('')
   const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>('')
   const [detectedGranules, setDetectedGranules] = useState<Array<{ id: string; label: string }>>([])
   const [subjectName, setSubjectName] = useState('')
@@ -89,7 +90,6 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const prevAnalyzingSyllabusRef = useRef(false)
   const prevIsGeneratingRef = useRef(false)
   const canUploadSyllabus = Boolean(selectedPrompt)
-  const hasSyllabus = Boolean(selectedFile)
   const selectedCategory = useMemo(() => categories.find((category) => category.key === selectedPrompt) ?? getCategoryConfig(selectedPrompt), [categories, selectedPrompt])
   const materialsDir = selectedCategory?.materialsDir ?? 'materials'
   const categoryLabel = selectedCategory?.label ?? 'categoría seleccionada'
@@ -111,6 +111,8 @@ function GranulesView({ onBack }: GranulesViewProps) {
       setHydratedJobId(null)
     },
   })
+
+  const hasSyllabus = Boolean(selectedFile || syllabusFileName || jobData?.syllabusOriginalName)
 
   const normalizedJob = useMemo(() => {
     if (!jobData) return null
@@ -198,6 +200,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setProgramName('')
     setPreviewMessage('')
     setSelectedFile(null)
+    setSyllabusFileName('')
     setIsAnalyzingSyllabus(false)
     clearLocalSession()
     setHydratedJobId(null)
@@ -242,6 +245,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
         programName,
         detectedGranules,
         previewMessage,
+        syllabusFileName: selectedFile?.name,
       })
     } catch (error) {
       setGenerationMessage(error instanceof Error ? error.message : 'Error iniciando la generación.')
@@ -317,7 +321,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
     try {
       const created = await createJobMutation.mutateAsync({ syllabus: selectedFile, nivel: selectedPrompt })
       setHydratedJobId(created.jobId)
-      saveLocalSession({ jobId: created.jobId, prompt: selectedPrompt, subjectName, programName, detectedGranules, previewMessage })
+      saveLocalSession({ jobId: created.jobId, prompt: selectedPrompt, subjectName, programName, detectedGranules, previewMessage, syllabusFileName: selectedFile?.name })
       await new Promise<void>((resolve, reject) => {
         const check = setInterval(async () => {
           try {
@@ -406,7 +410,14 @@ function GranulesView({ onBack }: GranulesViewProps) {
     if (session.programName) setProgramName(session.programName)
     if (session.detectedGranules) setDetectedGranules(session.detectedGranules)
     if (session.previewMessage) setPreviewMessage(session.previewMessage)
+    if (session.syllabusFileName) setSyllabusFileName(session.syllabusFileName)
   }, [])
+
+  useEffect(() => {
+    if (jobData?.syllabusOriginalName && !syllabusFileName) {
+      setSyllabusFileName(jobData.syllabusOriginalName)
+    }
+  }, [jobData?.syllabusOriginalName])
 
   const consoleStatus = status === 'error'
     ? 'Error'
@@ -512,6 +523,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
             {canUploadSyllabus && (
               <FileDropzone
                 selectedFile={selectedFile}
+                syllabusFileName={syllabusFileName}
                 onFileSelected={async (file) => {
                   handleReset()
                   setSelectedFile(file)
@@ -577,7 +589,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
                 <span className="granule-card-kicker">PREVIEW</span>
               </div>
               <div className="syllabus-preview-rows">
-                <div><span>Archivo</span><strong>{selectedFile?.name ?? 'Pendiente'}</strong></div>
+                <div><span>Archivo</span><strong>{selectedFile?.name ?? syllabusFileName ?? (jobId ? 'Syllabus cargado' : 'Pendiente')}</strong></div>
                 <div><span>Asignatura</span><strong>{subjectName || 'Sin detectar'}</strong></div>
                 <div><span>Programa</span><strong>{programName || 'Sin detectar'}</strong></div>
                 <div><span>Gránulos</span><strong>{isAnalyzingSyllabus ? 'Analizando...' : `${detectedGranules.length || 0} detectados`}</strong></div>

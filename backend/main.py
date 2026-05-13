@@ -682,6 +682,12 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     drive_sync = get_drive_sync_snapshot(job.job_id) if job.job_kind == "granules_academic_package" else None
     category_key = get_job_category(job.job_id) if job.job_kind == "granules_academic_package" else None
 
+    # Metadata del syllabus desde job_metadata.json
+    meta = read_job_metadata(job_id) if job.job_kind == "granules_academic_package" else {}
+    syllabus_original_name = meta.get("syllabusOriginalName")
+    syllabus_stored_name = "syllabus.docx" if syllabus_original_name else None
+    syllabus_gcs_path = f"jobs/{job_id}/input/syllabus.docx" if syllabus_original_name else None
+
     return JobStatusResponse(
         jobId=job.job_id,
         status=job.status,
@@ -697,6 +703,9 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         phaseStatus=phase_status,
         driveSync=drive_sync,
         categoryKey=category_key,
+        syllabusOriginalName=syllabus_original_name,
+        syllabusStoredName=syllabus_stored_name,
+        syllabusGcsPath=syllabus_gcs_path,
     )
 
 
