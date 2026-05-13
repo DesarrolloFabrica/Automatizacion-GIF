@@ -19,6 +19,7 @@ export interface LocalSessionData {
   programName?: string
   detectedGranules?: DetectedGranule[]
   previewMessage?: string
+  syllabusFileName?: string
 }
 
 export interface DriveSessionData {
@@ -32,6 +33,7 @@ export interface DriveSessionData {
   programName?: string
   detectedGranules?: DetectedGranule[]
   previewMessage?: string
+  syllabusFileName?: string
 }
 
 export type SessionData = LocalSessionData | DriveSessionData
@@ -83,6 +85,7 @@ export function saveLocalSession(data: Partial<LocalSessionData> & { jobId: stri
     programName: data.programName ?? existing?.programName,
     detectedGranules: data.detectedGranules ?? existing?.detectedGranules,
     previewMessage: data.previewMessage ?? existing?.previewMessage,
+    syllabusFileName: data.syllabusFileName ?? existing?.syllabusFileName,
   })
 }
 
@@ -107,6 +110,7 @@ export function saveDriveSession(data: Partial<DriveSessionData> & { jobId: stri
     programName: data.programName ?? existing?.programName,
     detectedGranules: data.detectedGranules ?? existing?.detectedGranules,
     previewMessage: data.previewMessage ?? existing?.previewMessage,
+    syllabusFileName: data.syllabusFileName ?? existing?.syllabusFileName,
   })
 }
 

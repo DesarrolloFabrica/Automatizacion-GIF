@@ -3,13 +3,16 @@ import type { ChangeEvent } from 'react'
 interface FileDropzoneProps {
   selectedFile: File | null
   onFileSelected: (file: File | null) => void
+  syllabusFileName?: string
 }
 
-function FileDropzone({ selectedFile, onFileSelected }: FileDropzoneProps) {
+function FileDropzone({ selectedFile, onFileSelected, syllabusFileName }: FileDropzoneProps) {
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null
     onFileSelected(file)
   }
+
+  const displayFileName = selectedFile?.name ?? syllabusFileName
 
   return (
     <article className="card granule-card syllabus-console-card">
@@ -33,8 +36,8 @@ function FileDropzone({ selectedFile, onFileSelected }: FileDropzoneProps) {
             onChange={handleFileChange}
             className="file-input"
           />
-          <p className={`file-pill ${selectedFile ? 'is-loaded' : ''}`}>
-            {selectedFile ? selectedFile.name : 'Sin archivo cargado'}
+          <p className={`file-pill ${displayFileName ? 'is-loaded' : ''}`}>
+            {displayFileName ?? 'Sin archivo cargado'}
           </p>
         </div>
       </div>

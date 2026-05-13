@@ -128,6 +128,9 @@ export interface JobStatusResponse {
   phaseStatus: JobPhaseStatus | null
   driveSync?: DriveSyncSnapshot | null
   categoryKey?: PromptType | string | null
+  syllabusOriginalName?: string | null
+  syllabusStoredName?: string | null
+  syllabusGcsPath?: string | null
 }
 
 export interface DriveUploadResponse {

@@ -72,7 +72,7 @@ function mergeDetectedGranulesFromJobFiles(
   return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
 }
 
-function loadInitialDriveSession(): { jobId: string; driveFolderId: string; prompt: PromptType | ''; runMode?: DriveRunMode; subjectName?: string; programName?: string; detectedGranules?: Array<{ id: string; label: string }>; previewMessage?: string } | null {
+function loadInitialDriveSession(): { jobId: string; driveFolderId: string; prompt: PromptType | ''; runMode?: DriveRunMode; subjectName?: string; programName?: string; detectedGranules?: Array<{ id: string; label: string }>; previewMessage?: string; syllabusFileName?: string } | null {
   const s = loadDriveSession()
   if (!s) return null
   return {
@@ -84,12 +84,14 @@ function loadInitialDriveSession(): { jobId: string; driveFolderId: string; prom
     programName: s.programName,
     detectedGranules: s.detectedGranules,
     previewMessage: s.previewMessage,
+    syllabusFileName: s.syllabusFileName,
   }
 }
 
 function DrivePackageView({ onBack }: DrivePackageViewProps) {
   const initialSession = useMemo(() => loadInitialDriveSession(), [])
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [syllabusFileName, setSyllabusFileName] = useState<string>('')
   const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>((initialSession?.prompt ?? '') as PromptType | '')
   const [detectedGranules, setDetectedGranules] = useState<Array<{ id: string; label: string }>>([])
   const [subjectName, setSubjectName] = useState('')
@@ -117,7 +119,6 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
   const executeDrivePipelineRef = useRef<(jobId: string | null, opts?: { force?: boolean }) => Promise<void>>(async () => {})
   const DRIVE_ACCESS_EMAIL = 'fabricadecontenidos@cun.edu.co'
 
-  const hasSyllabus = Boolean(selectedFile)
   const selectedCategory = useMemo(() => categories.find((category) => category.key === selectedPrompt) ?? getCategoryConfig(selectedPrompt), [categories, selectedPrompt])
   const categoryLabel = selectedCategory?.label ?? 'categoría seleccionada'
   const materialsPerGranule = selectedCategory?.expectedMaterialsPerGranule ?? 0
@@ -181,6 +182,8 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     },
   })
 
+  const hasSyllabus = Boolean(selectedFile || syllabusFileName || jobData?.syllabusOriginalName)
+
   useEffect(() => {
     if (!jobData) return
     setStatus(jobData.progressStep)
@@ -218,6 +221,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
 
   const resetForNewSyllabus = () => {
     setSelectedFile(null)
+    setSyllabusFileName('')
     setDetectedGranules([])
     setSubjectName('')
     setProgramName('')
@@ -465,7 +469,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       try {
         const jobId = existingJobId ?? (await createGranulesJob())
         setPackageJobId(jobId)
-        saveDriveSession({ jobId, driveFolderId, prompt: selectedPrompt as PromptType })
+        saveDriveSession({ jobId, driveFolderId, prompt: selectedPrompt as PromptType, syllabusFileName: selectedFile?.name ?? syllabusFileName })
 
         activeDrivePhase = 'granules'
         await ensureGranulesPhase(jobId)
@@ -501,7 +505,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
   })
 
   const persistDriveSessionJob = (jobId: string) => {
-    saveDriveSession({ jobId, driveFolderId, prompt: selectedPrompt as PromptType })
+    saveDriveSession({ jobId, driveFolderId, prompt: selectedPrompt as PromptType, syllabusFileName: selectedFile?.name ?? syllabusFileName })
   }
 
   const handleDriveRunModeChange = (mode: DriveRunMode) => {
@@ -509,7 +513,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     setDriveRunMode(mode)
     const s = loadDriveSession()
     if (s?.jobId) {
-      saveDriveSession({ jobId: s.jobId, driveFolderId: s.driveFolderId ?? driveFolderId, prompt: (s.prompt ?? selectedPrompt) as PromptType })
+      saveDriveSession({ jobId: s.jobId, driveFolderId: s.driveFolderId ?? driveFolderId, prompt: (s.prompt ?? selectedPrompt) as PromptType, syllabusFileName: s.syllabusFileName ?? selectedFile?.name ?? syllabusFileName })
     }
   }
 
@@ -742,7 +746,14 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     if (initialSession.programName) setProgramName(initialSession.programName)
     if (initialSession.detectedGranules) setDetectedGranules(initialSession.detectedGranules)
     if (initialSession.previewMessage) setPreviewMessage(initialSession.previewMessage)
+    if (initialSession.syllabusFileName) setSyllabusFileName(initialSession.syllabusFileName)
   }, [initialSession])
+
+  useEffect(() => {
+    if (jobData?.syllabusOriginalName && !syllabusFileName) {
+      setSyllabusFileName(jobData.syllabusOriginalName)
+    }
+  }, [jobData?.syllabusOriginalName])
 
   const handlePromptChange = (prompt: PromptType | '') => {
     setSelectedPrompt(prompt)
@@ -850,6 +861,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
               {canUploadSyllabus && (
                 <FileDropzone
                   selectedFile={selectedFile}
+                  syllabusFileName={syllabusFileName}
                   onFileSelected={async (file) => {
                     resetForNewSyllabus()
                     setSelectedFile(file)
@@ -1014,7 +1026,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
                   <span className="granule-card-kicker">PREVIEW</span>
                 </div>
                 <div className="syllabus-preview-rows">
-                  <div><span>Archivo original</span><strong>{selectedFile?.name ?? 'Pendiente'}</strong></div>
+                  <div><span>Archivo original</span><strong>{selectedFile?.name ?? syllabusFileName ?? (packageJobId ? 'Syllabus cargado' : 'Pendiente')}</strong></div>
                   <div><span>Nombre interno</span><strong>{selectedFile ? 'syllabus.docx' : 'Pendiente'}</strong></div>
                   <div><span>Asignatura</span><strong>{previewSubjectDisplay}</strong></div>
                   <div><span>Programa</span><strong>{previewProgramDisplay}</strong></div>
