@@ -2,3 +2,7 @@ fastapi>=0.115.0
 uvicorn>=0.30.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
+
+# Fase 2: persistencia opcional en Cloud Storage
+# Se instala siempre pero solo se usa si GCS_BUCKET esta configurado
+google-cloud-storage>=2.10.0

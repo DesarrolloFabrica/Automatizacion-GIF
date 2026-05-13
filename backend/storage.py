@@ -8,9 +8,13 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zipfile import ZIP_DEFLATED, ZipFile
 import re
 import unicodedata
+
+if TYPE_CHECKING:
+    from job_store_gcs import GCSFileStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -837,3 +841,86 @@ def create_outputs_zip(job_id: str, suffixes: tuple[str, ...] = (".docx", ".txt"
         for file_path in files:
             zip_file.write(file_path, arcname=file_path.name)
     return paths["zip_path"]
+
+
+# ──────────────────────────────────────────────
+# GCS Sync helpers (Fase 2: persistencia opcional)
+# ──────────────────────────────────────────────
+
+_gcs_store_cache: GCSFileStore | None = None
+
+
+def _get_gcs_store() -> GCSFileStore:
+    global _gcs_store_cache
+    if _gcs_store_cache is None:
+        from job_store_factory import get_gcs_store
+        _gcs_store_cache = get_gcs_store()
+    return _gcs_store_cache
+
+
+def sync_phase_files_to_gcs(job_id: str, phase_key: str) -> list[str]:
+    """Sube archivos de una fase completada a GCS.
+
+    Retorna lista de URLs subidas (vacia si GCS no esta disponible).
+    """
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return []
+
+    paths = get_job_paths(job_id)
+    uploaded = []
+
+    phase_dir_map = {
+        "granules": ("generated", "generated"),
+        "pipelineLocal": ("pipeline_local_dir", "pipeline_local"),
+        "specializationMaterials": ("materials", "materials"),
+    }
+
+    if phase_key not in phase_dir_map:
+        return []
+
+    dir_attr, gcs_prefix = phase_dir_map[phase_key]
+    local_dir = paths.get(dir_attr)
+    if local_dir is None or not local_dir.exists():
+        return []
+
+    uploaded = gcs.upload_directory(job_id, local_dir, gcs_prefix)
+    if uploaded:
+        LOGGER.info("GCS sync phase %s: %d archivos subidos para job %s", phase_key, len(uploaded), job_id)
+    return uploaded
+
+
+def sync_syllabus_to_gcs(job_id: str) -> str | None:
+    """Sube el syllabus original a GCS."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    paths = get_job_paths(job_id)
+    syllabus_path = paths["input_dir"] / "syllabus.docx"
+    if not syllabus_path.exists():
+        return None
+    return gcs.upload_file(job_id, syllabus_path, "input/syllabus.docx")
+
+
+def sync_zip_to_gcs(job_id: str, zip_path: Path, zip_name: str) -> str | None:
+    """Sube un ZIP generado a GCS."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    if not zip_path.exists():
+        return None
+    return gcs.upload_file(job_id, zip_path, f"zips/{zip_name}")
+
+
+def download_file_from_gcs(job_id: str, gcs_path: str, local_path: Path) -> bool:
+    """Descarga un archivo desde GCS a ruta local (fallback para descargas)."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return False
+    return gcs.download_file(job_id, gcs_path, local_path)
+
+
+def file_exists_in_gcs(job_id: str, gcs_path: str) -> bool:
+    """Verifica si un archivo existe en GCS."""
+    gcs = _get_gcs_store()
+    return gcs.file_exists(job_id, gcs_path)
