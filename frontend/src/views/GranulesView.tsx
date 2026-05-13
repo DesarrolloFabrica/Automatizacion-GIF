@@ -5,11 +5,22 @@ import JobProgressPanel from '../components/JobProgressPanel'
 import PromptSelector from '../components/PromptSelector'
 import ResultsPanel from '../components/ResultsPanel'
 import { CATEGORY_CONFIGS, getCategoryConfig } from '../data/categories'
-import { useJobPoller } from '../hooks/useJobPoller'
-import { API_BASE_URL, apiFetch, isMissingJobResponse, readApiErrorDetail } from '../lib/api'
+import { API_BASE_URL, apiFetch } from '../lib/api'
+import { normalizeJobStatus } from '../lib/normalizeJobStatus'
 import { clearLocalSession, loadLocalSession, saveLocalSession } from '../lib/sessionStorage'
 import { pickProgramFromPreview } from '../lib/pickProgramFromPreview'
-import type { AvailableNextAction, CategoryConfig, GenerationStatus, GranuleMaterials, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
+import {
+  useCancelJob,
+  useCreateJob,
+  useJobStatus,
+  useRetryGranules,
+  useRetryMaterials,
+  useRetryPipelineLocal,
+  useRunMaterials,
+  useRunPipelineLocal,
+  useSyllabusPreview,
+} from '../queries/jobs'
+import type { AvailableNextAction, CategoryConfig, GenerationStatus, GranuleMaterials, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
@@ -40,6 +51,26 @@ interface PipelineState {
   message: string
 }
 
+function parseMaterialesFromFiles(files: string[], matDir: string): GranuleMaterials[] {
+  const granuleMap = new Map<string, GranuleMaterials>()
+  for (const relativePath of files) {
+    if (!relativePath.startsWith(`${matDir}/`)) continue
+    const parts = relativePath.split('/')
+    const folder = parts[1] ?? ''
+    const name = parts[2] ?? ''
+    const match = name.match(/^\d+_(G\d+)_/i) ?? folder.match(/^(G\d+)_/i)
+    if (!match || !name) continue
+    const granuleCode = match[1]
+    if (!granuleMap.has(granuleCode)) {
+      granuleMap.set(granuleCode, { granuleCode, granuleFolder: folder, files: [], totalMaterials: 0 })
+    }
+    const granuleMat = granuleMap.get(granuleCode)!
+    granuleMat.files.push({ granule: granuleCode, name, relativePath })
+    granuleMat.totalMaterials = granuleMat.files.length
+  }
+  return Array.from(granuleMap.values()).sort((a, b) => a.granuleCode.localeCompare(b.granuleCode))
+}
+
 function GranulesView({ onBack }: GranulesViewProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [selectedPrompt, setSelectedPrompt] = useState<PromptType | ''>('')
@@ -48,19 +79,10 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const [programName, setProgramName] = useState('')
   const [isAnalyzingSyllabus, setIsAnalyzingSyllabus] = useState(false)
   const [previewMessage, setPreviewMessage] = useState('')
-  const [status, setStatus] = useState<GenerationStatus>('pendiente')
   const [isGenerating, setIsGenerating] = useState(false)
-  const [generatedDocuments, setGeneratedDocuments] = useState<string[]>([])
-  const [materialesByGranule, setMaterialesByGranule] = useState<GranuleMaterials[]>([])
-  const [jobId, setJobId] = useState<string | null>(null)
-  const [jobLogs, setJobLogs] = useState<string[]>([])
   const [generationMessage, setGenerationMessage] = useState('')
-  const [availableNextAction, setAvailableNextAction] = useState<AvailableNextAction>('generate_granules')
-  const [phaseStatus, setPhaseStatus] = useState<JobPhaseStatus | null>(null)
-  const [currentPhase, setCurrentPhase] = useState('pending')
   const [isFullPipelineRunning, setIsFullPipelineRunning] = useState(false)
   const [categories, setCategories] = useState<CategoryConfig[]>(CATEGORY_CONFIGS)
-  const [localUiStatus, setLocalUiStatus] = useState<PipelineGeneralState>('idle')
   const [isCancelling, setIsCancelling] = useState(false)
   const pipelineCardRef = useRef<HTMLElement | null>(null)
   const resultsPanelRef = useRef<HTMLElement | null>(null)
@@ -81,64 +103,60 @@ function GranulesView({ onBack }: GranulesViewProps) {
     { key: 'download', number: '05', icon: 'ZIP', title: 'ZIP final' },
   ] as const
 
-  const applyJobPayload = useCallback((payload: JobStatusResponse) => {
-    setStatus(payload.progressStep)
-    setLocalUiStatus(payload.status === 'cancelled' ? 'cancelled' : payload.status === 'failed' ? 'failed' : payload.status === 'completed' ? 'completed' : payload.status === 'running' || payload.status === 'queued' ? 'running' : 'idle')
-    setJobLogs(payload.logs ?? [])
-    setGeneratedDocuments(payload.files ?? [])
-    setPhaseStatus(payload.phaseStatus)
-    setAvailableNextAction(payload.availableNextAction)
-    setCurrentPhase(payload.currentPhase)
-    if (payload.phaseStatus?.specializationMaterials.files?.length) {
-      setMaterialesByGranule(parseMaterialesFromFiles(payload.phaseStatus.specializationMaterials.files, materialsDir))
-    }
-  }, [materialsDir])
+  const [hydratedJobId, setHydratedJobId] = useState<string | null>(null)
 
-  const { start: startPolling, stop: stopPolling } = useJobPoller({
-    onStatus: (payload) => {
-      applyJobPayload(payload)
-    },
-    onComplete: (payload) => {
-      applyJobPayload(payload)
-      setStatus('finalizado')
-      setIsGenerating(false)
-      setIsFullPipelineRunning(false)
-    },
-    onFailed: (payload) => {
-      applyJobPayload(payload)
-      setStatus('error')
-      setIsGenerating(false)
-      setIsFullPipelineRunning(false)
-      setGenerationMessage('La fase falló. Los resultados anteriores quedan disponibles y puedes reintentar.')
-    },
-    onCancelled: (payload) => {
-      applyJobPayload(payload)
-      setStatus('cancelado')
-      setLocalUiStatus('cancelled')
-      setIsGenerating(false)
-      setIsFullPipelineRunning(false)
-      setIsCancelling(false)
-      setGenerationMessage('Proceso cancelado. Puedes iniciar uno nuevo o continuar desde una fase válida si hay entregables disponibles.')
-    },
-    onMissing: (error) => {
+  const { data: jobData } = useJobStatus(hydratedJobId, {
+    onMissing: () => {
       clearLocalSession()
-      setJobId(null)
-      setStatus('missing_job')
-      setLocalUiStatus('missing_job')
-      setIsGenerating(false)
-      setIsFullPipelineRunning(false)
-      setIsCancelling(false)
-      setAvailableNextAction('generate_granules')
-      setGenerationMessage(error)
-    },
-    onRecoverableError: (error) => {
-      setStatus('recoverable_error')
-      setLocalUiStatus('recoverable_error')
-      setIsGenerating(false)
-      setIsFullPipelineRunning(false)
-      setGenerationMessage(error)
+      setHydratedJobId(null)
     },
   })
+
+  const normalizedJob = useMemo(() => {
+    if (!jobData) return null
+    return normalizeJobStatus(jobData)
+  }, [jobData])
+
+  const status: GenerationStatus = normalizedJob?.status === 'running' || normalizedJob?.status === 'queued'
+    ? jobData?.progressStep ?? 'pendiente'
+    : normalizedJob?.status === 'completed'
+      ? 'finalizado'
+      : normalizedJob?.status === 'failed'
+        ? 'error'
+        : normalizedJob?.status === 'cancelled'
+          ? 'cancelado'
+          : normalizedJob?.status === 'missing_job'
+            ? 'missing_job'
+            : 'pendiente'
+
+  const localUiStatus: PipelineGeneralState = normalizedJob?.status === 'cancelled' ? 'cancelled'
+    : normalizedJob?.status === 'missing_job' ? 'missing_job'
+    : normalizedJob?.status === 'recoverable_error' ? 'recoverable_error'
+    : normalizedJob?.status === 'completed' ? 'completed'
+    : normalizedJob?.status === 'failed' ? 'failed'
+    : (normalizedJob?.status === 'running' || normalizedJob?.status === 'queued') ? 'running'
+    : 'idle'
+
+  const phaseStatus = jobData?.phaseStatus ?? null
+  const currentPhase = jobData?.currentPhase ?? 'pending'
+  const availableNextAction = (jobData?.availableNextAction ?? 'none') as AvailableNextAction
+  const jobLogs = jobData?.logs ?? []
+  const generatedDocuments = jobData?.files ?? []
+  const jobId = hydratedJobId
+
+  const materialesByGranule = useMemo(() => {
+    const filesFromStatus = phaseStatus?.specializationMaterials?.files ?? []
+    return filesFromStatus.length > 0 ? parseMaterialesFromFiles(filesFromStatus, materialsDir) : []
+  }, [phaseStatus, materialsDir])
+
+  const createJobMutation = useCreateJob()
+  const cancelJobMutation = useCancelJob()
+  const runPipelineLocalMutation = useRunPipelineLocal()
+  const runMaterialsMutation = useRunMaterials()
+  const retryGranulesMutation = useRetryGranules()
+  const retryPipelineLocalMutation = useRetryPipelineLocal()
+  const retryMaterialsMutation = useRetryMaterials()
+  const syllabusPreviewMutation = useSyllabusPreview()
 
   const getLocalPhaseState = (phaseKey: string): 'pending' | 'active' | 'completed' | 'error' => {
     if (status === 'error') {
@@ -167,61 +185,22 @@ function GranulesView({ onBack }: GranulesViewProps) {
 
   const alignTopWithViewport = useCallback((el: HTMLElement | null) => {
     if (!el) return
-    const reduceMotion =
-      typeof window.matchMedia !== 'undefined' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const reduceMotion = typeof window.matchMedia !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
     const y = Math.round(window.scrollY + el.getBoundingClientRect().top)
-    window.scrollTo({
-      top: Math.max(0, y),
-      behavior: reduceMotion ? 'auto' : 'smooth',
-    })
+    window.scrollTo({ top: Math.max(0, y), behavior: reduceMotion ? 'auto' : 'smooth' })
   }, [])
 
-  const alignPipelineTopWithViewport = useCallback(() => {
-    alignTopWithViewport(pipelineCardRef.current)
-  }, [alignTopWithViewport])
+  const alignPipelineTopWithViewport = useCallback(() => { alignTopWithViewport(pipelineCardRef.current) }, [alignTopWithViewport])
 
   const resetForNewSyllabus = () => {
-    setStatus('pendiente')
-    setGeneratedDocuments([])
-    setMaterialesByGranule([])
-    setIsGenerating(false)
-    setJobLogs([])
-    setJobId(null)
-    setAvailableNextAction('generate_granules')
-    setPhaseStatus(null)
-    setCurrentPhase('pending')
-    setIsFullPipelineRunning(false)
-    setLocalUiStatus('idle')
+    setDetectedGranules([])
     setSubjectName('')
     setProgramName('')
     setPreviewMessage('')
-    setGenerationMessage('')
     setSelectedFile(null)
-    setDetectedGranules([])
     setIsAnalyzingSyllabus(false)
-    stopPolling()
     clearLocalSession()
-  }
-
-  function parseMaterialesFromFiles(files: string[], matDir: string): GranuleMaterials[] {
-    const granuleMap = new Map<string, GranuleMaterials>()
-    for (const relativePath of files) {
-      if (!relativePath.startsWith(`${matDir}/`)) continue
-      const parts = relativePath.split('/')
-      const folder = parts[1] ?? ''
-      const name = parts[2] ?? ''
-      const match = name.match(/^\d+_(G\d+)_/i) ?? folder.match(/^(G\d+)_/i)
-      if (!match || !name) continue
-      const granuleCode = match[1]
-      if (!granuleMap.has(granuleCode)) {
-        granuleMap.set(granuleCode, { granuleCode, granuleFolder: folder, files: [], totalMaterials: 0 })
-      }
-      const granuleMat = granuleMap.get(granuleCode)!
-      granuleMat.files.push({ granule: granuleCode, name, relativePath })
-      granuleMat.totalMaterials = granuleMat.files.length
-    }
-    return Array.from(granuleMap.values()).sort((a, b) => a.granuleCode.localeCompare(b.granuleCode))
+    setHydratedJobId(null)
   }
 
   const analyzeSyllabusPreview = async (file: File) => {
@@ -229,20 +208,14 @@ function GranulesView({ onBack }: GranulesViewProps) {
     setPreviewMessage('Analizando estructura temática...')
     setDetectedGranules([])
     try {
-      const formData = new FormData()
-      formData.append('syllabus', file)
-      const response = await apiFetch('/api/syllabus/preview', { method: 'POST', body: formData })
-      const payload = (await response.json()) as SyllabusPreviewResponse | { detail?: string }
-      if (!response.ok) {
-        throw new Error((payload as { detail?: string }).detail ?? 'No fue posible analizar el syllabus.')
-      }
-      const preview = payload as SyllabusPreviewResponse
-      const selectedCourse = preview.selectedCourse
+      const preview = await syllabusPreviewMutation.mutateAsync(file)
+      const p = preview as SyllabusPreviewResponse
+      const selectedCourse = p.selectedCourse
       const selectedTopics = selectedCourse?.temas?.length
         ? selectedCourse.temas.map((title, index) => ({ index: index + 1, title }))
-        : preview.detectedTopics
-      setSubjectName(selectedCourse?.asignatura || preview.subjectName || '')
-      setProgramName(pickProgramFromPreview(preview))
+        : p.detectedTopics
+      setSubjectName(selectedCourse?.asignatura || p.subjectName || '')
+      setProgramName(pickProgramFromPreview(p))
       setDetectedGranules(selectedTopics.map((topic) => ({ id: `G${topic.index}`, label: topic.title })))
       setPreviewMessage(selectedTopics.length === 0 ? 'No se encontraron contenidos en la estructura temática. Revisa que el syllabus tenga la sección 5. ESTRUCTURA TEMÁTICA con columna Contenidos.' : '')
     } catch (error) {
@@ -255,200 +228,130 @@ function GranulesView({ onBack }: GranulesViewProps) {
     }
   }
 
-  const createGranulesJob = async (): Promise<string> => {
-    if (!selectedFile || !selectedPrompt) throw new Error('Falta seleccionar syllabus y nivel académico.')
-    const formData = new FormData()
-    formData.append('syllabus', selectedFile)
-    formData.append('nivel', selectedPrompt)
-    const createResponse = await apiFetch('/api/jobs', { method: 'POST', body: formData })
-    if (!createResponse.ok) {
-      throw new Error(await readApiErrorDetail(createResponse, 'No se pudo crear el job de generación.'))
-    }
-    const createdJob = (await createResponse.json()) as { jobId: string; status: string }
-    setJobId(createdJob.jobId)
-    saveLocalSession(createdJob.jobId, selectedPrompt)
-    return createdJob.jobId
-  }
-
-  const startPhaseWithPolling = async (path: string, runningStatus: GenerationStatus, message: string) => {
-    if (!jobId || isGenerating) return
-    stopPolling()
-    setIsGenerating(true)
-    setStatus(runningStatus)
-    setGenerationMessage(message)
-    setAvailableNextAction('none')
-    try {
-      const response = await apiFetch(path, { method: 'POST' })
-      if (!response.ok) {
-        throw new Error(await readApiErrorDetail(response, 'No se pudo iniciar la fase.'))
-      }
-      startPolling(jobId)
-    } catch (error) {
-      setStatus('error')
-      setIsGenerating(false)
-      setGenerationMessage(error instanceof Error ? error.message : 'Error iniciando la fase.')
-    }
-  }
-
   const handleGenerate = async () => {
     if (!selectedFile || !selectedPrompt || isGenerating || detectedGranules.length === 0) return
-    stopPolling()
     setIsGenerating(true)
-    setJobLogs([])
-    setGeneratedDocuments([])
-    setMaterialesByGranule([])
-    setJobId(null)
-    setPhaseStatus(null)
-    setAvailableNextAction('none')
-    setStatus('leyendo syllabus')
     setGenerationMessage(`Fase 1: generando gránulos de ${categoryLabel}. Al finalizar podrás continuar con TXT/DOCX académicos.`)
     try {
-      const createdJobId = await createGranulesJob()
-      setStatus('pendiente')
-      startPolling(createdJobId)
+      const created = await createJobMutation.mutateAsync({ syllabus: selectedFile, nivel: selectedPrompt })
+      setHydratedJobId(created.jobId)
+      saveLocalSession({
+        jobId: created.jobId,
+        prompt: selectedPrompt,
+        subjectName,
+        programName,
+        detectedGranules,
+        previewMessage,
+      })
     } catch (error) {
-      setStatus('error')
-      setIsGenerating(false)
       setGenerationMessage(error instanceof Error ? error.message : 'Error iniciando la generación.')
+      setIsGenerating(false)
     }
   }
 
-  const handleGeneratePipelineLocal = () => {
-    if (!jobId) return
-    void startPhaseWithPolling(`/api/jobs/${jobId}/pipeline-local`, 'generando txt', 'Fase 2: generando TXT y DOCX académicos con el pipeline local existente.')
-  }
-
-  const handleGenerateMaterials = () => {
-    if (!jobId) return
-    void startPhaseWithPolling(`/api/jobs/${jobId}/materials`, 'generando materiales', `Fase 3: generando materiales de ${categoryLabel} por gránulo.`)
-  }
-
-  const handleRetryGranules = () => {
+  const handleGeneratePipelineLocal = async () => {
     if (!jobId || isGenerating) return
-    stopPolling()
     setIsGenerating(true)
-    setStatus('generando gránulos')
-    setLocalUiStatus('running')
-    setGenerationMessage('Reintentando Fase 1: gránulos. Las fases posteriores quedarán pendientes si aplica.')
-    void (async () => {
-      try {
-        const response = await apiFetch(`/api/jobs/${jobId}/retry-granules`, { method: 'POST' })
-        if (!response.ok) throw new Error(await readApiErrorDetail(response, 'No se pudo reintentar gránulos.'))
-        startPolling(jobId)
-      } catch (error) {
-        setStatus('error')
-        setLocalUiStatus('failed')
-        setIsGenerating(false)
-        setGenerationMessage(error instanceof Error ? error.message : 'Error reintentando gránulos.')
-      }
-    })()
+    setGenerationMessage('Fase 2: generando TXT y DOCX académicos con el pipeline local existente.')
+    try {
+      await runPipelineLocalMutation.mutateAsync(jobId)
+    } catch (error) {
+      setGenerationMessage(error instanceof Error ? error.message : 'Error iniciando la fase.')
+      setIsGenerating(false)
+    }
   }
 
-  const handleRetryPipelineLocal = () => {
+  const handleGenerateMaterials = async () => {
     if (!jobId || isGenerating) return
-    stopPolling()
     setIsGenerating(true)
-    setStatus('generando txt')
-    setLocalUiStatus('running')
+    setGenerationMessage(`Fase 3: generando materiales de ${categoryLabel} por gránulo.`)
+    try {
+      await runMaterialsMutation.mutateAsync(jobId)
+    } catch (error) {
+      setGenerationMessage(error instanceof Error ? error.message : 'Error iniciando la fase.')
+      setIsGenerating(false)
+    }
+  }
+
+  const handleRetryGranules = async () => {
+    if (!jobId || isGenerating) return
+    setIsGenerating(true)
+    setGenerationMessage('Reintentando Fase 1: gránulos.')
+    try {
+      await retryGranulesMutation.mutateAsync(jobId)
+    } catch (error) {
+      setGenerationMessage(error instanceof Error ? error.message : 'Error reintentando gránulos.')
+      setIsGenerating(false)
+    }
+  }
+
+  const handleRetryPipelineLocal = async () => {
+    if (!jobId || isGenerating) return
+    setIsGenerating(true)
     setGenerationMessage('Reintentando Fase 2: TXT/DOCX sin regenerar gránulos.')
-    void (async () => {
-      try {
-        const response = await apiFetch(`/api/jobs/${jobId}/retry-pipeline-local`, { method: 'POST' })
-        if (!response.ok) throw new Error(await readApiErrorDetail(response, 'No se pudo reintentar TXT/DOCX.'))
-        startPolling(jobId)
-      } catch (error) {
-        setStatus('error')
-        setLocalUiStatus('failed')
-        setIsGenerating(false)
-        setGenerationMessage(error instanceof Error ? error.message : 'Error reintentando TXT/DOCX.')
-      }
-    })()
+    try {
+      await retryPipelineLocalMutation.mutateAsync(jobId)
+    } catch (error) {
+      setGenerationMessage(error instanceof Error ? error.message : 'Error reintentando TXT/DOCX.')
+      setIsGenerating(false)
+    }
   }
 
-  const handleRetryMaterials = () => {
+  const handleRetryMaterials = async () => {
     if (!jobId || isGenerating) return
-    stopPolling()
     setIsGenerating(true)
-    setStatus('generando materiales')
-    setLocalUiStatus('running')
-    setGenerationMessage('Reintentando Fase 3: recursos/materiales sin regenerar fases previas.')
-    void (async () => {
-      try {
-        const response = await apiFetch(`/api/jobs/${jobId}/retry-materials`, { method: 'POST' })
-        if (!response.ok) throw new Error(await readApiErrorDetail(response, 'No se pudo reintentar recursos.'))
-        startPolling(jobId)
-      } catch (error) {
-        setStatus('error')
-        setLocalUiStatus('failed')
-        setIsGenerating(false)
-        setGenerationMessage(error instanceof Error ? error.message : 'Error reintentando recursos.')
-      }
-    })()
+    setGenerationMessage('Reintentando Fase 3: recursos/materiales.')
+    try {
+      await retryMaterialsMutation.mutateAsync(jobId)
+    } catch (error) {
+      setGenerationMessage(error instanceof Error ? error.message : 'Error reintentando recursos.')
+      setIsGenerating(false)
+    }
   }
 
   const handleGenerateFullLocalPackage = async () => {
     if (!selectedFile || !selectedPrompt || isGenerating || isFullPipelineRunning || detectedGranules.length === 0) return
-    stopPolling()
     setIsFullPipelineRunning(true)
     setIsGenerating(true)
-    setJobLogs([])
-    setGeneratedDocuments([])
-    setMaterialesByGranule([])
-    setJobId(null)
-    setPhaseStatus(null)
-    setAvailableNextAction('none')
-    setStatus('leyendo syllabus')
-    setGenerationMessage(`Flujo completo: generando gránulos, luego TXT/DOCX y materiales de ${categoryLabel} por gránulo.`)
+    setGenerationMessage(`Flujo completo: generando gránulos, luego TXT/DOCX y materiales de ${categoryLabel}.`)
     try {
-      const createdJobId = await createGranulesJob()
-      setJobId(createdJobId)
-      startPolling(createdJobId)
+      const created = await createJobMutation.mutateAsync({ syllabus: selectedFile, nivel: selectedPrompt })
+      setHydratedJobId(created.jobId)
+      saveLocalSession({ jobId: created.jobId, prompt: selectedPrompt, subjectName, programName, detectedGranules, previewMessage })
       await new Promise<void>((resolve, reject) => {
         const check = setInterval(async () => {
           try {
-            const resp = await apiFetch(`/api/jobs/${createdJobId}`)
-            if (!resp.ok) { clearInterval(check); reject(new Error('Job perdido durante flujo completo.')); return }
+            const resp = await apiFetch(`/api/jobs/${created.jobId}`)
+            if (!resp.ok) { clearInterval(check); reject(new Error('Job perdido.')); return }
             const payload = (await resp.json()) as JobStatusResponse
-            applyJobPayload(payload)
             if (payload.status === 'completed' || payload.status === 'failed' || payload.status === 'cancelled') {
               clearInterval(check)
-              if (payload.status === 'failed') reject(new Error('Error en fase 1: generar gránulos.'))
-              else if (payload.status === 'cancelled') reject(new Error('Proceso cancelado.'))
+              if (payload.status === 'failed') reject(new Error('Error en fase 1.'))
+              else if (payload.status === 'cancelled') reject(new Error('Cancelado.'))
               else resolve()
             }
-          } catch (e) {
-            clearInterval(check)
-            reject(e)
-          }
+          } catch (e) { clearInterval(check); reject(e) }
         }, 3000)
       })
-      stopPolling()
-      await startPhaseWithPolling(`/api/jobs/${createdJobId}/pipeline-local`, 'generando txt', 'Fase 2: generando TXT/DOCX académicos.')
+      await runPipelineLocalMutation.mutateAsync(created.jobId)
       await new Promise<void>((resolve, reject) => {
         const check = setInterval(async () => {
           try {
-            const resp = await apiFetch(`/api/jobs/${createdJobId}`)
-            if (!resp.ok) { clearInterval(check); reject(new Error('Job perdido durante fase 2.')); return }
+            const resp = await apiFetch(`/api/jobs/${created.jobId}`)
+            if (!resp.ok) { clearInterval(check); reject(new Error('Job perdido.')); return }
             const payload = (await resp.json()) as JobStatusResponse
-            applyJobPayload(payload)
             if (payload.status === 'completed' || payload.status === 'failed' || payload.status === 'cancelled') {
               clearInterval(check)
               if (payload.status === 'failed') reject(new Error('Error en fase 2.'))
               else resolve()
             }
-          } catch (e) {
-            clearInterval(check)
-            reject(e)
-          }
+          } catch (e) { clearInterval(check); reject(e) }
         }, 3000)
       })
-      stopPolling()
-      await startPhaseWithPolling(`/api/jobs/${createdJobId}/materials`, 'generando materiales', 'Fase 3: generando materiales por gránulo.')
-      setStatus('finalizado')
+      await runMaterialsMutation.mutateAsync(created.jobId)
       setGenerationMessage('Paquete completo listo. Puedes descargar el ZIP final institucional.')
     } catch (error) {
-      setStatus('error')
-      setGenerationMessage(error instanceof Error ? error.message : 'Error ejecutando el flujo completo local.')
+      setGenerationMessage(error instanceof Error ? error.message : 'Error ejecutando el flujo completo.')
     } finally {
       setIsGenerating(false)
       setIsFullPipelineRunning(false)
@@ -456,44 +359,29 @@ function GranulesView({ onBack }: GranulesViewProps) {
   }
 
   const handleRetryCurrentPhase = () => {
-    if (phaseStatus?.specializationMaterials.status === 'failed') { handleRetryMaterials(); return }
-    if (phaseStatus?.pipelineLocal.status === 'failed') { handleRetryPipelineLocal(); return }
-    if (phaseStatus?.granules.status === 'failed') { handleRetryGranules(); return }
-    if (jobId) { handleRetryGranules() } else { void handleGenerate() }
+    if (phaseStatus?.specializationMaterials.status === 'failed') { void handleRetryMaterials(); return }
+    if (phaseStatus?.pipelineLocal.status === 'failed') { void handleRetryPipelineLocal(); return }
+    if (phaseStatus?.granules.status === 'failed') { void handleRetryGranules(); return }
+    if (jobId) { void handleRetryGranules() } else { void handleGenerate() }
   }
 
-  const handleCancelJob = () => {
+  const handleCancelJob = async () => {
     if (!jobId || isCancelling) return
-    stopPolling()
     setIsCancelling(true)
     setIsGenerating(false)
     setIsFullPipelineRunning(false)
-    setStatus('cancelado')
-    setLocalUiStatus('cancelled')
-    setGenerationMessage('Proceso cancelado. Puedes iniciar uno nuevo o continuar desde una fase válida si hay entregables disponibles.')
-    void (async () => {
-      try {
-        const response = await apiFetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' })
-        if (response.ok) {
-          await apiFetch(`/api/jobs/${jobId}`).catch(() => undefined)
-        } else if (isMissingJobResponse(response)) {
-          clearLocalSession()
-          setJobId(null)
-          setStatus('missing_job')
-          setLocalUiStatus('missing_job')
-          setGenerationMessage(MISSING_JOB_MESSAGE)
-        } else {
-          setGenerationMessage(await readApiErrorDetail(response, 'No se pudo cancelar el proceso en backend, pero se detuvo el seguimiento local.'))
-        }
-      } catch (error) {
-        setGenerationMessage(error instanceof Error ? error.message : 'No se pudo contactar el backend para cancelar.')
-      } finally {
-        setIsCancelling(false)
-      }
-    })()
+    try {
+      await cancelJobMutation.mutateAsync(jobId)
+    } catch (error) {
+      setGenerationMessage(error instanceof Error ? error.message : 'No se pudo contactar el backend para cancelar.')
+    } finally {
+      setIsCancelling(false)
+    }
   }
 
-  const handleReset = () => { resetForNewSyllabus() }
+  const handleReset = () => {
+    resetForNewSyllabus()
+  }
 
   const handlePromptChange = (prompt: PromptType | '') => {
     setSelectedPrompt(prompt)
@@ -504,26 +392,30 @@ function GranulesView({ onBack }: GranulesViewProps) {
     let cancelled = false
     apiFetch('/api/categories')
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('No categories')))
-      .then((payload: CategoryConfig[]) => {
-        if (!cancelled && Array.isArray(payload) && payload.length > 0) setCategories(payload)
-      })
+      .then((payload: CategoryConfig[]) => { if (!cancelled && Array.isArray(payload) && payload.length > 0) setCategories(payload) })
       .catch(() => { if (!cancelled) setCategories(CATEGORY_CONFIGS) })
     return () => { cancelled = true }
   }, [])
 
+  useEffect(() => {
+    const session = loadLocalSession()
+    if (!session?.jobId) return
+    setHydratedJobId(session.jobId)
+    if (session.prompt) setSelectedPrompt(session.prompt as PromptType)
+    if (session.subjectName) setSubjectName(session.subjectName)
+    if (session.programName) setProgramName(session.programName)
+    if (session.detectedGranules) setDetectedGranules(session.detectedGranules)
+    if (session.previewMessage) setPreviewMessage(session.previewMessage)
+  }, [])
+
   const consoleStatus = status === 'error'
     ? 'Error'
-    : status === 'cancelado' || localUiStatus === 'cancelled'
-      ? 'Cancelado'
-      : localUiStatus === 'missing_job'
-        ? 'Proceso no disponible'
-        : localUiStatus === 'recoverable_error'
-          ? 'Revisar backend'
-    : availableNextAction === 'download_package'
-      ? 'Paquete listo'
-      : isGenerating
-        ? 'Procesando'
-        : 'Sistema listo'
+    : status === 'cancelado' || localUiStatus === 'cancelled' ? 'Cancelado'
+    : localUiStatus === 'missing_job' ? 'Proceso no disponible'
+    : localUiStatus === 'recoverable_error' ? 'Revisar backend'
+    : availableNextAction === 'download_package' ? 'Paquete listo'
+    : isGenerating ? 'Procesando'
+    : 'Sistema listo'
 
   const canRunFullPackage = Boolean(selectedFile) && detectedGranules.length > 0 && !isGenerating && !isFullPipelineRunning
 
@@ -542,7 +434,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
     if (isGenerating || isCancelling) return { general: 'running', phases, primaryAction: 'cancel', primaryLabel: isCancelling ? 'Cancelando...' : 'Cancelar proceso', message: 'Hay una fase en ejecución. Puedes cancelar el proceso sin recargar la página.' }
     if (localUiStatus === 'missing_job') return { general: 'missing_job', phases, primaryAction: 'none', primaryLabel: '', message: MISSING_JOB_MESSAGE }
     if (localUiStatus === 'recoverable_error') return { general: 'recoverable_error', phases, primaryAction: 'none', primaryLabel: '', message: generationMessage || 'No fue posible consultar el backend. Revisa el servicio e intenta de nuevo.' }
-    if (localUiStatus === 'cancelled' || status === 'cancelado') return { general: 'cancelled', phases, primaryAction: 'none', primaryLabel: '', message: generationMessage || 'Proceso cancelado. Puedes iniciar uno nuevo o continuar desde una fase válida si hay entregables disponibles.' }
+    if (localUiStatus === 'cancelled' || status === 'cancelado') return { general: 'cancelled', phases, primaryAction: 'none', primaryLabel: '', message: generationMessage || 'Proceso cancelado. Puedes iniciar uno nuevo o continuar desde una fase válida.' }
     if (!hasSyllabus) return { general: 'syllabus_missing', phases, primaryAction: 'none', primaryLabel: '', message: 'Carga un syllabus .docx para comenzar.' }
     if (status === 'error' || granules === 'failed' || txtDocx === 'failed' || materials === 'failed') return { general: 'failed', phases, primaryAction: 'retry_current_phase', primaryLabel: 'Reintentar fase actual', message: generationMessage || 'La fase activa falló. Puedes reintentar solo esa fase.' }
     if (zipCompleted) return { general: 'completed', phases, primaryAction: 'download_zip', primaryLabel: 'Descargar ZIP final', message: 'ZIP final disponible con nombres internos cortos compatibles con Windows.' }
@@ -554,43 +446,12 @@ function GranulesView({ onBack }: GranulesViewProps) {
   }, [availableNextAction, currentPhase, detectedGranules.length, generationMessage, hasSyllabus, isCancelling, isGenerating, localUiStatus, phaseStatus, previewMessage, status])
 
   const handlePrimaryPipelineAction = () => {
-    if (pipelineState.primaryAction === 'cancel') handleCancelJob()
+    if (pipelineState.primaryAction === 'cancel') void handleCancelJob()
     if (pipelineState.primaryAction === 'generate_granules') void handleGenerate()
-    if (pipelineState.primaryAction === 'generate_pipeline_local') handleGeneratePipelineLocal()
-    if (pipelineState.primaryAction === 'generate_materials') handleGenerateMaterials()
-    if (pipelineState.primaryAction === 'retry_current_phase') handleRetryCurrentPhase()
+    if (pipelineState.primaryAction === 'generate_pipeline_local') void handleGeneratePipelineLocal()
+    if (pipelineState.primaryAction === 'generate_materials') void handleGenerateMaterials()
+    if (pipelineState.primaryAction === 'retry_current_phase') void handleRetryCurrentPhase()
   }
-
-  useEffect(() => {
-    const session = loadLocalSession()
-    if (!session?.jobId) return
-    let cancelled = false
-    void apiFetch(`/api/jobs/${session.jobId}`)
-      .then(async (response) => {
-        if (cancelled) return
-        if (isMissingJobResponse(response)) {
-          clearLocalSession()
-          setJobId(null)
-          setStatus('missing_job')
-          setLocalUiStatus('missing_job')
-          setGenerationMessage(MISSING_JOB_MESSAGE)
-          return
-        }
-        if (!response.ok) {
-          clearLocalSession()
-          return
-        }
-        const payload = (await response.json()) as JobStatusResponse
-        setJobId(session.jobId)
-        if (session.prompt) setSelectedPrompt(session.prompt as PromptType)
-        applyJobPayload(payload)
-        if (payload.status === 'running' || payload.status === 'queued') {
-          startPolling(session.jobId)
-        }
-      })
-      .catch(() => { if (!cancelled) clearLocalSession() })
-    return () => { cancelled = true }
-  }, [applyJobPayload, startPolling])
 
   useEffect(() => {
     if (!selectedFile || !canUploadSyllabus) return
@@ -682,13 +543,13 @@ function GranulesView({ onBack }: GranulesViewProps) {
               <div className="console-secondary-actions">
                 {jobId && !isGenerating && <button type="button" className="secondary-button" onClick={handleReset}>Limpiar sesión</button>}
                 {jobId && (phaseStatus?.granules.status === 'failed' || phaseStatus?.granules.status === 'completed') && !isGenerating && (
-                  <button type="button" className="secondary-button" onClick={handleRetryGranules}>Regenerar gránulos</button>
+                  <button type="button" className="secondary-button" onClick={() => void handleRetryGranules()}>Regenerar gránulos</button>
                 )}
                 {jobId && phaseStatus?.granules.status === 'completed' && (phaseStatus?.pipelineLocal.status === 'failed' || phaseStatus?.pipelineLocal.status === 'completed') && !isGenerating && (
-                  <button type="button" className="secondary-button" onClick={handleRetryPipelineLocal}>Regenerar TXT/DOCX</button>
+                  <button type="button" className="secondary-button" onClick={() => void handleRetryPipelineLocal()}>Regenerar TXT/DOCX</button>
                 )}
                 {jobId && phaseStatus?.pipelineLocal.status === 'completed' && (phaseStatus?.specializationMaterials.status === 'failed' || phaseStatus?.specializationMaterials.status === 'completed') && !isGenerating && (
-                  <button type="button" className="secondary-button" onClick={handleRetryMaterials}>Regenerar recursos</button>
+                  <button type="button" className="secondary-button" onClick={() => void handleRetryMaterials()}>Regenerar recursos</button>
                 )}
                 {jobId && generatedDocuments.length > 0 && (
                   <a className="secondary-button link-button" href={`${API_BASE_URL}/api/jobs/${jobId}/download/granules`} target="_blank" rel="noreferrer">Descargar gránulos</a>
@@ -703,7 +564,7 @@ function GranulesView({ onBack }: GranulesViewProps) {
                 <p className="card-description">Ejecuta todas las fases en secuencia. Úsalo cuando no necesites revisar o descargar entregables intermedios.</p>
               </div>
               {canRunFullPackage ? (
-                <button type="button" className="secondary-button" onClick={handleGenerateFullLocalPackage}>
+                <button type="button" className="secondary-button" onClick={() => void handleGenerateFullLocalPackage()}>
                   {isFullPipelineRunning ? 'Generando paquete...' : 'Generar paquete académico completo'}
                 </button>
               ) : (

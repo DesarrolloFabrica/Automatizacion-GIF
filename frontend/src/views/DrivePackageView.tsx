@@ -4,10 +4,10 @@ import FileDropzone from '../components/FileDropzone'
 import JobProgressPanel from '../components/JobProgressPanel'
 import PromptSelector from '../components/PromptSelector'
 import { CATEGORY_CONFIGS, getCategoryConfig } from '../data/categories'
-import { useJobPoller } from '../hooks/useJobPoller'
 import { apiFetch, isMissingJobResponse, readApiErrorDetail } from '../lib/api'
 import { clearDriveSession, loadDriveSession, saveDriveSession } from '../lib/sessionStorage'
 import { pickProgramFromPreview } from '../lib/pickProgramFromPreview'
+import { useCancelJob, useJobStatus, useSyllabusPreview } from '../queries/jobs'
 import type { CategoryConfig, DriveSyncSnapshot, DriveUploadResponse, GenerationStatus, JobPhaseStatus, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface DrivePackageViewProps {
@@ -72,10 +72,19 @@ function mergeDetectedGranulesFromJobFiles(
   return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
 }
 
-function loadInitialDriveSession(): { jobId: string; driveFolderId: string; prompt: PromptType | ''; runMode?: DriveRunMode } | null {
+function loadInitialDriveSession(): { jobId: string; driveFolderId: string; prompt: PromptType | ''; runMode?: DriveRunMode; subjectName?: string; programName?: string; detectedGranules?: Array<{ id: string; label: string }>; previewMessage?: string } | null {
   const s = loadDriveSession()
   if (!s) return null
-  return { jobId: s.jobId, driveFolderId: s.driveFolderId ?? '', prompt: (s.prompt ?? '') as PromptType | '', runMode: s.driveFolderId ? 'stepped' : 'full' }
+  return {
+    jobId: s.jobId,
+    driveFolderId: s.driveFolderId ?? '',
+    prompt: (s.prompt ?? '') as PromptType | '',
+    runMode: s.driveFolderId ? 'stepped' : 'full',
+    subjectName: s.subjectName,
+    programName: s.programName,
+    detectedGranules: s.detectedGranules,
+    previewMessage: s.previewMessage,
+  }
 }
 
 function DrivePackageView({ onBack }: DrivePackageViewProps) {
@@ -161,53 +170,51 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     driveRunModeRef.current = driveRunMode
   }, [driveRunMode])
 
-  const applyJobPayload = useCallback((payload: JobStatusResponse) => {
-    setStatus(payload.progressStep)
-    setJobLogs(payload.logs ?? [])
-    setGeneratedDocuments(payload.files ?? [])
-    setPhaseStatus(payload.phaseStatus)
-    setCurrentPhase(payload.currentPhase)
-    setDriveSync(payload.driveSync ?? null)
-    if (payload.categoryKey) {
-      setSelectedPrompt(payload.categoryKey as PromptType)
-    }
-    setDetectedGranules((prev) => mergeDetectedGranulesFromJobFiles(prev, payload.files ?? []))
-    setDriveFolderId((prev) => {
-      if (prev.trim()) return prev
-      const ds = payload.driveSync
-      const wid = ds?.driveWorkspaceFolderId || ds?.driveParentFolderId
-      return typeof wid === 'string' && wid.trim() ? wid : prev
-    })
-  }, [])
+  const [hydratedJobId, setHydratedJobId] = useState<string | null>(initialSession?.jobId ?? null)
 
-  const { start: startPolling, stop: stopPolling } = useJobPoller({
-    onStatus: (payload) => { applyJobPayload(payload) },
-    onComplete: (payload) => {
-      applyJobPayload(payload)
-      if (isPhasedDrivePackageComplete(payload.driveSync)) {
-        setDriveStage('ready')
-        setStatus('finalizado')
-        setDriveMessage('Paquete Drive listo (sincronizado por fases).')
-      }
-    },
-    onFailed: () => {
-      setDriveStage('error')
-      setStatus('error')
-      setDriveMessage('Error en el flujo Drive. Usa «Reintentar flujo Drive» o «Nuevo paquete».')
-    },
-    onCancelled: () => {
-      setDriveMessage('Cancelación enviada. Lo ya completado se conserva; puedes usar «Continuar paquete» más tarde.')
-    },
+  const { data: jobData } = useJobStatus(hydratedJobId, {
     onMissing: () => {
       clearDriveSession()
       setPackageJobId(null)
+      setHydratedJobId(null)
       setDriveMessage('Sesión expirada: el proceso ya no está disponible en el backend.')
     },
-    onRecoverableError: (error) => {
-      setDriveStage('error')
-      setDriveMessage(error)
-    },
   })
+
+  useEffect(() => {
+    if (!jobData) return
+    setStatus(jobData.progressStep)
+    setJobLogs(jobData.logs ?? [])
+    setGeneratedDocuments(jobData.files ?? [])
+    setPhaseStatus(jobData.phaseStatus)
+    setCurrentPhase(jobData.currentPhase)
+    setDriveSync(jobData.driveSync ?? null)
+    if (jobData.categoryKey) {
+      setSelectedPrompt(jobData.categoryKey as PromptType)
+    }
+    setDetectedGranules((prev) => mergeDetectedGranulesFromJobFiles(prev, jobData.files ?? []))
+    setDriveFolderId((prev) => {
+      if (prev.trim()) return prev
+      const ds = jobData.driveSync
+      const wid = ds?.driveWorkspaceFolderId || ds?.driveParentFolderId
+      return typeof wid === 'string' && wid.trim() ? wid : prev
+    })
+    if (jobData.status === 'completed' && isPhasedDrivePackageComplete(jobData.driveSync)) {
+      setDriveStage('ready')
+      setStatus('finalizado')
+      setDriveMessage('Paquete Drive listo (sincronizado por fases).')
+    }
+    if (jobData.status === 'failed') {
+      setDriveStage('error')
+      setStatus('error')
+    }
+    if (jobData.status === 'cancelled') {
+      setDriveMessage('Cancelación enviada. Lo ya completado se conserva.')
+    }
+  }, [jobData])
+
+  const cancelJobMutation = useCancelJob()
+  const syllabusPreviewMutation = useSyllabusPreview()
 
   const resetForNewSyllabus = () => {
     setSelectedFile(null)
@@ -230,7 +237,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     setDriveRunMode('full')
     clearDriveSession()
     runLockRef.current = false
-    stopPolling()
+    setHydratedJobId(null)
   }
 
   const getBackendPhaseStatus = (payload: JobStatusResponse, phaseKey: BackendPhaseKey) => {
@@ -242,12 +249,11 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     if (isMissingJobResponse(statusResponse)) {
       clearDriveSession()
       setPackageJobId(null)
+      setHydratedJobId(null)
       throw new Error('El proceso ya no existe, fue limpiado o el backend se reinició.')
     }
     if (!statusResponse.ok) throw new Error(await readApiErrorDetail(statusResponse, 'No fue posible consultar el estado del job.'))
-    const payload = (await statusResponse.json()) as JobStatusResponse
-    applyJobPayload(payload)
-    return payload
+    return (await statusResponse.json()) as JobStatusResponse
   }
 
   const waitForBackendPhase = (targetJobId: string, phaseKey: BackendPhaseKey, phaseLabel: string): Promise<JobStatusResponse> => {
@@ -409,30 +415,15 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     setIsAnalyzingSyllabus(true)
     setPreviewMessage('Analizando estructura temática...')
     setDetectedGranules([])
-
     try {
-      const formData = new FormData()
-      formData.append('syllabus', file)
-
-      const response = await apiFetch('/api/syllabus/preview', {
-        method: 'POST',
-        body: formData,
-      })
-      const payload = (await response.json()) as SyllabusPreviewResponse | { detail?: string }
-
-      if (!response.ok) {
-        throw new Error((payload as { detail?: string }).detail ?? 'No fue posible analizar el syllabus.')
-      }
-
-      const preview = payload as SyllabusPreviewResponse
-      const selectedCourse = preview.selectedCourse
+      const preview = await syllabusPreviewMutation.mutateAsync(file)
+      const p = preview as SyllabusPreviewResponse
+      const selectedCourse = p.selectedCourse
       const selectedTopics = selectedCourse?.temas?.length
         ? selectedCourse.temas.map((title, index) => ({ index: index + 1, title }))
-        : preview.detectedTopics
-
-      const pickedProgram = pickProgramFromPreview(preview)
-
-      setSubjectName(selectedCourse?.asignatura || preview.subjectName || '')
+        : p.detectedTopics
+      const pickedProgram = pickProgramFromPreview(p)
+      setSubjectName(selectedCourse?.asignatura || p.subjectName || '')
       setProgramName(pickedProgram)
       setDetectedGranules(selectedTopics.map((topic) => ({ id: `G${topic.index}`, label: topic.title })))
       setPreviewMessage(selectedTopics.length === 0 ? 'No se encontraron contenidos en la estructura temática. Revisa que el syllabus tenga la sección 5. ESTRUCTURA TEMÁTICA con columna Contenidos.' : '')
@@ -467,14 +458,14 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
         setGeneratedDocuments([])
         setPhaseStatus(null)
       }
-      stopPolling()
+      // React Query handles polling
 
       let activeDrivePhase: DrivePhaseKey = 'granules'
 
       try {
         const jobId = existingJobId ?? (await createGranulesJob())
         setPackageJobId(jobId)
-        saveDriveSession(jobId, driveFolderId, selectedPrompt as PromptType)
+        saveDriveSession({ jobId, driveFolderId, prompt: selectedPrompt as PromptType })
 
         activeDrivePhase = 'granules'
         await ensureGranulesPhase(jobId)
@@ -499,7 +490,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
         if (activeDrivePhase === 'drive') console.error('[DrivePackage] Upload-drive falló', error)
         setDriveMessage(`Error en ${phaseNames[activeDrivePhase]}: ${detail}`)
       } finally {
-        stopPolling()
+        // React Query handles polling
         runLockRef.current = false
         setIsRunning(false)
       }
@@ -510,7 +501,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
   })
 
   const persistDriveSessionJob = (jobId: string) => {
-    saveDriveSession(jobId, driveFolderId, selectedPrompt as PromptType)
+    saveDriveSession({ jobId, driveFolderId, prompt: selectedPrompt as PromptType })
   }
 
   const handleDriveRunModeChange = (mode: DriveRunMode) => {
@@ -518,7 +509,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     setDriveRunMode(mode)
     const s = loadDriveSession()
     if (s?.jobId) {
-      saveDriveSession(s.jobId, s.driveFolderId ?? driveFolderId, (s.prompt ?? selectedPrompt) as PromptType)
+      saveDriveSession({ jobId: s.jobId, driveFolderId: s.driveFolderId ?? driveFolderId, prompt: (s.prompt ?? selectedPrompt) as PromptType })
     }
   }
 
@@ -578,7 +569,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     runLockRef.current = true
     setIsRunning(true)
     setFailedDrivePhase(null)
-    stopPolling()
+    // React Query handles polling
     try {
       await work()
       await fetchJobStatus(packageJobId!)
@@ -588,7 +579,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       setStatus('error')
       setDriveMessage(error instanceof Error ? error.message : 'Error en el flujo Drive.')
     } finally {
-      stopPolling()
+      // React Query handles polling
       runLockRef.current = false
       setIsRunning(false)
     }
@@ -602,7 +593,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
       setIsRunning(true)
       setFailedDrivePhase(null)
       setDriveMessage('Fase 1: generando gránulos…')
-      stopPolling()
+      // React Query handles polling
       try {
         const jobId = packageJobId ?? (await createGranulesJob())
         setPackageJobId(jobId)
@@ -618,7 +609,7 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
         setStatus('error')
         setDriveMessage(error instanceof Error ? error.message : 'Error en gránulos.')
       } finally {
-        stopPolling()
+        // React Query handles polling
         runLockRef.current = false
         setIsRunning(false)
       }
@@ -729,16 +720,10 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
   const cancelGeneration = async () => {
     if (!packageJobId) return
     try {
-      const res = await apiFetch(`/api/jobs/${packageJobId}/cancel`, { method: 'POST' })
-      if (!res.ok) {
-        setDriveMessage(await readApiErrorDetail(res, 'No se pudo cancelar el proceso.'))
-        return
-      }
-      stopPolling()
+      await cancelJobMutation.mutateAsync(packageJobId)
       runLockRef.current = false
       setIsRunning(false)
       setDriveMessage('Cancelación enviada. Lo ya completado se conserva; puedes usar «Continuar paquete» más tarde.')
-      await fetchJobStatus(packageJobId)
     } catch (error) {
       setDriveMessage(error instanceof Error ? error.message : 'Error al cancelar.')
     }
@@ -750,46 +735,14 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
 
   useEffect(() => {
     if (!initialSession?.jobId) return
-    let cancelled = false
-    void apiFetch(`/api/jobs/${initialSession.jobId}`)
-      .then(async (response) => {
-        if (cancelled) return
-        if (isMissingJobResponse(response)) {
-          clearDriveSession()
-          setPackageJobId(null)
-          setDriveMessage('Sesión expirada: el proceso ya no está disponible.')
-          return
-        }
-        if (!response.ok) {
-          clearDriveSession()
-          setPackageJobId(null)
-          return
-        }
-        const payload = (await response.json()) as JobStatusResponse
-        applyJobPayload(payload)
-        if (isPhasedDrivePackageComplete(payload.driveSync)) {
-          setDriveStage('ready')
-          setDriveResult(snapshotToDriveUploadResponse(payload.driveSync!, initialSession.jobId))
-          setStatus('finalizado')
-          setDriveMessage('Paquete Drive listo (sincronizado por fases).')
-          return
-        }
-        if (payload.status === 'running' || payload.status === 'queued') {
-          if (driveRunModeRef.current === 'stepped') {
-            startPolling(initialSession.jobId)
-          } else {
-            void executeDrivePipelineRef.current(initialSession.jobId, { force: true })
-          }
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          clearDriveSession()
-          setPackageJobId(null)
-        }
-      })
-    return () => { cancelled = true }
-  }, [initialSession, applyJobPayload, startPolling])
+    setHydratedJobId(initialSession.jobId)
+    if (initialSession.prompt) setSelectedPrompt(initialSession.prompt)
+    if (initialSession.driveFolderId) setDriveFolderId(initialSession.driveFolderId)
+    if (initialSession.subjectName) setSubjectName(initialSession.subjectName)
+    if (initialSession.programName) setProgramName(initialSession.programName)
+    if (initialSession.detectedGranules) setDetectedGranules(initialSession.detectedGranules)
+    if (initialSession.previewMessage) setPreviewMessage(initialSession.previewMessage)
+  }, [initialSession])
 
   const handlePromptChange = (prompt: PromptType | '') => {
     setSelectedPrompt(prompt)
@@ -837,8 +790,6 @@ function DrivePackageView({ onBack }: DrivePackageViewProps) {
     const y = Math.round(window.scrollY + el.getBoundingClientRect().top)
     window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' })
   }, [])
-
-  useEffect(() => () => stopPolling(), [])
 
   useEffect(() => {
     let cancelled = false
