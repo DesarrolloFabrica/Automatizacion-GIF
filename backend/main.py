@@ -38,6 +38,7 @@ from storage import (
     collect_partial_package_files_for_drive_phase,
     create_docs_zip,
     create_full_outputs_zip,
+    create_local_full_outputs_zip,
     create_outputs_zip,
     create_phase_zip,
     default_drive_phase_status,
@@ -698,6 +699,10 @@ def cancel_generation_job(job_id: str) -> JobCancelResponse:
     if job.job_kind != "granules_academic_package":
         raise HTTPException(status_code=400, detail="Este endpoint solo aplica a jobs de paquete académico.")
     terminated = terminate_job_subprocess(job_id)
+    phase_status = read_phase_status(job_id)
+    for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive"):
+        if phase_status.get(phase_key, {}).get("status") == "running":
+            update_phase_status(job_id, phase_key, status="cancelled", files=phase_status.get(phase_key, {}).get("files", []))
     append_log(job_id, "=== Cancelación solicitada por el usuario ===")
     msg = (
         "Proceso local detenido. Puedes reanudar más tarde desde la misma carpeta del job si las fases siguen pendientes."
@@ -1130,7 +1135,7 @@ def download_all_generated_files(job_id: str) -> FileResponse:
 
     if job.job_kind == "granules_academic_package":
         try:
-            zip_path = create_full_outputs_zip(job_id)
+            zip_path = create_local_full_outputs_zip(job_id)
         except AcademicPackageError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         package_name = academic_package_filename(infer_program_name_for_package(job_id))

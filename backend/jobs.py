@@ -55,6 +55,7 @@ _JOBS: dict[str, JobRecord] = {}
 _LOCK = threading.Lock()
 # Subprocesos activos (granulos / fases) para poder cancelar sin reiniciar el servidor.
 _ACTIVE_SUBPROCESSES: dict[str, subprocess.Popen] = {}
+_CANCEL_REQUESTED: set[str] = set()
 
 
 def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str = "granules") -> JobRecord:
@@ -91,11 +92,24 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
     ]
     if running_phases:
         now = datetime.utcnow().isoformat()
+        started_at = phase_status[running_phases[0]].get("startedAt")
+        is_orphaned = False
+        if started_at:
+            try:
+                started_dt = datetime.fromisoformat(started_at)
+                elapsed = (datetime.utcnow() - started_dt).total_seconds()
+                if elapsed > 3600:
+                    is_orphaned = True
+            except (ValueError, TypeError):
+                is_orphaned = True
         for phase_key in running_phases:
             phase_status[phase_key]["status"] = "failed"
             phase_status[phase_key]["finishedAt"] = now
         write_phase_status(job_id, phase_status)
-        logs.append("=== Job marcado como fallido: el servidor se reinicio mientras habia una fase en ejecucion ===")
+        if is_orphaned:
+            logs.append("=== El proceso quedo incompleto por reinicio o perdida de instancia (mas de 1 hora sin actividad). ===")
+        else:
+            logs.append("=== Job marcado como fallido: el servidor se reinicio mientras habia una fase en ejecucion ===")
 
     phases = [phase_status.get(key, {}) for key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")]
     status = "failed" if running_phases or any(phase.get("status") == "failed" for phase in phases) else "completed"
@@ -127,8 +141,15 @@ def get_job(job_id: str) -> JobRecord | None:
 
 def terminate_job_subprocess(job_id: str) -> bool:
     """Intenta detener el proceso del job (SIGTERM). Devuelve True si había proceso activo."""
+    _CANCEL_REQUESTED.add(job_id)
     proc = _ACTIVE_SUBPROCESSES.get(job_id)
     if proc is None:
+        with _LOCK:
+            record = _JOBS.get(job_id)
+            if record is not None:
+                record.status = "cancelled"
+                record.progress_step = "cancelado"
+                record.finished_at = datetime.utcnow().isoformat()
         return False
     try:
         proc.terminate()
@@ -189,8 +210,9 @@ def set_job_running(job_id: str, initial_progress_step: str = "leyendo syllabus"
 def set_job_finished(job_id: str, success: bool, files_listing_fn: Callable[[str], list[str]] | None = None) -> None:
     with _LOCK:
         record = _JOBS[job_id]
-        record.status = "completed" if success else "failed"
-        record.progress_step = "finalizado" if success else "error"
+        was_cancelled = job_id in _CANCEL_REQUESTED
+        record.status = "cancelled" if was_cancelled else "completed" if success else "failed"
+        record.progress_step = "cancelado" if was_cancelled else "finalizado" if success else "error"
         if files_listing_fn is not None:
             record.files = files_listing_fn(job_id)
         elif record.job_kind == "granules":
@@ -198,6 +220,14 @@ def set_job_finished(job_id: str, success: bool, files_listing_fn: Callable[[str
         else:
             record.files = []
         record.finished_at = datetime.utcnow().isoformat()
+    if was_cancelled:
+        phase_status = read_phase_status(job_id)
+        for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive"):
+            if phase_status.get(phase_key, {}).get("status") in {"running", "failed"}:
+                phase_status[phase_key]["status"] = "cancelled"
+                phase_status[phase_key]["finishedAt"] = datetime.utcnow().isoformat()
+        write_phase_status(job_id, phase_status)
+    _CANCEL_REQUESTED.discard(job_id)
 
 
 def set_job_failed_with_message(job_id: str, message: str) -> None:
