@@ -419,6 +419,18 @@ function GranulesView({ onBack }: GranulesViewProps) {
     }
   }, [jobData?.syllabusOriginalName])
 
+  useEffect(() => {
+    if (!jobData?.phaseStatus) return
+    const anyPhaseRunning =
+      jobData.phaseStatus.granules?.status === 'running' ||
+      jobData.phaseStatus.pipelineLocal?.status === 'running' ||
+      jobData.phaseStatus.specializationMaterials?.status === 'running' ||
+      jobData.phaseStatus.uploadDrive?.status === 'running'
+    setIsGenerating(anyPhaseRunning)
+    const fullPipelineRunning = anyPhaseRunning && jobData.status === 'running'
+    setIsFullPipelineRunning(fullPipelineRunning)
+  }, [jobData?.phaseStatus, jobData?.status])
+
   const consoleStatus = status === 'error'
     ? 'Error'
     : status === 'cancelado' || localUiStatus === 'cancelled' ? 'Cancelado'
