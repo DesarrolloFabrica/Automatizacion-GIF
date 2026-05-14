@@ -355,6 +355,30 @@ function GranulesView({ onBack }: GranulesViewProps) {
         }, 3000)
       })
       await runMaterialsMutation.mutateAsync(created.jobId)
+      await new Promise<void>((resolve, reject) => {
+        const check = setInterval(async () => {
+          try {
+            const resp = await apiFetch(`/api/jobs/${created.jobId}`)
+            if (!resp.ok) { clearInterval(check); reject(new Error('Job perdido.')); return }
+            const payload = (await resp.json()) as JobStatusResponse
+            const materialsStatus = payload.phaseStatus?.specializationMaterials?.status
+            if (materialsStatus === 'completed') {
+              clearInterval(check)
+              resolve()
+              return
+            }
+            if (materialsStatus === 'failed' || payload.status === 'failed') {
+              clearInterval(check)
+              reject(new Error('Error en fase 3.'))
+              return
+            }
+            if (materialsStatus === 'cancelled' || payload.status === 'cancelled') {
+              clearInterval(check)
+              reject(new Error('Cancelado.'))
+            }
+          } catch (e) { clearInterval(check); reject(e) }
+        }, 3000)
+      })
       setGenerationMessage('Paquete completo listo. Puedes descargar el ZIP final institucional.')
     } catch (error) {
       setGenerationMessage(error instanceof Error ? error.message : 'Error ejecutando el flujo completo.')
