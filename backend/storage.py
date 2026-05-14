@@ -692,7 +692,7 @@ def _short_material_arcname(path: Path, fallback_index: int) -> str:
     parts = path.parts
     haystack = "_".join(parts).upper()
     granule_match = re.search(r"\bG([1-5])\b|G([1-5])_", haystack)
-    material_match = re.search(r"(?:^|_)(0[2-7])(?:_|\b)", path.name.upper())
+    material_match = re.search(r"(?:^|_)(0[1-7])(?:_|\b)", path.name.upper())
     granule = f"G{granule_match.group(1) or granule_match.group(2)}" if granule_match else f"G{fallback_index}"
     material = material_match.group(1) if material_match else f"{fallback_index:02d}"
     return f"Materiales/{granule}_{material}{path.suffix.lower()}"
@@ -1139,6 +1139,29 @@ def sync_metadata_to_gcs(job_id: str) -> bool:
 def _metrics_path(job_id: str) -> Path:
     paths = get_job_paths(job_id)
     return paths["state_dir"] / "metrics" / "metrics.json"
+
+
+def merge_phase_metrics(job_id: str, phase: str, metrics: dict | None) -> dict | None:
+    """Merge a phase metrics payload into the consolidated job metrics file."""
+    if not metrics:
+        return read_job_metrics(job_id)
+    normalized_phase = {
+        "granules": "granules",
+        "pipelineLocal": "pipelineLocal",
+        "pipeline_local": "pipelineLocal",
+        "specializationMaterials": "materials",
+        "materials": "materials",
+    }.get(phase, phase)
+    path = _metrics_path(job_id)
+    current = _read_json_or_none(path) or {}
+    if not isinstance(current, dict):
+        current = {}
+    if normalized_phase == "granules" and current == metrics:
+        current = {}
+    current[normalized_phase] = metrics
+    current["updatedAt"] = datetime.utcnow().isoformat()
+    _write_json_atomic(path, current)
+    return current
 
 
 def read_job_metrics(job_id: str) -> dict | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -56,11 +57,13 @@ from storage import (
     get_materials_dir,
     init_phase_status,
     list_all_job_files,
+    list_gcs_job_files,
     list_generated_docx,
     list_generated_files,
     list_material_files,
     list_pipeline_local_files,
     merge_job_metadata,
+    merge_phase_metrics,
     read_job_metadata,
     read_job_metrics,
     read_phase_status,
@@ -360,6 +363,8 @@ def _phase_complete_callback(phase_key: str, files_fn):
             # Fase 2: persistir archivos de fase en GCS
             sync_phase_files_to_gcs(job_id, phase_key)
 
+            _merge_completed_phase_metrics(job_id, phase_key)
+
         # Fase 2b: persistir metrics en GCS si existen
         sync_metrics_to_gcs(job_id)
 
@@ -369,6 +374,32 @@ def _phase_complete_callback(phase_key: str, files_fn):
         sync_metadata_to_gcs(job_id)
 
     return _callback
+
+
+def _read_json_file_or_none(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _merge_completed_phase_metrics(job_id: str, phase_key: str) -> None:
+    paths = get_job_paths(job_id)
+    metrics_path_by_phase = {
+        "granules": paths["state_dir"] / "metrics" / "metrics.json",
+        "pipelineLocal": paths["pipeline_local_dir"] / "metrics.json",
+        "specializationMaterials": paths["content_root"] / "metrics.json",
+    }
+    metrics_path = metrics_path_by_phase.get(phase_key)
+    if metrics_path is None:
+        return
+    metrics = _read_json_file_or_none(metrics_path)
+    if not metrics:
+        return
+    merge_phase_metrics(job_id, phase_key, metrics)
 
 
 def _ensure_job_exists(job_id: str):
@@ -1065,18 +1096,24 @@ def download_generated_file(job_id: str, filename: str) -> FileResponse:
 
     # Fallback a GCS si el archivo no existe localmente
     if not file_path.exists() or not file_path.is_file():
-        gcs_paths = [
-            f"generated/{filename}",
-            f"pipeline_local/{filename}",
-        ]
-        # Buscar en materiales
-        for gcs_prefix in ("materials",):
-            gcs_path = f"{gcs_prefix}/{filename}"
-            if file_exists_in_gcs(job_id, gcs_path):
-                tmp_path = paths["state_dir"] / "gcs_fallback" / filename
-                if download_file_from_gcs(job_id, gcs_path, tmp_path):
-                    file_path = tmp_path
-                    break
+        candidate_paths = [f"generated/{filename}", f"pipeline_local/{filename}", f"materials/{filename}"]
+        selected_gcs_path = next((gcs_path for gcs_path in candidate_paths if file_exists_in_gcs(job_id, gcs_path)), None)
+        if selected_gcs_path is None:
+            nested_matches = sorted(
+                gcs_path
+                for gcs_path in list_gcs_job_files(job_id)
+                if gcs_path.startswith("materials/") and Path(gcs_path).name == filename
+            )
+            if nested_matches:
+                selected_gcs_path = nested_matches[0]
+                append_log(
+                    job_id,
+                    f"GCS fallback materiales: {len(nested_matches)} coincidencia(s) para {filename}; usando {selected_gcs_path}",
+                )
+        if selected_gcs_path:
+            tmp_path = paths["state_dir"] / "gcs_fallback" / filename
+            if download_file_from_gcs(job_id, selected_gcs_path, tmp_path):
+                file_path = tmp_path
 
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Archivo no encontrado.")
