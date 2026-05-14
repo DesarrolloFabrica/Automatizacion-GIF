@@ -430,8 +430,16 @@ def update_phase_status(job_id: str, phase_key: str, *, status: str | None = Non
         if status == "running":
             phase["startedAt"] = _utc_now()
             phase["finishedAt"] = None
+            phase.pop("durationSeconds", None)
         if status in {"completed", "failed", "skipped", "cancelled"}:
             phase["finishedAt"] = _utc_now()
+            if phase.get("startedAt") and phase.get("finishedAt"):
+                try:
+                    start_dt = datetime.fromisoformat(phase["startedAt"])
+                    finish_dt = datetime.fromisoformat(phase["finishedAt"])
+                    phase["durationSeconds"] = round((finish_dt - start_dt).total_seconds(), 1)
+                except (ValueError, TypeError):
+                    pass
     if files is not None:
         phase["files"] = files
     return write_phase_status(job_id, payload)
@@ -445,6 +453,143 @@ def refresh_phase_files(job_id: str) -> dict:
     payload["materials"] = payload["specializationMaterials"]
     payload.setdefault("uploadDrive", _empty_phase("pending"))
     return write_phase_status(job_id, payload)
+
+
+def reconcile_phase_status_with_disk(job_id: str) -> dict:
+    """Reconcile phase_status.json with actual files on disk.
+
+    If a phase says 'completed' but no output files exist, mark it as 'pending'.
+    This prevents stale states after manual file deletion or corruption.
+    """
+    payload = read_phase_status(job_id)
+    paths = get_job_paths(job_id)
+    changed = False
+
+    # Check granules phase
+    if payload["granules"]["status"] == "completed":
+        actual_files = list_generated_docx(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] Granules phase says completed but no files on disk. Resetting to pending.")
+            payload["granules"] = _empty_phase("pending")
+            changed = True
+
+    # Check pipelineLocal phase
+    if payload["pipelineLocal"]["status"] == "completed":
+        actual_files = list_pipeline_local_relative_files(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] PipelineLocal phase says completed but no files on disk. Resetting to pending.")
+            payload["pipelineLocal"] = _empty_phase("pending")
+            # Also reset downstream phases since pipelineLocal outputs are missing
+            payload["specializationMaterials"] = _empty_phase("pending")
+            payload["uploadDrive"] = _empty_phase("pending")
+            changed = True
+
+    # Check specializationMaterials phase
+    if payload["specializationMaterials"]["status"] == "completed":
+        actual_files = list_material_relative_files(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] SpecializationMaterials phase says completed but no files on disk. Resetting to pending.")
+            payload["specializationMaterials"] = _empty_phase("pending")
+            payload["uploadDrive"] = _empty_phase("pending")
+            changed = True
+
+    if changed:
+        write_phase_status(job_id, payload)
+
+    return payload
+
+
+def reset_job_state(job_id: str, reset_from: str = "granules") -> dict:
+    """Full job state reset: clears phase status, removes output files, resets runtime state.
+
+    Preserves: syllabus, job_metadata, detected granules info.
+    Removes: all generated outputs, metrics, locks, stale references.
+
+    Args:
+        job_id: The job identifier
+        reset_from: Phase to reset from ('granules', 'pipelineLocal', 'specializationMaterials')
+
+    Returns:
+        Updated phase_status payload
+    """
+    paths = get_job_paths(job_id)
+    order = ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")
+    if reset_from not in order:
+        raise ValueError(f"reset_from invalid: {reset_from}")
+
+    # Clean up output directories based on reset point
+    idx = order.index(reset_from)
+
+    if idx <= 0 and paths["generated_dir"].exists():
+        shutil.rmtree(paths["generated_dir"], ignore_errors=True)
+        paths["generated_dir"].mkdir(parents=True, exist_ok=True)
+
+    if idx <= 1 and paths["pipeline_local_dir"].exists():
+        shutil.rmtree(paths["pipeline_local_dir"], ignore_errors=True)
+        paths["pipeline_local_dir"].mkdir(parents=True, exist_ok=True)
+
+    if idx <= 2:
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            shutil.rmtree(materials_dir, ignore_errors=True)
+            materials_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clean up metrics and logs for affected phases
+    metrics_path = paths["state_dir"] / "metrics.json"
+    if metrics_path.exists():
+        metrics_path.unlink(missing_ok=True)
+
+    # Reset phase status
+    payload = read_phase_status(job_id)
+    for key in order[idx:]:
+        payload[key] = _empty_phase("pending")
+
+    # Clear stale runtime state
+    from jobs import _JOBS, _LOCK, _ACTIVE_SUBPROCESSES, _CANCEL_REQUESTED
+    with _LOCK:
+        if job_id in _JOBS:
+            record = _JOBS[job_id]
+            if record.status == "running":
+                record.status = "cancelled"
+                record.progress_step = "reset"
+        _ACTIVE_SUBPROCESSES.pop(job_id, None)
+        _CANCEL_REQUESTED.discard(job_id)
+
+    return write_phase_status(job_id, payload)
+
+
+def cleanup_phase_outputs(job_id: str, phase_key: str) -> None:
+    """Remove output files for a specific phase without resetting state.
+
+    Used before regeneration to ensure clean slate.
+    """
+    paths = get_job_paths(job_id)
+
+    if phase_key == "granules" and paths["generated_dir"].exists():
+        for f in paths["generated_dir"].glob("*.docx"):
+            f.unlink(missing_ok=True)
+
+    if phase_key == "pipelineLocal" and paths["pipeline_local_dir"].exists():
+        for f in paths["pipeline_local_dir"].glob("*.txt"):
+            f.unlink(missing_ok=True)
+        for f in paths["pipeline_local_dir"].glob("*.docx"):
+            f.unlink(missing_ok=True)
+        for f in paths["pipeline_local_dir"].glob("*.json"):
+            if f.name != "phase_status.json":
+                f.unlink(missing_ok=True)
+
+    if phase_key == "specializationMaterials":
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            for f in materials_dir.rglob("*.docx"):
+                f.unlink(missing_ok=True)
+            # Remove empty subdirectories
+            for d in sorted(materials_dir.iterdir(), key=lambda x: str(x), reverse=True):
+                if d.is_dir():
+                    try:
+                        d.rmdir()
+                    except OSError:
+                        pass
 
 
 def get_available_next_action(phase_status: dict, job_status: str) -> str:
@@ -991,6 +1136,50 @@ def sync_metadata_to_gcs(job_id: str) -> bool:
     return uploaded > 0
 
 
+def _metrics_path(job_id: str) -> Path:
+    paths = get_job_paths(job_id)
+    return paths["state_dir"] / "metrics" / "metrics.json"
+
+
+def read_job_metrics(job_id: str) -> dict | None:
+    """Lee metrics.json del job si existe."""
+    mp = _metrics_path(job_id)
+    return _read_json_or_none(mp)
+
+
+def sync_metrics_to_gcs(job_id: str) -> bool:
+    """Sube metrics.json a GCS si existe y GCS esta disponible."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return False
+    mp = _metrics_path(job_id)
+    if not mp.exists():
+        return False
+    url = gcs.upload_file(job_id, mp, "metadata/metrics.json")
+    if url:
+        LOGGER.info("GCS sync metrics: subido para job %s", job_id)
+    return bool(url)
+
+
+def update_phase_duration(job_id: str, phase_key: str, *, started_at: str | None = None, finished_at: str | None = None) -> dict:
+    """Actualiza phase_status con startedAt, finishedAt y durationSeconds."""
+    payload = read_phase_status(job_id)
+    payload.setdefault(phase_key, _empty_phase("pending"))
+    phase = payload[phase_key]
+    if started_at:
+        phase["startedAt"] = started_at
+    if finished_at:
+        phase["finishedAt"] = finished_at
+    if phase.get("startedAt") and phase.get("finishedAt"):
+        try:
+            start_dt = datetime.fromisoformat(phase["startedAt"])
+            finish_dt = datetime.fromisoformat(phase["finishedAt"])
+            phase["durationSeconds"] = round((finish_dt - start_dt).total_seconds(), 1)
+        except (ValueError, TypeError):
+            pass
+    return write_phase_status(job_id, payload)
+
+
 def download_metadata_from_gcs(job_id: str) -> dict | None:
     """Descarga job_metadata.json desde GCS a ruta local.
 
@@ -1125,6 +1314,7 @@ def reconstruct_job_from_gcs(job_id: str) -> dict | None:
     phase_status = None
     category = None
     syllabus_original_name = None
+    metrics = None
 
     meta = download_metadata_from_gcs(job_id)
     if meta:
@@ -1136,6 +1326,12 @@ def reconstruct_job_from_gcs(job_id: str) -> dict | None:
         phase_status = ps
     else:
         phase_status = infer_phase_status_from_gcs(job_id, gcs_files)
+
+    metrics = read_job_metrics(job_id)
+    if metrics is None:
+        metrics_gcs = _read_json_or_none(PROJECT_ROOT / "outputs" / "jobs" / job_id / "metrics" / "metrics.json")
+        if metrics_gcs:
+            metrics = metrics_gcs
 
     phases_completed = sum(1 for key in ("granules", "pipelineLocal", "specializationMaterials") if phase_status.get(key, {}).get("status") == "completed")
     if phases_completed >= 3:
@@ -1168,6 +1364,7 @@ def reconstruct_job_from_gcs(job_id: str) -> dict | None:
         "has_pipeline": has_pipeline,
         "has_materials": has_materials,
         "has_zips": has_zips,
+        "metrics": metrics,
     }
 
 

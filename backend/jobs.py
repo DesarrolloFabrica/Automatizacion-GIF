@@ -73,9 +73,12 @@ def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str =
 
 def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
     """Reconstruye el JobRecord tras reinicio del servidor o perdida de memoria, desde disco."""
+    from storage import get_job_paths, read_phase_status, write_phase_status, reconcile_phase_status_with_disk, list_generated_docx, list_pipeline_local_relative_files, list_material_relative_files
+
     paths = get_job_paths(job_id)
     if not paths["metadata_path"].exists() or not paths["phase_status_path"].exists():
         return None
+
     logs: list[str] = []
     if paths["log_path"].exists():
         try:
@@ -83,7 +86,10 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
             logs = text.splitlines()[-MAX_LOG_LINES:]
         except OSError:
             logs = []
-    phase_status = read_phase_status(job_id)
+
+    # First reconcile phase status with actual disk state
+    phase_status = reconcile_phase_status_with_disk(job_id)
+
     running_phases = [
         phase_key
         for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")
@@ -109,6 +115,25 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
             logs.append("=== El proceso quedo incompleto por reinicio o perdida de instancia (mas de 1 hora sin actividad). ===")
         else:
             logs.append("=== Job marcado como fallido: el servidor se reinicio mientras habia una fase en ejecucion ===")
+
+    # Detect stale completed states (phase says completed but no output files)
+    stale_corrections = []
+    if phase_status["granules"]["status"] == "completed" and not list_generated_docx(job_id):
+        phase_status["granules"]["status"] = "pending"
+        stale_corrections.append("granules")
+    if phase_status["pipelineLocal"]["status"] == "completed" and not list_pipeline_local_relative_files(job_id):
+        phase_status["pipelineLocal"]["status"] = "pending"
+        phase_status["specializationMaterials"]["status"] = "pending"
+        phase_status["uploadDrive"]["status"] = "pending"
+        stale_corrections.append("pipelineLocal")
+    if phase_status["specializationMaterials"]["status"] == "completed" and not list_material_relative_files(job_id):
+        phase_status["specializationMaterials"]["status"] = "pending"
+        phase_status["uploadDrive"]["status"] = "pending"
+        stale_corrections.append("specializationMaterials")
+
+    if stale_corrections:
+        write_phase_status(job_id, phase_status)
+        logs.append(f"=== Estados corregidos: fases marcadas como completadas pero sin archivos: {', '.join(stale_corrections)} ===")
 
     phases = [phase_status.get(key, {}) for key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")]
     status = "failed" if running_phases or any(phase.get("status") == "failed" for phase in phases) else "completed"
@@ -403,6 +428,11 @@ def _run_command_and_stream_logs(
         job_id,
         f"Entorno subprocess: PYTHONUTF8={merged_env.get('PYTHONUTF8', '')} PYTHONIOENCODING={merged_env.get('PYTHONIOENCODING', '')}",
     )
+    pipeline_env = {k: v for k, v in merged_env.items() if k.startswith("PIPELINE_")}
+    if pipeline_env:
+        append_log(job_id, f"PIPELINE vars: {pipeline_env}")
+    else:
+        append_log(job_id, "PIPELINE vars: NONE (no PIPELINE_* variables found in environment)")
     host_tb: str | None = None
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
