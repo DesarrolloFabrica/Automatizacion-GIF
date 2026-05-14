@@ -106,18 +106,10 @@ print(f"[Backend] PIPELINE_LOCAL_PARALLEL={_pipeline_parallel}")
 print(f"[Backend] PIPELINE_LOCAL_MAX_WORKERS={_pipeline_workers}")
 
 
-def _normalize_secret_env_value(name: str) -> None:
-    value = os.getenv(name)
-    if value is None:
-        return
-    normalized = value.strip()
-    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"'", '"'}:
-        normalized = normalized[1:-1].strip()
-    if normalized != value:
-        os.environ[name] = normalized
-
-
-_normalize_secret_env_value("OPENAI_API_KEY")
+_openai_api_key = os.getenv("OPENAI_API_KEY")
+if _openai_api_key:
+    os.environ["OPENAI_API_KEY"] = _openai_api_key.strip()
+    print("[OpenAI] API key detected")
 
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
