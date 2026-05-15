@@ -2,8 +2,9 @@ import argparse
 import json
 import os
 import re
+import time
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -15,6 +16,7 @@ try:
 except ImportError:  # pragma: no cover
     OpenAI = None
 
+from automation_engine.config.categories import resolve_txt_prompt
 from automation_engine.generate_guiones import clean_text, extract_docx_text, extract_pdf_text, generate_document, slugify, word_count
 
 
@@ -22,8 +24,15 @@ ENGINE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ENGINE_DIR.parent
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "entrada_guiones_txt"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "salidas_txt"
-DEFAULT_PROMPT_PATH = PROJECT_ROOT / "prompts" / "txt_desde_guiones.md"
+DEFAULT_PROMPT_PATH = PROJECT_ROOT / "prompts" / "txt" / "txt_pda.md"
 SUPPORTED_EXTENSIONS = {".docx", ".pdf"}
+
+TXT_TASKS = {
+    "PDA": {"prompt": "prompts/txt/txt_pda.md", "role": "diagnostic", "questions": 10},
+    "QUIZ 1": {"prompt": "prompts/txt/txt_quiz1.md", "role": "fundamentals", "questions": 15},
+    "QUIZ 2": {"prompt": "prompts/txt/txt_quiz2.md", "role": "application", "questions": 15},
+    "QUIZ 3": {"prompt": "prompts/txt/txt_quiz3.md", "role": "critical_thinking", "questions": 15},
+}
 
 
 def read_text_file(path: Path) -> str:
@@ -147,6 +156,111 @@ def output_filename(title: str, index: int) -> str:
     if normalized.startswith("QUIZ"):
         return f"{normalized}.txt"
     return f"T{index}_{slugify(title)}.txt"
+
+
+def load_txt_prompt(task_key: str, base_dir: Optional[Path] = None) -> str:
+    try:
+        prompt_path = resolve_txt_prompt(task_key, base_dir)
+        return prompt_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Last resort fallback: try txt_desde_guiones.md in any location
+        fallback_candidates = [
+            PROJECT_ROOT / "prompts" / "txt" / "txt_desde_guiones.md",
+            PROJECT_ROOT / "prompts" / "guiones" / "txt_desde_guiones.md",
+            PROJECT_ROOT / "prompts" / "txt_desde_guiones.md",
+        ]
+        for candidate in fallback_candidates:
+            if candidate.exists():
+                return candidate.read_text(encoding="utf-8")
+        raise FileNotFoundError(
+            f"No se encontro ningun prompt TXT para '{task_key}'. "
+            f"Buscado en: {[str(c) for c in fallback_candidates]}"
+        )
+
+
+def build_independent_prompt(
+    task_key: str,
+    corpus: str,
+    programa: str,
+    asignatura: str,
+) -> Tuple[str, str]:
+    system_prompt = load_txt_prompt(task_key)
+    prompt_template = system_prompt
+    prompt_filled = prompt_template.replace("{programa}", programa).replace("{asignatura}", asignatura).replace("{corpus}", corpus)
+    return system_prompt, prompt_filled
+
+
+def validate_gift_format(text: str, task_key: str) -> List[str]:
+    warnings = []
+    normalized = text.strip()
+    first_lines = normalized.split("\n")[:10]
+    first_lines_text = "\n".join(first_lines)
+
+    if not normalized.startswith("PROGRAMA:"):
+        warnings.append(f"[{task_key}] No inicia con 'PROGRAMA:'")
+    if "ASIGNATURA" not in first_lines_text:
+        warnings.append(f"[{task_key}] No se encontro 'ASIGNATURA' en las primeras lineas del encabezado")
+
+    question_pattern = re.compile(r"::.*?::\s*\n.*?\{", re.DOTALL)
+    questions_found = len(question_pattern.findall(normalized))
+    expected = TXT_TASKS.get(task_key, {}).get("questions", 0)
+    if expected > 0 and questions_found < expected * 0.8:
+        warnings.append(f"[{task_key}] Solo se detectaron {questions_found} preguntas GIFT, se esperaban ~{expected}")
+    feedback_pattern = re.compile(r"#[Cc]orrecto\.|#[Ii]ncorrecto\.")
+    feedback_count = len(feedback_pattern.findall(normalized))
+    if expected > 0 and feedback_count < expected * 3:
+        warnings.append(f"[{task_key}] Retroalimentacion insuficiente: {feedback_count} feedbacks para ~{expected} preguntas")
+    if "```" in normalized:
+        warnings.append(f"[{task_key}] Contiene bloques de codigo markdown (```)")
+    return warnings
+
+
+def generate_single_txt(
+    client,
+    model: str,
+    task_key: str,
+    corpus: str,
+    programa: str,
+    asignatura: str,
+    max_tokens: int,
+    temperature: float,
+    output_dir: Path,
+) -> Dict[str, object]:
+    start_time = time.time()
+    task_info = TXT_TASKS.get(task_key, {"role": "generic", "questions": 0})
+    result = {
+        "task": task_key,
+        "role": task_info["role"],
+        "status": "pending",
+        "output_file": "",
+        "warnings": [],
+        "duration_seconds": 0,
+        "word_count": 0,
+        "error": "",
+    }
+    try:
+        system_prompt, user_prompt = build_independent_prompt(task_key, corpus, programa, asignatura)
+        response_text = generate_document(
+            client=client,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        filename = output_filename(task_key, list(TXT_TASKS.keys()).index(task_key) + 1)
+        output_path = output_dir / filename
+        save_txt(response_text, output_path)
+        result["status"] = "success"
+        result["output_file"] = filename
+        result["word_count"] = word_count(response_text)
+        result["warnings"] = validate_gift_format(response_text, task_key)
+    except Exception as exc:
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        result["duration_seconds"] = round(time.time() - start_time, 2)
+    return result
 
 
 def save_txt(text: str, output_path: Path) -> None:

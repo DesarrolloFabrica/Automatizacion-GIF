@@ -87,6 +87,44 @@ MATERIAL_VALIDATION_RULES = {
     "07": {"name": "VIDEO_SOLUCION_O_PROCEDIMIENTO", "type": "video", "min_escenas": 7},
 }
 
+MINIMALS_BY_CATEGORY: dict[str, dict[str, dict]] = {
+    "especializacion": {
+        "02": {"type": "fichas", "min_fichas": 5},
+        "03": {"type": "glosario", "min_terminos": 12},
+        "04": {"type": "revista", "min_bloques": 14},
+        "05": {"type": "infografia", "min_bloques": 7},
+        "06": {"type": "podcast", "min_segmentos": 9},
+        "07": {"type": "video", "min_escenas": 7},
+    },
+    "pregrado": {
+        "01": {"type": "podcast", "min_segmentos": 7},
+        "02": {"type": "infografia", "min_bloques": 6},
+        "03": {"type": "video", "min_escenas": 8},
+        "04": {"type": "glosario", "min_terminos": 8},
+        "05": {"type": "video", "min_escenas": 6},
+        "06": {"type": "revista", "min_bloques": 12},
+        "07": {"type": "fichas", "min_fichas": 3},
+    },
+}
+
+
+def _get_validation_minimals(
+    category_key: str | None,
+    layout_nn: str | None,
+    material_nn: str | None = None,
+) -> dict:
+    """Return validation minimums for a given category and material/layout number.
+
+    Falls back to MATERIAL_VALIDATION_RULES defaults if category is unknown.
+    """
+    ck = (category_key or "").strip().lower()
+    nn = (material_nn or layout_nn or "").strip()
+    cat_minimals = MINIMALS_BY_CATEGORY.get(ck)
+    if cat_minimals and nn in cat_minimals:
+        return cat_minimals[nn]
+    layout_key = (layout_nn or "").strip()
+    return MATERIAL_VALIDATION_RULES.get(layout_key, {})
+
 ARTIFACT_PATTERNS = [
     re.compile(r"^Datos recibidos\..*$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^Generare unicamente el material solicitado\..*$", re.IGNORECASE | re.MULTILINE),
@@ -1078,7 +1116,13 @@ def resolve_layout_renderer_key(
     return _get_material_number(material_nombre)
 
 
-def _validate_rendered_docx(output_path: Path, nn: Optional[str]) -> None:
+def _validate_rendered_docx(
+    output_path: Path,
+    nn: Optional[str],
+    category_key: Optional[str] = None,
+    material_nn: Optional[str] = None,
+    material_nombre: Optional[str] = None,
+) -> None:
     doc = Document(output_path)
     body_parts = [p.text for p in doc.paragraphs if p.text.strip()]
     for table in doc.tables:
@@ -1100,34 +1144,44 @@ def _validate_rendered_docx(output_path: Path, nn: Optional[str]) -> None:
     if found:
         raise ValueError(f"DOCX contiene elementos internos o HTML visible: {', '.join(found)}")
 
-    if nn == "02":
+    minimals = _get_validation_minimals(category_key, nn, material_nn)
+    mat_type = minimals.get("type", "")
+    material_ref = material_nombre or material_nn or nn
+
+    if mat_type == "fichas":
+        min_fichas = minimals.get("min_fichas", 5)
         ficha_count = sum(1 for p in body_parts if p.strip().lower().startswith("ficha "))
-        if ficha_count < 5:
-            raise ValueError(f"DOCX FICHAS incompleto: {ficha_count}/5 fichas renderizadas.")
-    elif nn == "03":
-        if not doc.tables or len(doc.tables[0].rows) < 13:
+        if ficha_count < min_fichas:
+            raise ValueError(f"DOCX {material_ref} incompleto: {ficha_count}/{min_fichas} fichas renderizadas. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "glosario":
+        min_terminos = minimals.get("min_terminos", 12)
+        if not doc.tables or len(doc.tables[0].rows) < min_terminos + 1:
             rows = len(doc.tables[0].rows) if doc.tables else 0
-            raise ValueError(f"DOCX GLOSARIO incompleto: {max(0, rows - 1)}/12 terminos renderizados.")
-    elif nn == "04":
-        if len(body_parts) < 18:
-            raise ValueError(f"DOCX REVISTA incompleto: solo {len(body_parts)} bloques/parrafos visibles.")
-    elif nn == "05":
+            raise ValueError(f"DOCX {material_ref} incompleto: {max(0, rows - 1)}/{min_terminos} terminos renderizados. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "revista":
+        min_bloques = minimals.get("min_bloques", 14)
+        if len(body_parts) < min_bloques + 4:
+            raise ValueError(f"DOCX {material_ref} incompleto: solo {len(body_parts)} bloques/parrafos visibles (min {min_bloques + 4}). Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "infografia":
+        min_bloques = minimals.get("min_bloques", 7)
         block_count = sum(
             1 for table in doc.tables
             if table.rows and table.rows[0].cells and table.rows[0].cells[0].text.strip().lower().startswith("bloque ")
         )
-        if block_count < 7:
-            raise ValueError(f"DOCX INFOGRAFIA incompleto: {block_count}/7 bloques renderizados.")
-    elif nn == "06":
+        if block_count < min_bloques:
+            raise ValueError(f"DOCX {material_ref} incompleto: {block_count}/{min_bloques} bloques renderizados. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "podcast":
+        min_segmentos = minimals.get("min_segmentos", 9)
         segment_count = sum(1 for p in body_parts if p.strip().lower().startswith("duracion:"))
-        if segment_count < 9:
-            raise ValueError(f"DOCX PODCAST incompleto: {segment_count}/9 segmentos renderizados.")
-    elif nn == "07":
+        if segment_count < min_segmentos:
+            raise ValueError(f"DOCX {material_ref} incompleto: {segment_count}/{min_segmentos} segmentos renderizados. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "video":
+        min_escenas = minimals.get("min_escenas", 7)
         scene_count = sum(1 for p in body_parts if p.strip().lower().startswith("escena"))
-        if scene_count < 7:
-            raise ValueError(f"DOCX VIDEO incompleto: {scene_count}/7 escenas renderizadas.")
+        if scene_count < min_escenas:
+            raise ValueError(f"DOCX {material_ref} incompleto: {scene_count}/{min_escenas} escenas renderizadas. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
         if len(body_text) < 2500:
-            raise ValueError(f"DOCX VIDEO incompleto: solo {len(body_text)} caracteres visibles.")
+            raise ValueError(f"DOCX {material_ref} incompleto: solo {len(body_text)} caracteres visibles. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
 
 
 def save_docx_with_structure(
@@ -1186,7 +1240,7 @@ def save_docx_with_structure(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
-    _validate_rendered_docx(output_path, layout_nn)
+    _validate_rendered_docx(output_path, layout_nn, category_key, material_nn, material_nombre)
 
 
 def extract_docx_text(path: Path) -> str:
@@ -1356,9 +1410,14 @@ def validate_material_prompts(prompt_text: str) -> List[str]:
     return missing
 
 
-def validate_material_content(nn: str, content: str) -> Tuple[str, List[str]]:
-    rule = MATERIAL_VALIDATION_RULES.get(nn)
-    if not rule:
+def validate_material_content(
+    nn: str,
+    content: str,
+    category_key: str | None = None,
+    material_nn: str | None = None,
+) -> Tuple[str, List[str]]:
+    minimals = _get_validation_minimals(category_key, nn, material_nn)
+    if not minimals:
         return "ok", []
     warnings = []
     table_rows = 0
@@ -1367,47 +1426,47 @@ def validate_material_content(nn: str, content: str) -> Tuple[str, List[str]]:
         if stripped.startswith("|") and stripped.endswith("|") and "---" not in stripped:
             table_rows += 1
 
-    mat_type = rule["type"]
+    mat_type = minimals.get("type", "")
     if mat_type == "fichas":
-        expected_rows = rule["min_fichas"] + 1
+        expected_rows = minimals.get("min_fichas", 5) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"FICHAS: se esperaban al menos {rule['min_fichas']} fichas (filas de tabla). "
+                f"FICHAS: se esperaban al menos {minimals['min_fichas']} fichas (filas de tabla). "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "glosario":
-        expected_rows = rule["min_terminos"] + 1
+        expected_rows = minimals.get("min_terminos", 12) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"GLOSARIO: se esperaban al menos {rule['min_terminos']} terminos. "
+                f"GLOSARIO: se esperaban al menos {minimals['min_terminos']} terminos. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "revista":
-        expected_rows = rule["min_bloques"] + 1
+        expected_rows = minimals.get("min_bloques", 14) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"REVISTA: se esperaban al menos {rule['min_bloques']} bloques. "
+                f"REVISTA: se esperaban al menos {minimals['min_bloques']} bloques. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "infografia":
-        expected_rows = rule["min_bloques"] + 1
+        expected_rows = minimals.get("min_bloques", 7) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"INFOGRAFIA: se esperaban al menos {rule['min_bloques']} bloques. "
+                f"INFOGRAFIA: se esperaban al menos {minimals['min_bloques']} bloques. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "podcast":
-        expected_rows = rule["min_segmentos"] + 1
+        expected_rows = minimals.get("min_segmentos", 9) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"PODCAST: se esperaban al menos {rule['min_segmentos']} segmentos. "
+                f"PODCAST: se esperaban al menos {minimals['min_segmentos']} segmentos. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "video":
-        expected_rows = rule["min_escenas"] + 1
+        expected_rows = minimals.get("min_escenas", 7) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"VIDEO: se esperaban al menos {rule['min_escenas']} escenas. "
+                f"VIDEO: se esperaban al menos {minimals['min_escenas']} escenas. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
 
@@ -1572,7 +1631,7 @@ def generate_all_materiales(
                 layout_nn = resolve_layout_renderer_key("especializacion", material.nn, material.nombre)
                 if not layout_nn:
                     raise ValueError(f"No se resolvió layout para especialización material {material.nn} {material.nombre}")
-                val_status, val_warnings = validate_material_content(layout_nn, content)
+                val_status, val_warnings = validate_material_content(layout_nn, content, "especializacion", material.nn)
                 if val_warnings:
                     for w in val_warnings:
                         print(f"    ADVERTENCIA: {w}")
