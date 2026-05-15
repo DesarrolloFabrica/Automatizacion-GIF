@@ -30,17 +30,22 @@ try:
 except ImportError:  # pragma: no cover
     OpenAI = None
 
-from automation_engine.generate_guiones import generate_document
 from automation_engine.generate_pipeline_drive import infer_metadata_from_files
 from automation_engine.generate_txt_from_guiones import (
     DEFAULT_PROMPT_PATH as DEFAULT_TXT_PROMPT_PATH,
     TXT_TASKS,
     build_corpus,
     build_user_prompt as build_user_prompt_txt,
+    call_txt_openai,
+    extract_gift_question_blocks,
     generate_single_txt,
+    generate_txt_by_blocks,
+    invalid_gift_question_numbers,
     output_filename,
     parse_titles,
+    repair_txt_invalid_blocks,
     save_txt,
+    validate_gift_format,
 )
 from automation_engine.generate_documentos_academicos import (
     DEFAULT_PROMPT_PATH as DEFAULT_DOCX_PROMPT_PATH,
@@ -56,6 +61,7 @@ from automation_engine.generate_documentos_academicos import (
     split_response,
     validate_blocks,
 )
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 LOCAL_GRANULES_MIN = 4
@@ -131,11 +137,12 @@ def execute_txt_parallel(
     max_workers = get_pipeline_max_workers(len(TXT_TASKS))
     task_keys = list(TXT_TASKS.keys())
     _log(f"[PipelineLocal] Lanzando tareas TXT paralelas: {', '.join(task_keys)} (workers={max_workers})")
+    client = get_openai_client()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
                 generate_single_txt,
-                OpenAI(),
+                client,
                 model,
                 task_key,
                 corpus,
@@ -155,10 +162,15 @@ def execute_txt_parallel(
                 result = future.result()
                 results.append(result)
                 status_icon = "OK" if result["status"] == "success" else "ERR"
-                _log(f"  [{status_icon}] {task_key}: {result.get('output_file', result.get('error', ''))} ({result['duration_seconds']}s)")
+                error_detail = ""
+                if result.get("error"):
+                    error_detail = f" [{result['error']}]"
+                _log(f"  [{status_icon}] {task_key}: {result.get('output_file', result.get('error', 'sin archivo'))} ({result['duration_seconds']}s){error_detail}")
             except Exception as exc:
-                _log(f"  [ERR] {task_key}: {exc}")
-                results.append({"task": task_key, "status": "error", "error": str(exc), "duration_seconds": 0})
+                error_msg = f"{type(exc).__name__}: {exc}"
+                _log(f"  [ERR] {task_key}: {error_msg}")
+                _log(f"  [TRACEBACK] {task_key}: {traceback.format_exc().strip()}")
+                results.append({"task": task_key, "status": "error", "error": error_msg, "duration_seconds": 0})
     return results
 
 
@@ -200,7 +212,13 @@ def execute_docx_parallel(
             try:
                 result = future.result()
                 results.append(result)
-                status_icon = "OK" if result["status"] == "success" else "ERR"
+                status = result["status"]
+                if status == "success":
+                    status_icon = "OK"
+                elif status == "success_with_warnings":
+                    status_icon = "WARN"
+                else:
+                    status_icon = "ERR"
                 repair_info = ""
                 if result.get("repair_attempts", 0) > 0:
                     repair_info = f" [repairs: {result['repair_attempts']}, success: {result.get('repaired_successfully', False)}]"
@@ -209,10 +227,15 @@ def execute_docx_parallel(
                 warning_info = ""
                 if critical_count > 0 or minor_count > 0:
                     warning_info = f" [warnings: {critical_count} critical, {minor_count} minor]"
-                _log(f"  [{status_icon}] {doc_type}: {result.get('output_file', result.get('error', ''))} ({result['duration_seconds']}s){repair_info}{warning_info}")
+                error_detail = ""
+                if result.get("error"):
+                    error_detail = f" [{result['error']}]"
+                _log(f"  [{status_icon}] {doc_type}: {result.get('output_file', result.get('error', 'sin archivo'))} ({result['duration_seconds']}s){repair_info}{warning_info}{error_detail}")
             except Exception as exc:
-                _log(f"  [ERR] {doc_type}: {exc}")
-                results.append({"task": doc_type, "status": "error", "error": str(exc), "duration_seconds": 0})
+                error_msg = f"{type(exc).__name__}: {exc}"
+                _log(f"  [ERR] {doc_type}: {error_msg}")
+                _log(f"  [TRACEBACK] {doc_type}: {traceback.format_exc().strip()}")
+                results.append({"task": doc_type, "status": "error", "error": error_msg, "duration_seconds": 0})
     return results
 
 
@@ -221,7 +244,7 @@ def save_metrics(output_dir: Path, txt_results: List[Dict], docx_results: List[D
         "tasks": [],
         "total_duration": round(sum(r.get("duration_seconds", 0) for r in docx_results), 2),
         "total_repair_duration": round(sum(r.get("repair_duration_seconds", 0) for r in docx_results), 2),
-        "success_count": sum(1 for r in docx_results if r.get("status") == "success"),
+        "success_count": sum(1 for r in docx_results if r.get("status") in ("success", "success_with_warnings")),
         "error_count": sum(1 for r in docx_results if r.get("status") == "error"),
         "total_warnings": sum(len(r.get("warnings", [])) for r in docx_results),
         "total_critical_warnings": sum(len(r.get("warnings_critical", [])) for r in docx_results),
@@ -297,9 +320,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prompt-txt", default=str(DEFAULT_TXT_PROMPT_PATH), help="Ruta al prompt TXT")
     parser.add_argument("--prompt-docx", default=str(DEFAULT_DOCX_PROMPT_PATH), help="Ruta al prompt DOCX")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
-    parser.add_argument("--max-tokens-txt", type=int, default=3500, help="Maximo de tokens por TXT")
-    parser.add_argument("--max-tokens-docx", type=int, default=6000, help="Maximo de tokens fase DOCX")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL > gemini-2.5-flash)")
+    parser.add_argument("--max-tokens-txt", type=int, default=16000, help="Maximo de tokens por TXT")
+    parser.add_argument("--max-tokens-docx", type=int, default=24000, help="Maximo de tokens fase DOCX")
     parser.add_argument("--temperature-txt", type=float, default=0.45, help="Creatividad fase TXT")
     parser.add_argument("--temperature-docx", type=float, default=0.6, help="Creatividad fase DOCX")
     parser.add_argument("--max-chars-per-file", type=int, default=45000, help="Maximo de caracteres por fuente")
@@ -365,10 +388,10 @@ def main() -> None:
         _log("\nDry-run activo. No se llamo a OpenAI.")
         return
 
-    if OpenAI is None:
-        raise RuntimeError("Falta instalar openai. Ejecuta: pip install -r requirements.txt")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno o en .env")
+    if not args.model:
+        args.model = get_openai_model()
+
+    client = get_openai_client()
 
     pipeline_start = time.time()
     txt_error = ""
@@ -384,7 +407,6 @@ def main() -> None:
             if is_parallel_mode():
                 _log("Modo PARALELO activado para TXT")
                 generate_blueprint(output_dir, corpus, asignatura, programa)
-                client = OpenAI()
                 txt_results = execute_txt_parallel(
                     client=client,
                     model=args.model,
@@ -401,22 +423,74 @@ def main() -> None:
                 previous_outputs = ""
                 for index, title in enumerate(titles, start=1):
                     _log(f"\nGenerando TXT {index}/{len(titles)}: {title}")
-                    result = generate_document(
-                        client=OpenAI(),
-                        model=args.model,
-                        system_prompt=txt_system_prompt,
-                        user_prompt=build_user_prompt_txt(
+                    task_key = title.upper()
+                    try:
+                        result = call_txt_openai(
+                            client=client,
+                            model=args.model,
+                            system_prompt=txt_system_prompt,
+                            user_prompt=build_user_prompt_txt(
+                                corpus=corpus,
+                                title=title,
+                                index=index,
+                                count=args.count,
+                                previous_outputs=previous_outputs,
+                                programa=programa,
+                                asignatura=asignatura,
+                            ),
+                            max_tokens=args.max_tokens_txt,
+                            temperature=args.temperature_txt,
+                        )
+                    except RuntimeError as exc:
+                        if task_key not in TXT_TASKS or "finish_reason=length" not in str(exc):
+                            raise
+                        _log(f"[TXT][{task_key}] finish_reason=length, regenerando por bloques")
+                        result = generate_txt_by_blocks(
+                            client=client,
+                            model=args.model,
+                            task_key=task_key,
                             corpus=corpus,
-                            title=title,
-                            index=index,
-                            count=args.count,
-                            previous_outputs=previous_outputs,
                             programa=programa,
                             asignatura=asignatura,
-                        ),
-                        max_tokens=args.max_tokens_txt,
-                        temperature=args.temperature_txt,
-                    )
+                            max_tokens=args.max_tokens_txt,
+                            temperature=args.temperature_txt,
+                        )
+                    if task_key in TXT_TASKS:
+                        warnings = validate_gift_format(result, task_key)
+                        expected = TXT_TASKS[task_key]["questions"]
+                        found = len(extract_gift_question_blocks(result))
+                        _log(f"[TXT][{task_key}] preguntas detectadas: {found}/{expected}")
+                        if warnings:
+                            invalid_questions = invalid_gift_question_numbers(result)
+                            if found == expected and invalid_questions:
+                                result = repair_txt_invalid_blocks(
+                                    text=result,
+                                    client=client,
+                                    model=args.model,
+                                    task_key=task_key,
+                                    corpus=corpus,
+                                    programa=programa,
+                                    asignatura=asignatura,
+                                    max_tokens=args.max_tokens_txt,
+                                    temperature=args.temperature_txt,
+                                )
+                            else:
+                                _log(f"[TXT][{task_key}] validacion fallo, regenerando por bloques")
+                                result = generate_txt_by_blocks(
+                                    client=client,
+                                    model=args.model,
+                                    task_key=task_key,
+                                    corpus=corpus,
+                                    programa=programa,
+                                    asignatura=asignatura,
+                                    max_tokens=args.max_tokens_txt,
+                                    temperature=args.temperature_txt,
+                                )
+                            warnings = validate_gift_format(result, task_key)
+                            found = len(extract_gift_question_blocks(result))
+                            _log(f"[TXT][{task_key}] preguntas detectadas tras bloques: {found}/{expected}")
+                        if warnings:
+                            raise RuntimeError("Validacion TXT final fallo: " + " | ".join(warnings[:8]))
                     local_output = output_dir / output_filename(title, index)
                     save_txt(result, local_output)
                     previous_outputs = (previous_outputs + "\n\n" + result).strip()
@@ -444,7 +518,6 @@ def main() -> None:
             combined_text = read_all_inputs(local_files)
             if is_parallel_mode():
                 _log("Modo PARALELO activado para DOCX")
-                client = OpenAI()
                 docx_results = execute_docx_parallel(
                     client=client,
                     model=args.model,
@@ -470,7 +543,7 @@ def main() -> None:
                 )
                 _log(f"Llamando al modelo {args.model} para los 3 documentos...")
                 response = call_openai(
-                    client=OpenAI(),
+                    client=client,
                     model=args.model,
                     system_prompt=docx_system_prompt,
                     user_prompt=docx_user_prompt,
@@ -535,9 +608,30 @@ def main() -> None:
             _log(f"  ! {warning}")
         _log("=== FIN DE ADVERTENCIAS ===")
 
+    txt_errors = [r for r in txt_results if r.get("status") == "error"]
+    docx_errors = [r for r in docx_results if r.get("status") == "error"]
+    if txt_errors and not txt_error:
+        _log(f"\n=== ERRORES DETALLADOS TXT ===")
+        for err in txt_errors:
+            _log(f"  [{err['task']}] {err.get('error', 'sin detalle')}")
+        _log(f"=== FIN ERRORES TXT ({len(txt_errors)}/{len(txt_results)} fallidos) ===")
+    if docx_errors and not docx_error:
+        _log(f"\n=== ERRORES DETALLADOS DOCX ===")
+        for err in docx_errors:
+            _log(f"  [{err['task']}] {err.get('error', 'sin detalle')}")
+        _log(f"=== FIN ERRORES DOCX ({len(docx_errors)}/{len(docx_results)} fallidos) ===")
+
     if txt_error or docx_error:
         _log("\nGeneracion finalizada con errores.")
         sys.exit(2)
+
+    if txt_errors and docx_errors and len(txt_errors) == len(txt_results) and len(docx_errors) == len(docx_results):
+        _log("\nGeneracion finalizada: TODAS las tareas TXT y DOCX fallaron.")
+        sys.exit(1)
+
+    if txt_errors and len(txt_errors) == len(txt_results):
+        _log("\nGeneracion finalizada: TODAS las tareas TXT fallaron.")
+        sys.exit(1)
 
     _log(f"\nGeneracion completa en {round(total_duration, 2)}s.")
 

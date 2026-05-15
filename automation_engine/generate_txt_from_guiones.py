@@ -17,7 +17,8 @@ except ImportError:  # pragma: no cover
     OpenAI = None
 
 from automation_engine.config.categories import resolve_txt_prompt
-from automation_engine.generate_guiones import clean_text, extract_docx_text, extract_pdf_text, generate_document, slugify, word_count
+from automation_engine.generate_guiones import clean_text, extract_docx_text, extract_pdf_text, slugify, word_count
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 ENGINE_DIR = Path(__file__).resolve().parent
@@ -33,6 +34,9 @@ TXT_TASKS = {
     "QUIZ 2": {"prompt": "prompts/txt/txt_quiz2.md", "role": "application", "questions": 15},
     "QUIZ 3": {"prompt": "prompts/txt/txt_quiz3.md", "role": "critical_thinking", "questions": 15},
 }
+
+TXT_MIN_OUTPUT_TOKENS = 16000
+TXT_BLOCK_QUESTION_COUNT = 5
 
 
 def read_text_file(path: Path) -> str:
@@ -201,18 +205,207 @@ def validate_gift_format(text: str, task_key: str) -> List[str]:
     if "ASIGNATURA" not in first_lines_text:
         warnings.append(f"[{task_key}] No se encontro 'ASIGNATURA' en las primeras lineas del encabezado")
 
-    question_pattern = re.compile(r"::.*?::\s*\n.*?\{", re.DOTALL)
-    questions_found = len(question_pattern.findall(normalized))
+    question_blocks = extract_gift_question_blocks(normalized)
+    questions_found = len(question_blocks)
     expected = TXT_TASKS.get(task_key, {}).get("questions", 0)
-    if expected > 0 and questions_found < expected * 0.8:
-        warnings.append(f"[{task_key}] Solo se detectaron {questions_found} preguntas GIFT, se esperaban ~{expected}")
-    feedback_pattern = re.compile(r"#[Cc]orrecto\.|#[Ii]ncorrecto\.")
-    feedback_count = len(feedback_pattern.findall(normalized))
-    if expected > 0 and feedback_count < expected * 3:
-        warnings.append(f"[{task_key}] Retroalimentacion insuficiente: {feedback_count} feedbacks para ~{expected} preguntas")
+    if expected > 0 and questions_found != expected:
+        warnings.append(f"[{task_key}] Preguntas detectadas: {questions_found}/{expected}. Debe contener exactamente {expected} bloques ::Pregunta.")
+    for index, block in enumerate(question_blocks, start=1):
+        for issue in validate_gift_question_block(block):
+            warnings.append(f"[{task_key}] Pregunta {index} {issue}")
     if "```" in normalized:
         warnings.append(f"[{task_key}] Contiene bloques de codigo markdown (```)")
     return warnings
+
+
+def extract_gift_question_blocks(text: str) -> List[str]:
+    starts = list(re.finditer(r"(?m)^\s*::.+?::", text))
+    blocks: List[str] = []
+    for index, match in enumerate(starts):
+        start = match.start()
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+        blocks.append(text[start:end].strip())
+    return blocks
+
+
+def validate_gift_question_block(block: str) -> List[str]:
+    issues: List[str] = []
+    if "{" not in block or "}" not in block:
+        issues.append("no contiene llaves de apertura/cierre.")
+    body = block[block.find("{") + 1:block.rfind("}")] if "{" in block and "}" in block else block
+    correct_count = len(re.findall(r"(?m)^\s*=", body))
+    distractor_count = len(re.findall(r"(?m)^\s*~", body))
+    if correct_count != 1:
+        issues.append(f"debe tener exactamente 1 respuesta correcta con '='; detectadas {correct_count}.")
+    if distractor_count < 3:
+        issues.append(f"debe tener minimo 3 distractores con '~'; detectados {distractor_count}.")
+    if not re.search(r"#[Cc]orrecto\.?|#[Ii]ncorrecto\.?,?", body):
+        issues.append("no incluye retroalimentacion #Correcto/#Incorrecto.")
+    return issues
+
+
+def invalid_gift_question_numbers(text: str) -> List[int]:
+    invalid: List[int] = []
+    for index, block in enumerate(extract_gift_question_blocks(text), start=1):
+        if validate_gift_question_block(block):
+            invalid.append(index)
+    return invalid
+
+
+def _question_block_start(question_number: int) -> int:
+    return ((question_number - 1) // TXT_BLOCK_QUESTION_COUNT) * TXT_BLOCK_QUESTION_COUNT + 1
+
+
+def repair_txt_invalid_blocks(
+    text: str,
+    client,
+    model: str,
+    task_key: str,
+    corpus: str,
+    programa: str,
+    asignatura: str,
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    expected = TXT_TASKS.get(task_key, {}).get("questions", 0)
+    blocks = extract_gift_question_blocks(text)
+    if len(blocks) != expected:
+        return generate_txt_by_blocks(client, model, task_key, corpus, programa, asignatura, max_tokens, temperature)
+
+    first_match = re.search(r"(?m)^\s*::.+?::", text)
+    header = text[: first_match.start()].strip() if first_match else f"PROGRAMA: {programa}\nASIGNATURA: {asignatura}\n\n{task_key}"
+    repaired_blocks = list(blocks)
+
+    invalid_questions = invalid_gift_question_numbers(text)
+    block_starts = sorted({_question_block_start(question) for question in invalid_questions})
+    for block_start in block_starts:
+        print(f"[TXT][{task_key}] reparando bloque que contiene Pregunta {block_start}.")
+        count = min(TXT_BLOCK_QUESTION_COUNT, expected - block_start + 1)
+        replacement = generate_txt_question_block(
+            client=client,
+            model=model,
+            task_key=task_key,
+            corpus=corpus,
+            programa=programa,
+            asignatura=asignatura,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            start_question=block_start,
+            count=count,
+            total=expected,
+        )
+        replacement_blocks = extract_gift_question_blocks(replacement)
+        repaired_blocks[block_start - 1:block_start - 1 + count] = replacement_blocks
+
+    return (header + "\n\n" + "\n\n".join(repaired_blocks)).strip()
+
+
+def call_txt_openai(client, model: str, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float) -> str:
+    effective_max_tokens = max(max_tokens, TXT_MIN_OUTPUT_TOKENS)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+        max_tokens=effective_max_tokens,
+    )
+    if not response.choices:
+        raise RuntimeError(f"La API devolvio choices vacio para TXT. model={model}")
+    choice = response.choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    content = choice.message.content
+    if finish_reason == "length":
+        raise RuntimeError(f"finish_reason=length; salida TXT cortada. max_tokens={effective_max_tokens}")
+    if content is None:
+        refusal = getattr(choice.message, "refusal", None)
+        raise RuntimeError(f"La API devolvio content=None para TXT. finish_reason={finish_reason!r}; refusal={refusal!r}")
+    return content.strip()
+
+
+def build_block_prompt(task_key: str, corpus: str, programa: str, asignatura: str, start_question: int, count: int, total: int) -> Tuple[str, str]:
+    system_prompt, base_prompt = build_independent_prompt(task_key, corpus, programa, asignatura)
+    block_prompt = f"""{base_prompt}
+
+INSTRUCCION DE BLOQUE OBLIGATORIA:
+Genera UNICAMENTE las preguntas {start_question} a {start_question + count - 1} de {total} para {task_key}.
+Debes entregar exactamente {count} bloques GIFT.
+Cada bloque debe iniciar con ::Pregunta {start_question}::, ::Pregunta {start_question + 1}::, etc.
+Cada pregunta debe tener llaves {{ }}, exactamente una respuesta correcta con '=', minimo tres distractores con '~' y feedback #Correcto/#Incorrecto.
+No incluyas explicaciones ni texto fuera de los bloques GIFT.
+""".strip()
+    return system_prompt, block_prompt
+
+
+def generate_txt_by_blocks(
+    client,
+    model: str,
+    task_key: str,
+    corpus: str,
+    programa: str,
+    asignatura: str,
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    expected = TXT_TASKS.get(task_key, {}).get("questions", 0)
+    if expected <= 0:
+        raise RuntimeError(f"No hay conteo esperado configurado para {task_key}")
+    parts: List[str] = []
+    start = 1
+    while start <= expected:
+        count = min(TXT_BLOCK_QUESTION_COUNT, expected - start + 1)
+        print(f"[TXT][{task_key}] generando bloque preguntas {start}-{start + count - 1}/{expected}")
+        part = generate_txt_question_block(
+            client=client,
+            model=model,
+            task_key=task_key,
+            corpus=corpus,
+            programa=programa,
+            asignatura=asignatura,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            start_question=start,
+            count=count,
+            total=expected,
+        )
+        parts.append(part)
+        start += count
+    header = f"PROGRAMA: {programa}\nASIGNATURA: {asignatura}\n\n{task_key}\n\n"
+    return header + "\n\n".join(parts).strip()
+
+
+def generate_txt_question_block(
+    client,
+    model: str,
+    task_key: str,
+    corpus: str,
+    programa: str,
+    asignatura: str,
+    max_tokens: int,
+    temperature: float,
+    start_question: int,
+    count: int,
+    total: int,
+) -> str:
+    last_error = ""
+    for attempt in range(1, 4):
+        system_prompt, block_prompt = build_block_prompt(task_key, corpus, programa, asignatura, start_question, count, total)
+        part = call_txt_openai(
+            client=client,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=block_prompt,
+            max_tokens=max_tokens,
+            temperature=min(temperature, 0.3),
+        )
+        blocks = extract_gift_question_blocks(part)
+        invalid = [idx for idx, block in enumerate(blocks, start=start_question) if validate_gift_question_block(block)]
+        if len(blocks) == count and not invalid:
+            return "\n\n".join(blocks)
+        last_error = f"bloque {start_question}-{start_question + count - 1}: {len(blocks)}/{count} preguntas, invalidas={invalid}"
+        print(f"[TXT][{task_key}] bloque invalido en intento {attempt}: {last_error}")
+    raise RuntimeError(f"No se pudo reparar bloque TXT: {last_error}")
 
 
 def generate_single_txt(
@@ -240,24 +433,74 @@ def generate_single_txt(
     }
     try:
         system_prompt, user_prompt = build_independent_prompt(task_key, corpus, programa, asignatura)
-        response_text = generate_document(
-            client=client,
-            model=model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        try:
+            response_text = call_txt_openai(
+                client=client,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        except RuntimeError as exc:
+            if "finish_reason=length" not in str(exc):
+                raise
+            print(f"[TXT][{task_key}] finish_reason=length, regenerando por bloques")
+            response_text = generate_txt_by_blocks(
+                client=client,
+                model=model,
+                task_key=task_key,
+                corpus=corpus,
+                programa=programa,
+                asignatura=asignatura,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        warnings = validate_gift_format(response_text, task_key)
+        expected = TXT_TASKS.get(task_key, {}).get("questions", 0)
+        found = len(extract_gift_question_blocks(response_text))
+        print(f"[TXT][{task_key}] preguntas detectadas: {found}/{expected}")
+        if warnings:
+            invalid_questions = invalid_gift_question_numbers(response_text)
+            if found == expected and invalid_questions:
+                response_text = repair_txt_invalid_blocks(
+                    text=response_text,
+                    client=client,
+                    model=model,
+                    task_key=task_key,
+                    corpus=corpus,
+                    programa=programa,
+                    asignatura=asignatura,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            else:
+                print(f"[TXT][{task_key}] validacion fallo, regenerando por bloques")
+                response_text = generate_txt_by_blocks(
+                    client=client,
+                    model=model,
+                    task_key=task_key,
+                    corpus=corpus,
+                    programa=programa,
+                    asignatura=asignatura,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            warnings = validate_gift_format(response_text, task_key)
+            found = len(extract_gift_question_blocks(response_text))
+            print(f"[TXT][{task_key}] preguntas detectadas tras bloques: {found}/{expected}")
+        if warnings:
+            raise RuntimeError("Validacion TXT final fallo: " + " | ".join(warnings[:8]))
         filename = output_filename(task_key, list(TXT_TASKS.keys()).index(task_key) + 1)
         output_path = output_dir / filename
         save_txt(response_text, output_path)
         result["status"] = "success"
         result["output_file"] = filename
         result["word_count"] = word_count(response_text)
-        result["warnings"] = validate_gift_format(response_text, task_key)
+        result["warnings"] = warnings
     except Exception as exc:
         result["status"] = "error"
-        result["error"] = str(exc)
+        result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         result["duration_seconds"] = round(time.time() - start_time, 2)
     return result
@@ -279,8 +522,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--titles", default="", help="Titulos/enfoques separados por punto y coma para cada TXT")
     parser.add_argument("--programa", default="", help="Programa que debe aparecer en el encabezado de cada TXT")
     parser.add_argument("--asignatura", default="", help="Asignatura que debe aparecer en el encabezado de cada TXT")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
-    parser.add_argument("--max-tokens", type=int, default=3500, help="Maximo de tokens por TXT generado")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL_TXT > OPENAI_MODEL > gemini-2.5-flash)")
+    parser.add_argument("--max-tokens", type=int, default=TXT_MIN_OUTPUT_TOKENS, help="Maximo de tokens por TXT generado")
     parser.add_argument("--temperature", type=float, default=0.45, help="Creatividad de generacion")
     parser.add_argument("--max-chars-per-file", type=int, default=45000, help="Maximo de caracteres leidos por archivo fuente")
     parser.add_argument("--dry-run", action="store_true", help="Solo lista entradas y valida configuracion, sin llamar a la API")
@@ -343,33 +586,83 @@ def main() -> None:
         print("\nDry-run activo. No se llamo a la API.")
         return
 
-    if OpenAI is None:
-        raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno o en .env")
+    if not args.model:
+        args.model = get_openai_model("txt")
 
-    client = OpenAI()
+    client = get_openai_client()
     system_prompt = prompt_path.read_text(encoding="utf-8")
     previous_outputs = ""
 
     for index, title in enumerate(titles, start=1):
         print(f"\nGenerando TXT {index}/{args.count}: {title}")
-        result = generate_document(
-            client=client,
-            model=args.model,
-            system_prompt=system_prompt,
-            user_prompt=build_user_prompt(
+        task_key = title.upper()
+        try:
+            result = call_txt_openai(
+                client=client,
+                model=args.model,
+                system_prompt=system_prompt,
+                user_prompt=build_user_prompt(
+                    corpus=corpus,
+                    title=title,
+                    index=index,
+                    count=args.count,
+                    previous_outputs=previous_outputs,
+                    programa=programa,
+                    asignatura=asignatura,
+                ),
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+            )
+        except RuntimeError as exc:
+            if task_key not in TXT_TASKS or "finish_reason=length" not in str(exc):
+                raise
+            print(f"[TXT][{task_key}] finish_reason=length, regenerando por bloques")
+            result = generate_txt_by_blocks(
+                client=client,
+                model=args.model,
+                task_key=task_key,
                 corpus=corpus,
-                title=title,
-                index=index,
-                count=args.count,
-                previous_outputs=previous_outputs,
                 programa=programa,
                 asignatura=asignatura,
-            ),
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-        )
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+            )
+        if task_key in TXT_TASKS:
+            warnings = validate_gift_format(result, task_key)
+            expected = TXT_TASKS[task_key]["questions"]
+            found = len(extract_gift_question_blocks(result))
+            print(f"[TXT][{task_key}] preguntas detectadas: {found}/{expected}")
+            if warnings:
+                invalid_questions = invalid_gift_question_numbers(result)
+                if found == expected and invalid_questions:
+                    result = repair_txt_invalid_blocks(
+                        text=result,
+                        client=client,
+                        model=args.model,
+                        task_key=task_key,
+                        corpus=corpus,
+                        programa=programa,
+                        asignatura=asignatura,
+                        max_tokens=args.max_tokens,
+                        temperature=args.temperature,
+                    )
+                else:
+                    print(f"[TXT][{task_key}] validacion fallo, regenerando por bloques")
+                    result = generate_txt_by_blocks(
+                        client=client,
+                        model=args.model,
+                        task_key=task_key,
+                        corpus=corpus,
+                        programa=programa,
+                        asignatura=asignatura,
+                        max_tokens=args.max_tokens,
+                        temperature=args.temperature,
+                    )
+                warnings = validate_gift_format(result, task_key)
+                found = len(extract_gift_question_blocks(result))
+                print(f"[TXT][{task_key}] preguntas detectadas tras bloques: {found}/{expected}")
+            if warnings:
+                raise RuntimeError("Validacion TXT final fallo: " + " | ".join(warnings[:8]))
         output_path = output_dir / output_filename(title, index)
         save_txt(result, output_path)
         previous_outputs = (previous_outputs + "\n\n" + result).strip()

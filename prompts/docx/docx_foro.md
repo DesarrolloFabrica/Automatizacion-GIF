@@ -122,6 +122,8 @@ RESTRICCIONES GENERALES - CONTRATO INSTITUCIONAL
 - Escribe los titulos principales y subtitulos en MAYUSCULAS, en una sola linea, sin numeracion decorativa.
 - Usa el guion "-" como vineta cuando corresponda.
 - NO uses asteriscos, markdown, emojis ni numeracion decorativa.
+- NO uses HTML. No uses etiquetas <p>, <ul>, <li>, <span>, <strong>, <em>, <div>, <br>. No uses atributos style="".
+- Entrega texto plano estructurado con titulos en mayuscula y listas con guion.
 - NO incluyas comentarios sobre el proceso ni cierres con frases tipo "Espero que sea util" o "Quedo atento".
 - Mantén un tono academico, claro y listo para entrega institucional.
 - NO menciones "G1", "G2", "G3", "G4", "G5" dentro del documento.

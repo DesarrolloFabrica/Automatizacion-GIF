@@ -13,6 +13,8 @@ REGLAS CRÍTICAS NO NEGOCIABLES
 - Cumple la estructura exacta de cada documento, sin omitir secciones ni renombrarlas.
 - Texto normal: Arial 12. Títulos y subtítulos: Arial 14 en negrita. Color de fuente: Negro.
 - No uses asteriscos, markdown, emojis ni numeración decorativa.
+- NO uses HTML. No uses etiquetas <p>, <ul>, <li>, <span>, <strong>, <em>, <div>, <br>. No uses atributos style="".
+- Entrega texto plano estructurado con titulos en mayuscula y listas con guion.
 - Devuelve la respuesta en TRES bloques delimitados con `===ACA===`, `===PRESENTACION===`, `===FORO===`.
 - En el FORO, la "Interacción Obligatoria" exige al estudiante comentar al menos 5 compañeros (escribe literalmente "al menos 5 compañeros" o "cinco compañeros").
 - En el FORO, al final incluye obligatoriamente TRES referencias APA 7 reales y verificables (no instrucciones, sino las referencias completas).

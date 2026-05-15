@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover
     OpenAI = None
 
 from automation_engine.config.categories import CATEGORIES
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 ENGINE_DIR = Path(__file__).resolve().parent
@@ -1887,12 +1888,7 @@ def generate_one_granule(
     try:
         log(f"iniciado: {topic}")
 
-        if OpenAI is None:
-            raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
-
-        client = OpenAI()
+        client = get_openai_client()
 
         content = generate_long_document(
             client=client,
@@ -2051,7 +2047,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topics", default="", help="Cinco temas separados por punto y coma o barra vertical, si se quieren forzar")
     parser.add_argument("--output-dir", default="outputs", help="Carpeta de salida")
     parser.add_argument("--prompt", default="", help="Ruta a un prompt maestro personalizado. Si se omite, usa prompts/<nivel>.md")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL_GRANULES > OPENAI_MODEL > gemini-2.5-pro)")
     parser.add_argument("--max-tokens", type=int, default=4500, help="Maximo de tokens por seccion generada")
     parser.add_argument("--temperature", type=float, default=0.65, help="Creatividad de generación")
     parser.add_argument("--dry-run", action="store_true", help="Solo analiza el sílabo y muestra el plan")
@@ -2085,10 +2081,8 @@ def main() -> None:
         print("\nDry-run activo. No se llamó a la API.")
         return
 
-    if OpenAI is None:
-        raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
+    if not args.model:
+        args.model = get_openai_model("granules")
 
     system_prompt = load_system_prompt(prompt_path)
 

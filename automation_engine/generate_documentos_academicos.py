@@ -40,6 +40,7 @@ from automation_engine.generate_guiones import (
     load_system_prompt,
     word_count,
 )
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 ENGINE_DIR = Path(__file__).resolve().parent
@@ -219,7 +220,9 @@ def call_openai(
     user_prompt: str,
     max_tokens: int,
     temperature: float,
+    min_output_tokens: int = 24000,
 ) -> str:
+    effective_max_tokens = max(max_tokens, min_output_tokens)
     try:
         response = client.chat.completions.create(
             model=model,
@@ -228,11 +231,30 @@ def call_openai(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=effective_max_tokens,
         )
     except Exception as exc:
-        raise RuntimeError(f"OpenAI fallo al generar la respuesta: {exc}") from exc
-    return (response.choices[0].message.content or "").strip()
+        raise RuntimeError(f"OpenAI fallo al generar la respuesta: {type(exc).__name__}: {exc}") from exc
+
+    if not response.choices:
+        raise RuntimeError(
+            f"La API devolvio choices vacio. model={model}, "
+            f"id={getattr(response, 'id', 'N/A')}"
+        )
+
+    choice = response.choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason == "length":
+        raise RuntimeError(f"finish_reason=length; salida DOCX cortada. max_tokens={effective_max_tokens}")
+    content = choice.message.content
+    if content is None:
+        refusal = getattr(choice.message, "refusal", None)
+        raise RuntimeError(
+            f"La API devolvio message.content=None. model={model}, "
+            f"finish_reason={finish_reason!r}, refusal={refusal!r}"
+        )
+
+    return content.strip()
 
 
 def split_response(response: str) -> Dict[str, str]:
@@ -281,6 +303,7 @@ REQUIRED_SECTIONS: Dict[str, Tuple[str, ...]] = {
         "PREGUNTA INTEGRADORA",
         "INSTRUCCIONES DE PARTICIPACION",
         "REQUERIMIENTOS DE FORMATO",
+        "REFERENCIAS",
     ),
 }
 
@@ -296,6 +319,8 @@ FORO_CRITICAL_KEYWORDS = ("al menos 5 companeros", "CINCO COMPANEROS", "REFERENC
 PRESENTACION_CRITICAL_KEYWORDS = ("Temas de la asignatura", "Resumen de Contenidos", "LLAMADOS A LA ACCION")
 
 MAX_REPAIR_ATTEMPTS = 2
+DOCX_MIN_OUTPUT_TOKENS = 24000
+DOCX_REPAIR_MIN_OUTPUT_TOKENS = 12000
 
 
 def _is_critical_warning(doc_type: str, warning: str) -> bool:
@@ -368,6 +393,46 @@ PRESENTATION_CTA_KEYWORDS: Tuple[str, ...] = (
 
 def _normalize_for_check(value: str) -> str:
     return _strip_accents(value or "").upper()
+
+
+def _normalize_apa_text(value: str) -> str:
+    normalized = _normalize_for_check(value)
+    normalized = normalized.replace("ª", "A").replace("º", "O")
+    normalized = re.sub(r"[^A-Z0-9]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _has_apa_requirement(value: str) -> bool:
+    normalized = _normalize_apa_text(value)
+    compact = normalized.replace(" ", "")
+    return any(
+        pattern in normalized or pattern in compact
+        for pattern in (
+            "APA",
+            "NORMAS APA",
+            "APA 7",
+            "APA 7A",
+            "APA 7 A",
+            "APA 7MA",
+            "APA SEPTIMA EDICION",
+            "CITACION APA",
+            "CITACION Y REFERENCIAS APA",
+        )
+    )
+
+
+def _format_delivery_context(content: str) -> str:
+    normalized = _normalize_for_check(content)
+    start = normalized.find("FORMATO DE ENTREGA")
+    if start < 0:
+        return ""
+    end = normalized.find("BIBLIOGRAFIA", start)
+    if end < 0:
+        end = normalized.find("REFERENCIAS", start)
+    if end < 0:
+        end = min(len(normalized), start + 2500)
+    return normalized[start:end]
 
 
 def _section_block(content: str, section_marker: str, next_markers: Tuple[str, ...]) -> str:
@@ -485,8 +550,10 @@ def validate_blocks(blocks: Dict[str, str]) -> List[str]:
         ("BIBLIOGRAFIA",),
     )
     formato_norm = _normalize_for_check(formato_block)
-    expected_formato_tokens = ("PDF", "ARIAL", "1.5", "APA")
+    expected_formato_tokens = ("PDF", "ARIAL", "1.5")
     missing_formato = [token for token in expected_formato_tokens if token not in formato_norm]
+    if not (_has_apa_requirement(formato_block) or _has_apa_requirement(_format_delivery_context(aca))):
+        missing_formato.append("APA")
     if missing_formato:
         warnings.append(
             "[ACA] 'Formato de entrega' no incluye todos los requisitos (PDF, Arial, 1.5, APA). Falta: "
@@ -523,8 +590,10 @@ def validate_single_docx(doc_type: str, content: str) -> List[str]:
 
         formato_block = _section_block(content, "FORMATO DE ENTREGA", ("BIBLIOGRAFIA",))
         formato_norm = _normalize_for_check(formato_block)
-        expected_formato_tokens = ("PDF", "ARIAL", "1.5", "APA")
+        expected_formato_tokens = ("PDF", "ARIAL", "1.5")
         missing_formato = [token for token in expected_formato_tokens if token not in formato_norm]
+        if not (_has_apa_requirement(formato_block) or _has_apa_requirement(_format_delivery_context(content))):
+            missing_formato.append("APA")
         if missing_formato:
             warnings.append(
                 "[ACA] 'Formato de entrega' no incluye todos los requisitos (PDF, Arial, 1.5, APA). Falta: "
@@ -557,6 +626,14 @@ def validate_single_docx(doc_type: str, content: str) -> List[str]:
             ("GANCHO DE BIENVENIDA", "PROPOSITO FORMATIVO"),
         )
         bullet_count = _count_bullet_lines(temas_block)
+        # Also count lines that start with "- " after sanitization (HTML <li> converted)
+        if bullet_count < 5:
+            alt_count = 0
+            for line in temas_block.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- ") and len(stripped) > 3:
+                    alt_count += 1
+            bullet_count = max(bullet_count, alt_count)
         if bullet_count < 5:
             warnings.append(
                 f"[PRESENTACION] Solo se detectaron {bullet_count} temas listados en 'Temas de la asignatura'. Se esperan 5."
@@ -589,6 +666,60 @@ def validate_single_docx(doc_type: str, content: str) -> List[str]:
             )
 
     return warnings
+
+
+def count_detected_sections(doc_type: str, content: str) -> tuple[int, int]:
+    normalized = _normalize_for_check(content)
+    sections = REQUIRED_SECTIONS.get(doc_type, ())
+    return sum(1 for section in sections if section in normalized), len(sections)
+
+
+def generate_aca_by_sections(
+    client,
+    model: str,
+    system_prompt: str,
+    combined_text: str,
+    subject: str,
+    program: str,
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    section_groups = (
+        ("1-3", "TITULO DEL PROYECTO, INTRODUCCION Y CONTEXTUALIZACION, OBJETIVOS DE APRENDIZAJE"),
+        ("4-6", "DESCRIPCION DE LA ACTIVIDAD, FORMATO DE ENTREGA, BIBLIOGRAFIA"),
+    )
+    parts: List[str] = []
+    for label, sections in section_groups:
+        print(f"[DOCX][ACA] generando secciones {label}")
+        prompt = f"""Genera UNICAMENTE las secciones {label} del ACA.
+
+Secciones obligatorias de este bloque:
+{sections}
+
+Reglas:
+- Texto plano, sin HTML ni markdown.
+- Titulos exactos en MAYUSCULAS.
+- Listas con guion.
+- No incluyas secciones fuera de este bloque.
+- FORMATO DE ENTREGA debe incluir PDF, Arial, 1.5 y APA.
+- BIBLIOGRAFIA debe incluir minimo 6 referencias APA completas.
+
+Asignatura: {subject}
+Programa: {program}
+
+Documentos fuente:
+{combined_text[:25000]}
+""".strip()
+        part = call_openai(
+            client=client,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=min(temperature, 0.3),
+        )
+        parts.append(sanitize_docx_content(part))
+    return "\n\n".join(parts).strip()
 
 
 def normalize_filename_part(value: str) -> str:
@@ -681,6 +812,75 @@ def _detect_bullet(text: str) -> Tuple[bool, str]:
     if stripped.startswith(bullet_chars):
         return True, stripped.lstrip("".join(bullet_chars) + " \t").strip()
     return False, stripped
+
+
+import html
+
+
+def sanitize_docx_content(raw_text: str) -> str:
+    """Remove HTML tags, markdown fences, and residual formatting from LLM output.
+
+    Gemini sometimes returns HTML-like structures (<p>, <ul>, <li>, <strong>).
+    This function normalizes the output to plain structured text suitable
+    for render_docx().
+    """
+    text = raw_text
+
+    # Decode HTML entities
+    text = html.unescape(text)
+
+    # Convert <br> and <br/> to newlines
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+
+    # Convert <li> items to bullet lines
+    text = re.sub(r"<li\s*[^>]*>", "- ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</li\s*>", "", text, flags=re.IGNORECASE)
+
+    # Convert <ul>, </ul>, <ol>, </ol> to nothing (list containers)
+    text = re.sub(r"</?[uo]l[^>]*>", "", text, flags=re.IGNORECASE)
+
+    # Remove inline formatting tags: <p>, </p>, <span>, </span>, <strong>, </strong>,
+    # <em>, </em>, <b>, </b>, <i>, </i>, <div>, </div>
+    text = re.sub(r"</?(?:p|span|strong|em|b|i|div|h[1-6]|font|a)[^>]*>", "", text, flags=re.IGNORECASE)
+
+    # Remove style attributes from any remaining tags
+    text = re.sub(r'\s+style="[^"]*"', "", text)
+
+    # Remove any remaining HTML-like tags
+    text = re.sub(r"<[^>]+>", "", text)
+
+    # Remove markdown fences
+    text = re.sub(r"```[a-z]*\s*\n?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\n```", "", text)
+
+    # Remove markdown bold/italic markers: **text**, *text*, __text__
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"_(.+?)_", r"\1", text)
+
+    # Remove markdown heading markers: ### text, ## text, # text
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+
+    # Remove &nbsp; and similar remnants
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+
+    # Collapse multiple blank lines into two
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
+def contains_html_or_markdown(text: str) -> bool:
+    """Check if text still contains HTML tags or markdown fences after sanitization."""
+    html_pattern = re.compile(r"<(?:p|ul|ol|li|span|strong|em|div|br|font|h[1-6])\b", re.IGNORECASE)
+    if html_pattern.search(text):
+        return True
+    if "```" in text:
+        return True
+    if re.search(r"\*\*.+?\*\*", text):
+        return True
+    return False
 
 
 def render_docx(content: str, output_path: Path, document_title: str) -> None:
@@ -788,8 +988,34 @@ def generate_single_docx(
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        response_text = sanitize_docx_content(response_text)
+
         all_warnings = validate_single_docx(doc_type, response_text)
+        if contains_html_or_markdown(response_text):
+            all_warnings.append(f"[{doc_type}] Salida contiene HTML/markdown literal")
+
         critical_issues, minor_issues = classify_warnings(doc_type, all_warnings)
+        detected, expected = count_detected_sections(doc_type, response_text)
+        print(f"[DOCX][{doc_type}] secciones detectadas: {detected}/{expected}")
+
+        if doc_type == "ACA" and critical_issues:
+            print(f"[DOCX][ACA] secciones detectadas: {detected}/{expected}, regenerando por secciones")
+            response_text = generate_aca_by_sections(
+                client=client,
+                model=model,
+                system_prompt=system_prompt,
+                combined_text=combined_text,
+                subject=subject,
+                program=program,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            all_warnings = validate_single_docx(doc_type, response_text)
+            if contains_html_or_markdown(response_text):
+                all_warnings.append(f"[{doc_type}] Salida contiene HTML/markdown literal")
+            critical_issues, minor_issues = classify_warnings(doc_type, all_warnings)
+            detected, expected = count_detected_sections(doc_type, response_text)
+            print(f"[DOCX][ACA] secciones detectadas tras secciones: {detected}/{expected}")
 
         if critical_issues and max_repair_attempts > 0:
             print(f"  [{doc_type}] validation failed - {len(critical_issues)} critical issues detected")
@@ -811,8 +1037,12 @@ def generate_single_docx(
                     user_prompt=repair_prompt,
                     max_tokens=max_tokens,
                     temperature=min(temperature, 0.3),
+                    min_output_tokens=DOCX_REPAIR_MIN_OUTPUT_TOKENS,
                 )
+                repaired_text = sanitize_docx_content(repaired_text)
                 repaired_warnings = validate_single_docx(doc_type, repaired_text)
+                if contains_html_or_markdown(repaired_text):
+                    repaired_warnings.append(f"[{doc_type}] Salida contiene HTML/markdown literal tras repair")
                 repaired_critical, repaired_minor = classify_warnings(doc_type, repaired_warnings)
                 if not repaired_critical:
                     response_text = repaired_text
@@ -829,11 +1059,20 @@ def generate_single_docx(
             result["repair_attempts"] = max_repair_attempts if critical_issues else sum(1 for _ in range(max_repair_attempts))
             result["repair_duration_seconds"] = round(time.time() - repair_start, 2)
 
+        detected, expected = count_detected_sections(doc_type, response_text)
+        print(f"[DOCX][{doc_type}] secciones detectadas finales: {detected}/{expected}")
+        if detected < expected:
+            raise RuntimeError(f"Validacion DOCX final fallo: secciones detectadas {detected}/{expected}; no se guarda archivo incompleto")
+
         filename = build_output_filename(doc_type, subject, program)
         output_path = output_dir / filename
         title = f"{DOCUMENT_TITLES[doc_type]} - {subject.upper()}"
         render_docx(response_text, output_path, title)
-        result["status"] = "success"
+
+        if critical_issues:
+            result["status"] = "success_with_warnings"
+        else:
+            result["status"] = "success"
         result["output_file"] = filename
         result["word_count"] = word_count(response_text)
         result["warnings"] = all_warnings
@@ -841,7 +1080,7 @@ def generate_single_docx(
         result["warnings_minor"] = minor_issues
     except Exception as exc:
         result["status"] = "error"
-        result["error"] = str(exc)
+        result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         result["duration_seconds"] = round(time.time() - start_time, 2)
     return result
@@ -943,13 +1182,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("OPENAI_MODEL", "gpt-4o"),
-        help="Modelo OpenAI a utilizar",
+        default=None,
+        help="Modelo (fallback: OPENAI_MODEL_DOCX > OPENAI_MODEL > gemini-2.5-pro)",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=6000,
+        default=DOCX_MIN_OUTPUT_TOKENS,
         help="Maximo de tokens en la respuesta del modelo",
     )
     parser.add_argument(
@@ -1014,14 +1253,10 @@ def main() -> None:
         print(f"Caracteres del user prompt: {len(user_prompt)}")
         return
 
-    if OpenAI is None:
-        raise RuntimeError(
-            "Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt"
-        )
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
+    if not args.model:
+        args.model = get_openai_model("docx")
 
-    client = OpenAI()
+    client = get_openai_client()
     print(f"\nLlamando al modelo {args.model}...")
     response = call_openai(
         client=client,

@@ -44,6 +44,7 @@ from automation_engine.utils.naming import (
     build_granule_folder_name,
     normalize_for_filename,
 )
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 EXPECTED_GRANULE_COUNT = 5
@@ -1482,10 +1483,8 @@ def generate_all_materiales(
     max_tokens: int,
     temperature: float,
 ) -> dict:
-    if OpenAI is None:
-        raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
+    if not model:
+        model = get_openai_model("materials")
 
     print(f"\n{'=' * 60}")
     print(f"=== FASE 3: GENERACION DE MATERIALES DE ESPECIALIZACION ===")
@@ -1551,7 +1550,7 @@ def generate_all_materiales(
     print(f"Materiales por granulo: {len(materiales_config)}")
     print(f"Total de materiales a generar: {len(granules) * len(materiales_config)}")
 
-    client = OpenAI()
+    client = get_openai_client()
     errors = []
     manifest_entries = []
     summary = {
@@ -1721,7 +1720,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--job-id", required=True, help="ID del job")
     parser.add_argument("--generated-dir", required=True, help="Directorio con granulos G1-G5")
     parser.add_argument("--output-dir", required=True, help="Directorio base para materiales")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL_MATERIALS > OPENAI_MODEL > gemini-2.5-flash)")
     parser.add_argument("--max-tokens", type=int, default=8000, help="Maximo de tokens por material")
     parser.add_argument("--temperature", type=float, default=0.5, help="Creatividad de generacion")
     return parser.parse_args()

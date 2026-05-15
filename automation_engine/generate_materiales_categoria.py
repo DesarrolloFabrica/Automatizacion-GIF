@@ -43,6 +43,7 @@ from automation_engine.generate_materiales_especializacion import (
     validate_material_content,
 )
 from automation_engine.utils.naming import build_granule_folder_name
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 def _log(msg: str) -> None:
@@ -198,7 +199,7 @@ def generate_single_material(
     category_version = blueprint["category_version"]
     category_extension = blueprint["category_extension"]
     layout_nn = resolve_layout_renderer_key(category_key, material_nn, material_nombre)
-    client = OpenAI()
+    client = get_openai_client()
 
     user_prompt = f"""Quiero generar un material derivado para {category_label.upper()}.
 
@@ -530,10 +531,8 @@ def generate_all_materiales(
     disable_drive_upload: bool = False,
     debug_dir: Path | None = None,
 ) -> dict:
-    if OpenAI is None:
-        raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
+    if not model:
+        model = get_openai_model("materials")
 
     category = get_category(category_key)
     if not category.enabled_for_package:
@@ -740,7 +739,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--category", required=True, help="Categoria academica")
     parser.add_argument("--generated-dir", required=True, help="Directorio con granulos G1-G5")
     parser.add_argument("--output-dir", required=True, help="Directorio base para materiales")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL_MATERIALS > OPENAI_MODEL > gemini-2.5-flash)")
     parser.add_argument("--max-tokens", type=int, default=8000, help="Maximo de tokens por material")
     parser.add_argument("--temperature", type=float, default=0.5, help="Creatividad de generacion")
     parser.add_argument("--materials", "--only-material", dest="materials", help="Filtro de materiales por NN, ejemplo: 03 o 02,03")
