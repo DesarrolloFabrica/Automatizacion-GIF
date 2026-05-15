@@ -4,8 +4,10 @@ import os
 import re
 import sys
 import textwrap
+import time
 import traceback
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable, List
@@ -26,6 +28,7 @@ except ImportError:  # pragma: no cover
     OpenAI = None
 
 from automation_engine.config.categories import CATEGORIES
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 ENGINE_DIR = Path(__file__).resolve().parent
@@ -363,6 +366,20 @@ TOPIC_REJECT_PHRASES = [
     "IMPLEMENTACION DE BASES DE DATOS",
     "DESARROLLO DE SEMINARIO ALEMAN",
 ]
+
+TOPIC_HEADER_REJECTS = {
+    "CONTENIDO",
+    "CONTENIDOS",
+    "UNIDAD",
+    "SEMANA",
+    "TEMA",
+    "TEMAS",
+    "RESULTADO",
+    "RESULTADOS",
+    "RESULTADOS DE APRENDIZAJE",
+    "COMPETENCIA",
+    "COMPETENCIAS",
+}
 
 
 def detect_all_courses(path: Path) -> List[CourseInfo]:
@@ -705,7 +722,8 @@ def extract_topics_from_course_block(rows: List[List[str]], block_text: str) -> 
             candidate = clean_text(row[content_index])
         elif len(row) >= 2:
             candidate = clean_text(row[1])
-        if is_valid_topic(candidate) and candidate not in topics:
+        topic_key = normalize_heading(candidate)
+        if is_valid_topic(candidate) and topic_key not in {normalize_heading(topic) for topic in topics}:
             topics.append(candidate)
         if len(topics) == 5:
             return topics
@@ -733,7 +751,8 @@ def extract_topics_from_text_block(text: str) -> List[str]:
         if content_mode:
             for candidate in split_topic_candidates(line):
                 candidate = clean_text(candidate)
-                if is_valid_topic(candidate) and candidate not in topics:
+                topic_key = normalize_heading(candidate)
+                if is_valid_topic(candidate) and topic_key not in {normalize_heading(topic) for topic in topics}:
                     topics.append(candidate)
                 if len(topics) == 5:
                     return topics
@@ -743,13 +762,15 @@ def extract_topics_from_text_block(text: str) -> List[str]:
 def is_valid_topic(value: str) -> bool:
     cleaned = clean_text(value)
     normalized = normalize_heading(cleaned)
-    if not cleaned or normalized in FIELD_LABELS:
+    if not cleaned or normalized in FIELD_LABELS or normalized in TOPIC_HEADER_REJECTS:
         return False
     if any(phrase in normalized for phrase in TOPIC_REJECT_PHRASES):
         return False
     if cleaned.startswith("¿") or re.fullmatch(r"\d+", cleaned):
         return False
-    if len(cleaned.split()) < 2 or len(cleaned.split()) > 14:
+    if len(cleaned) < 4 or not re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", cleaned):
+        return False
+    if len(cleaned.split()) > 14:
         return False
     return True
 
@@ -766,7 +787,8 @@ def _detect_courses_from_text(text: str, path: Path) -> List[CourseInfo]:
 
 
 def clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
+    value = (value or "").replace("\u00a0", " ").replace("\ufeff", "")
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def slugify(value: str) -> str:
@@ -1650,6 +1672,7 @@ def generate_long_document(
     total_topics: int,
     max_tokens: int,
     temperature: float,
+    sections_timing: dict | None = None,
 ) -> str:
     header = (
         f"CONTENIDO: {topic}. ASIGNATURA: {plan.asignatura}. "
@@ -1660,6 +1683,7 @@ def generate_long_document(
     used_main_titles = set()
 
     for section in get_section_plan(plan.nivel):
+        section_start = time.time()
         print(f"  - Generando {section['key']} ({section['target_words']})")
         prompt = build_section_prompt(
             plan=plan,
@@ -1690,12 +1714,14 @@ def generate_long_document(
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        editorial_start = time.time()
         section_text, editorial_report = editorial_postprocess_section(section_text, section, plan.nivel)
         if editorial_report["removed_duplicate_paragraphs"]:
             print(f"    Postproceso editorial: {editorial_report['removed_duplicate_paragraphs']} parrafos redundantes removidos.")
         if editorial_report["keyword_counts"]:
             dominant = ", ".join(f"{key}={value}" for key, value in editorial_report["keyword_counts"].items())
             print(f"    Postproceso editorial: keywords dominantes ajustadas ({dominant}).")
+        editorial_elapsed = _elapsed_since(editorial_start)
 
         if section["title"] not in used_main_titles:
             blocks.append(section["title"])
@@ -1703,12 +1729,27 @@ def generate_long_document(
         blocks.append(section_text)
         previous_context = (previous_context + "\n\n" + section_text).strip()
 
+        section_elapsed = _elapsed_since(section_start)
+        if sections_timing is not None:
+            sections_timing[section["key"]] = {
+                "durationSeconds": round(section_elapsed, 1),
+                "durationHuman": _format_duration_human(section_elapsed),
+                "editorialSeconds": round(editorial_elapsed, 1),
+            }
+
+    postprocess_start = time.time()
     content, document_report = editorial_postprocess_document("\n\n".join(blocks).strip())
     if document_report["removed_duplicate_headings"]:
         print(f"  Postproceso editorial global: {document_report['removed_duplicate_headings']} subtitulos duplicados removidos.")
     if document_report["keyword_counts"]:
         dominant = ", ".join(f"{key}={value}" for key, value in document_report["keyword_counts"].items())
         print(f"  Postproceso editorial global: keywords dominantes ajustadas ({dominant}).")
+    postprocess_elapsed = _elapsed_since(postprocess_start)
+    if sections_timing is not None:
+        sections_timing["postproceso_global"] = {
+            "durationSeconds": round(postprocess_elapsed, 1),
+            "durationHuman": _format_duration_human(postprocess_elapsed),
+        }
     return content
 
 
@@ -1784,6 +1825,214 @@ def write_plan_json(plan: CoursePlan, output_dir: Path) -> Path:
     return path
 
 
+def _granules_parallel_enabled() -> bool:
+    return os.environ.get("GRANULES_PARALLEL", "0") == "1"
+
+
+def _granules_max_workers() -> int:
+    raw = os.environ.get("GRANULES_MAX_WORKERS", "2")
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        value = 2
+    return max(1, min(value, 5))
+
+
+def _ensure_granule_log_dir(output_dir: Path) -> Path:
+    log_dir = output_dir.parent / "logs" / "granules"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def _format_duration_human(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes}m {secs}s"
+
+
+def _elapsed_since(start: float) -> float:
+    return time.time() - start
+
+
+def _write_granule_log(log_dir: Path, index: int, lines: List[str]) -> None:
+    log_path = log_dir / f"G{index}.log"
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def generate_one_granule(
+    index: int,
+    topic: str,
+    total_topics: int,
+    plan: CoursePlan,
+    syllabus_text: str,
+    system_prompt: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    output_dir: Path,
+    parallel_mode: bool,
+) -> dict:
+    """Genera un gránulo completo (G{index}) y retorna dict con resultado."""
+    log_lines: List[str] = []
+    code = f"G{index}"
+    granule_start = time.time()
+    sections_timing: dict = {}
+
+    def log(msg: str) -> None:
+        log_lines.append(msg)
+        print(f"[{code}] {msg}")
+        sys.stdout.flush()
+
+    try:
+        log(f"iniciado: {topic}")
+
+        client = get_openai_client()
+
+        content = generate_long_document(
+            client=client,
+            model=model,
+            system_prompt=system_prompt,
+            plan=plan,
+            syllabus_text=syllabus_text,
+            topic=topic,
+            topic_index=index,
+            total_topics=total_topics,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            sections_timing=sections_timing,
+        )
+
+        output_path = output_dir / f"G{index}_{slugify(topic)}.docx"
+        save_docx(content, output_path)
+        words = word_count(content)
+        estimated_pages = round(words / 450, 1)
+
+        granule_elapsed = _elapsed_since(granule_start)
+        log(f"completado en {_format_duration_human(granule_elapsed)}: {output_path.name} ({words} palabras aprox.; {estimated_pages} paginas estimadas)")
+
+        if not parallel_mode:
+            try:
+                from automation_engine.incremental_drive_upload import upload_package_file_if_configured
+
+                upload_package_file_if_configured(
+                    output_path,
+                    f"PAQUETE_ACADEMICO/CONTENIDOS/G{index}.docx",
+                )
+            except Exception as sync_exc:
+                log(f"Drive incremental: aviso (no detiene generación): {sync_exc}")
+
+        return {
+            "index": index,
+            "code": code,
+            "topic": topic,
+            "success": True,
+            "file": output_path.name,
+            "words": words,
+            "error": None,
+            "log_lines": log_lines,
+            "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(granule_start)),
+            "finishedAt": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "durationSeconds": round(granule_elapsed, 1),
+            "durationHuman": _format_duration_human(granule_elapsed),
+            "sections": sections_timing,
+        }
+
+    except Exception as exc:
+        error_msg = f"{type(exc).__name__}: {exc}"
+        granule_elapsed = _elapsed_since(granule_start)
+        log(f"failed: {error_msg}")
+        return {
+            "index": index,
+            "code": code,
+            "topic": topic,
+            "success": False,
+            "file": None,
+            "words": 0,
+            "error": error_msg,
+            "log_lines": log_lines,
+            "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(granule_start)),
+            "finishedAt": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "durationSeconds": round(granule_elapsed, 1),
+            "durationHuman": _format_duration_human(granule_elapsed),
+            "sections": sections_timing,
+        }
+
+
+def run_granules_sequential(
+    plan: CoursePlan,
+    syllabus_text: str,
+    system_prompt: str,
+    output_dir: Path,
+    args: argparse.Namespace,
+) -> List[dict]:
+    results: List[dict] = []
+    for index, topic in enumerate(plan.temas, start=1):
+        print(f"\nGenerando documento {index}/{len(plan.temas)}: {topic}")
+        result = generate_one_granule(
+            index=index,
+            topic=topic,
+            total_topics=len(plan.temas),
+            plan=plan,
+            syllabus_text=syllabus_text,
+            system_prompt=system_prompt,
+            model=args.model,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            output_dir=output_dir,
+            parallel_mode=False,
+        )
+        results.append(result)
+    return results
+
+
+def run_granules_parallel(
+    plan: CoursePlan,
+    syllabus_text: str,
+    system_prompt: str,
+    output_dir: Path,
+    args: argparse.Namespace,
+) -> List[dict]:
+    max_workers = _granules_max_workers()
+    log_dir = _ensure_granule_log_dir(output_dir)
+    total = len(plan.temas)
+
+    print(f"\nModo paralelo activado: max_workers={max_workers}, total_granules={total}")
+    sys.stdout.flush()
+
+    results: List[dict] = []
+    tasks = []
+    for index, topic in enumerate(plan.temas, start=1):
+        tasks.append((index, topic))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                generate_one_granule,
+                index=index,
+                topic=topic,
+                total_topics=total,
+                plan=plan,
+                syllabus_text=syllabus_text,
+                system_prompt=system_prompt,
+                model=args.model,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                output_dir=output_dir,
+                parallel_mode=True,
+            ): index
+            for index, topic in tasks
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            _write_granule_log(log_dir, result["index"], result["log_lines"])
+
+    results.sort(key=lambda r: r["index"])
+    return results
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Genera 5 guiones académicos desde un sílabo DOCX o PDF.")
     parser.add_argument("--syllabus", required=True, help="Ruta al sílabo .docx o .pdf")
@@ -1798,7 +2047,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topics", default="", help="Cinco temas separados por punto y coma o barra vertical, si se quieren forzar")
     parser.add_argument("--output-dir", default="outputs", help="Carpeta de salida")
     parser.add_argument("--prompt", default="", help="Ruta a un prompt maestro personalizado. Si se omite, usa prompts/<nivel>.md")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL_GRANULES > OPENAI_MODEL > gemini-2.5-pro)")
     parser.add_argument("--max-tokens", type=int, default=4500, help="Maximo de tokens por seccion generada")
     parser.add_argument("--temperature", type=float, default=0.65, help="Creatividad de generación")
     parser.add_argument("--dry-run", action="store_true", help="Solo analiza el sílabo y muestra el plan")
@@ -1814,11 +2063,13 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    parse_start = time.time()
     syllabus_text = extract_input_text(syllabus_path)
     plan = extract_course_plan(syllabus_path, args.subject, args.semester, args.topics)
     plan.nivel = detect_academic_level(plan, syllabus_text, args.nivel)
     prompt_path = resolve_prompt_path(plan.nivel, args.prompt)
     plan_path = write_plan_json(plan, output_dir)
+    parse_elapsed = _elapsed_since(parse_start)
 
     print("Plan detectado:")
     print(json.dumps(asdict(plan), ensure_ascii=False, indent=2))
@@ -1830,42 +2081,68 @@ def main() -> None:
         print("\nDry-run activo. No se llamó a la API.")
         return
 
-    if OpenAI is None:
-        raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
+    if not args.model:
+        args.model = get_openai_model("granules")
 
-    client = OpenAI()
     system_prompt = load_system_prompt(prompt_path)
 
-    for index, topic in enumerate(plan.temas, start=1):
-        print(f"\nGenerando documento {index}/{len(plan.temas)}: {topic}")
-        content = generate_long_document(
-            client=client,
-            model=args.model,
-            system_prompt=system_prompt,
-            plan=plan,
-            syllabus_text=syllabus_text,
-            topic=topic,
-            topic_index=index,
-            total_topics=len(plan.temas),
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-        )
-        output_path = output_dir / f"G{index}_{slugify(topic)}.docx"
-        save_docx(content, output_path)
-        words = word_count(content)
-        estimated_pages = round(words / 450, 1)
-        print(f"Guardado: {output_path} ({words} palabras aprox.; {estimated_pages} paginas estimadas)")
-        try:
-            from automation_engine.incremental_drive_upload import upload_package_file_if_configured
+    parallel = _granules_parallel_enabled()
+    max_workers = _granules_max_workers() if parallel else 1
 
-            upload_package_file_if_configured(
-                output_path,
-                f"PAQUETE_ACADEMICO/CONTENIDOS/G{index}.docx",
-            )
-        except Exception as sync_exc:
-            print(f"Drive incremental: aviso (no detiene generación): {sync_exc}")
+    granules_start = time.time()
+    if parallel:
+        results = run_granules_parallel(plan, syllabus_text, system_prompt, output_dir, args)
+    else:
+        results = run_granules_sequential(plan, syllabus_text, system_prompt, output_dir, args)
+    granules_elapsed = _elapsed_since(granules_start)
+
+    successful = [r for r in results if r["success"]]
+    failed = [r for r in results if not r["success"]]
+
+    print(f"\nResumen: {len(successful)} completados, {len(failed)} fallidos de {len(results)} gránulos")
+    for r in failed:
+        print(f"  {r['code']} ({r['topic']}): {r['error']}")
+
+    granules_durations = {r["code"]: {
+        "startedAt": r.get("startedAt"),
+        "finishedAt": r.get("finishedAt"),
+        "durationSeconds": r.get("durationSeconds"),
+        "durationHuman": r.get("durationHuman"),
+        "sections": r.get("sections", {}),
+        "success": r["success"],
+    } for r in results}
+
+    granule_avg = sum(r.get("durationSeconds", 0) for r in successful) / len(successful) if successful else 0
+
+    print(f"Tiempo total gránulos: {_format_duration_human(granules_elapsed)}")
+    if successful:
+        print(f"Promedio por gránulo: {_format_duration_human(granule_avg)}")
+    if parallel:
+        print(f"Modo: Paralelo (workers={max_workers})")
+    else:
+        print(f"Modo: Secuencial")
+    sys.stdout.flush()
+
+    metrics_dir = output_dir.parent / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics = {
+        "jobId": os.environ.get("AUTOMATIZACION_GIF_JOB_ID", ""),
+        "total": {
+            "parseSeconds": round(parse_elapsed, 1),
+            "parseHuman": _format_duration_human(parse_elapsed),
+            "granulesSeconds": round(granules_elapsed, 1),
+            "granulesHuman": _format_duration_human(granules_elapsed),
+        },
+        "mode": "parallel" if parallel else "sequential",
+        "maxWorkers": max_workers,
+        "granules": granules_durations,
+    }
+    metrics_path = metrics_dir / "metrics.json"
+    metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Metricas guardadas en: {metrics_path}")
+
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

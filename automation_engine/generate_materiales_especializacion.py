@@ -44,6 +44,7 @@ from automation_engine.utils.naming import (
     build_granule_folder_name,
     normalize_for_filename,
 )
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 EXPECTED_GRANULE_COUNT = 5
@@ -86,6 +87,44 @@ MATERIAL_VALIDATION_RULES = {
     "06": {"name": "PODCAST_DEBATE_EXPERTO", "type": "podcast", "min_segmentos": 9},
     "07": {"name": "VIDEO_SOLUCION_O_PROCEDIMIENTO", "type": "video", "min_escenas": 7},
 }
+
+MINIMALS_BY_CATEGORY: dict[str, dict[str, dict]] = {
+    "especializacion": {
+        "02": {"type": "fichas", "min_fichas": 5},
+        "03": {"type": "glosario", "min_terminos": 12},
+        "04": {"type": "revista", "min_bloques": 14},
+        "05": {"type": "infografia", "min_bloques": 7},
+        "06": {"type": "podcast", "min_segmentos": 9},
+        "07": {"type": "video", "min_escenas": 7},
+    },
+    "pregrado": {
+        "01": {"type": "podcast", "min_segmentos": 7},
+        "02": {"type": "infografia", "min_bloques": 6},
+        "03": {"type": "video", "min_escenas": 8},
+        "04": {"type": "glosario", "min_terminos": 8},
+        "05": {"type": "video", "min_escenas": 6},
+        "06": {"type": "revista", "min_bloques": 12},
+        "07": {"type": "fichas", "min_fichas": 3},
+    },
+}
+
+
+def _get_validation_minimals(
+    category_key: str | None,
+    layout_nn: str | None,
+    material_nn: str | None = None,
+) -> dict:
+    """Return validation minimums for a given category and material/layout number.
+
+    Falls back to MATERIAL_VALIDATION_RULES defaults if category is unknown.
+    """
+    ck = (category_key or "").strip().lower()
+    nn = (material_nn or layout_nn or "").strip()
+    cat_minimals = MINIMALS_BY_CATEGORY.get(ck)
+    if cat_minimals and nn in cat_minimals:
+        return cat_minimals[nn]
+    layout_key = (layout_nn or "").strip()
+    return MATERIAL_VALIDATION_RULES.get(layout_key, {})
 
 ARTIFACT_PATTERNS = [
     re.compile(r"^Datos recibidos\..*$", re.IGNORECASE | re.MULTILINE),
@@ -450,7 +489,7 @@ def _setup_document(doc: Document) -> None:
         hp.line_spacing = 1.15
 
 
-def _add_cover_page(doc, material_nombre, granule_code, tema):
+def _add_cover_page(doc, material_nombre, granule_code, tema, *, program: str, subject: str, level: str):
     _add_styled_para(doc, "", space_before=60, space_after=0)
     _add_styled_para(doc, material_nombre.replace("_", " "),
                       size=COVER_TITLE_SIZE, bold=True, color=COLOR_NAVY,
@@ -459,9 +498,15 @@ def _add_cover_page(doc, material_nombre, granule_code, tema):
     _add_styled_para(doc, f"{granule_code} \u2014 {tema.replace('-', ' ').title()}",
                       size=COVER_SUBTITLE_SIZE, color=COLOR_BLUE,
                       alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=14, space_after=6)
-    _add_styled_para(doc, "Especializacion en Diseno y Desarrollo de Videojuegos",
+    _add_styled_para(doc, f"Programa: {program}",
                       size=COVER_META_SIZE, italic=True, color=COLOR_MED_GRAY,
-                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=4, space_after=40)
+                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=4, space_after=2)
+    _add_styled_para(doc, f"Asignatura: {subject}",
+                      size=COVER_META_SIZE, italic=True, color=COLOR_MED_GRAY,
+                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=2, space_after=2)
+    _add_styled_para(doc, f"Nivel: {level}",
+                      size=COVER_META_SIZE, italic=True, color=COLOR_MED_GRAY,
+                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=2, space_after=40)
     doc.add_page_break()
 
 
@@ -1078,7 +1123,13 @@ def resolve_layout_renderer_key(
     return _get_material_number(material_nombre)
 
 
-def _validate_rendered_docx(output_path: Path, nn: Optional[str]) -> None:
+def _validate_rendered_docx(
+    output_path: Path,
+    nn: Optional[str],
+    category_key: Optional[str] = None,
+    material_nn: Optional[str] = None,
+    material_nombre: Optional[str] = None,
+) -> None:
     doc = Document(output_path)
     body_parts = [p.text for p in doc.paragraphs if p.text.strip()]
     for table in doc.tables:
@@ -1100,34 +1151,44 @@ def _validate_rendered_docx(output_path: Path, nn: Optional[str]) -> None:
     if found:
         raise ValueError(f"DOCX contiene elementos internos o HTML visible: {', '.join(found)}")
 
-    if nn == "02":
+    minimals = _get_validation_minimals(category_key, nn, material_nn)
+    mat_type = minimals.get("type", "")
+    material_ref = material_nombre or material_nn or nn
+
+    if mat_type == "fichas":
+        min_fichas = minimals.get("min_fichas", 5)
         ficha_count = sum(1 for p in body_parts if p.strip().lower().startswith("ficha "))
-        if ficha_count < 5:
-            raise ValueError(f"DOCX FICHAS incompleto: {ficha_count}/5 fichas renderizadas.")
-    elif nn == "03":
-        if not doc.tables or len(doc.tables[0].rows) < 13:
+        if ficha_count < min_fichas:
+            raise ValueError(f"DOCX {material_ref} incompleto: {ficha_count}/{min_fichas} fichas renderizadas. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "glosario":
+        min_terminos = minimals.get("min_terminos", 12)
+        if not doc.tables or len(doc.tables[0].rows) < min_terminos + 1:
             rows = len(doc.tables[0].rows) if doc.tables else 0
-            raise ValueError(f"DOCX GLOSARIO incompleto: {max(0, rows - 1)}/12 terminos renderizados.")
-    elif nn == "04":
-        if len(body_parts) < 18:
-            raise ValueError(f"DOCX REVISTA incompleto: solo {len(body_parts)} bloques/parrafos visibles.")
-    elif nn == "05":
+            raise ValueError(f"DOCX {material_ref} incompleto: {max(0, rows - 1)}/{min_terminos} terminos renderizados. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "revista":
+        min_bloques = minimals.get("min_bloques", 14)
+        if len(body_parts) < min_bloques + 4:
+            raise ValueError(f"DOCX {material_ref} incompleto: solo {len(body_parts)} bloques/parrafos visibles (min {min_bloques + 4}). Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "infografia":
+        min_bloques = minimals.get("min_bloques", 7)
         block_count = sum(
             1 for table in doc.tables
             if table.rows and table.rows[0].cells and table.rows[0].cells[0].text.strip().lower().startswith("bloque ")
         )
-        if block_count < 7:
-            raise ValueError(f"DOCX INFOGRAFIA incompleto: {block_count}/7 bloques renderizados.")
-    elif nn == "06":
+        if block_count < min_bloques:
+            raise ValueError(f"DOCX {material_ref} incompleto: {block_count}/{min_bloques} bloques renderizados. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "podcast":
+        min_segmentos = minimals.get("min_segmentos", 9)
         segment_count = sum(1 for p in body_parts if p.strip().lower().startswith("duracion:"))
-        if segment_count < 9:
-            raise ValueError(f"DOCX PODCAST incompleto: {segment_count}/9 segmentos renderizados.")
-    elif nn == "07":
+        if segment_count < min_segmentos:
+            raise ValueError(f"DOCX {material_ref} incompleto: {segment_count}/{min_segmentos} segmentos renderizados. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
+    elif mat_type == "video":
+        min_escenas = minimals.get("min_escenas", 7)
         scene_count = sum(1 for p in body_parts if p.strip().lower().startswith("escena"))
-        if scene_count < 7:
-            raise ValueError(f"DOCX VIDEO incompleto: {scene_count}/7 escenas renderizadas.")
+        if scene_count < min_escenas:
+            raise ValueError(f"DOCX {material_ref} incompleto: {scene_count}/{min_escenas} escenas renderizadas. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
         if len(body_text) < 2500:
-            raise ValueError(f"DOCX VIDEO incompleto: solo {len(body_text)} caracteres visibles.")
+            raise ValueError(f"DOCX {material_ref} incompleto: solo {len(body_text)} caracteres visibles. Categoria: {category_key}, material: {material_nn}, layout: {nn}")
 
 
 def save_docx_with_structure(
@@ -1139,11 +1200,29 @@ def save_docx_with_structure(
     *,
     category_key: str | None = None,
     material_nn: str | None = None,
+    program: str = "",
+    subject: str = "",
+    level: str = "",
 ) -> None:
     cleaned = clean_ai_response(content)
+    cover_metadata = f"Programa: {program}\nAsignatura: {subject}\nNivel: {level}"
+    print("[Materials][CoverMetadata]")
+    print(f"program={program}")
+    print(f"subject={subject}")
+    print(f"level={level}")
+    if not (program or "").strip() or not (subject or "").strip() or not (level or "").strip():
+        raise ValueError(
+            "Metadata de portada incompleta: "
+            f"program={program!r}, subject={subject!r}, level={level!r}. "
+            "Se aborta antes de renderizar."
+        )
+    resource = f"{granule_code} {material_nombre}"
+    _assert_no_contaminated_metadata(content, "raw_content", resource)
+    _assert_no_contaminated_metadata(cleaned, "cleaned_content", resource)
+    _assert_no_contaminated_metadata(cover_metadata, "cover metadata", resource)
     doc = Document()
     _setup_document(doc)
-    _add_cover_page(doc, material_nombre, granule_code, tema)
+    _add_cover_page(doc, material_nombre, granule_code, tema, program=program, subject=subject, level=level)
     chars_after_cover = count_visible_docx_chars(doc)
 
     tables = _parse_markdown_tables(cleaned)
@@ -1186,7 +1265,7 @@ def save_docx_with_structure(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
-    _validate_rendered_docx(output_path, layout_nn)
+    _validate_rendered_docx(output_path, layout_nn, category_key, material_nn, material_nombre)
 
 
 def extract_docx_text(path: Path) -> str:
@@ -1239,8 +1318,18 @@ def build_user_prompt(
     tema: str,
     tema_corto: str,
     version: str,
+    program: str,
+    subject: str,
+    level: str,
 ) -> str:
-    return f"""Quiero generar un material derivado para ESPECIALIZACION.
+    return f"""Programa oficial: {program}
+Asignatura oficial: {subject}
+Nivel oficial: {level}
+Granulo oficial: {granule_code} - {tema}
+
+Esta prohibido mencionar cualquier programa, asignatura o especializacion distinta.
+
+Quiero generar un material derivado para {level.upper()}.
 
 Pego a continuacion el GUION MAESTRO aprobado del tema:
 
@@ -1286,6 +1375,80 @@ def clean_ai_response(content: str) -> str:
     lines = [line for line in cleaned.splitlines() if line.strip()]
     cleaned = "\n".join(lines).strip()
     return cleaned
+
+
+def _find_plan_curso(generated_dir: Path, output_base: Path) -> Path | None:
+    candidates = [
+        generated_dir / "plan_curso.json",
+        generated_dir.parent / "plan_curso.json",
+        output_base / "plan_curso.json",
+        output_base.parent / "plan_curso.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_required_plan_metadata(generated_dir: Path, output_base: Path) -> dict:
+    plan_path = _find_plan_curso(generated_dir, output_base)
+    if not plan_path:
+        searched = [
+            generated_dir / "plan_curso.json",
+            generated_dir.parent / "plan_curso.json",
+            output_base / "plan_curso.json",
+            output_base.parent / "plan_curso.json",
+        ]
+        raise FileNotFoundError(
+            "plan_curso.json es obligatorio para generar materiales. Buscado en: "
+            + "; ".join(str(path) for path in searched)
+        )
+    data = json.loads(plan_path.read_text(encoding="utf-8"))
+    print(f"plan keys={sorted(data.keys())}")
+    return {
+        "path": str(plan_path),
+        "program": data.get("programa", ""),
+        "subject": data.get("asignatura", ""),
+        "level": data.get("nivel", data.get("categoria", "")),
+        "topics": data.get("temas", []),
+    }
+
+
+def _normalize_metadata_check(value: str) -> str:
+    value = (value or "").lower()
+    replacements = str.maketrans("áéíóúüñ", "aeiouun")
+    value = value.translate(replacements)
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def _has_contaminated_metadata(value: str) -> bool:
+    normalized = _normalize_metadata_check(value)
+    return "videojuegos" in normalized or all(token in normalized for token in ("diseno", "desarrollo", "videojuegos"))
+
+
+def _contamination_excerpt(value: str) -> str:
+    if not value:
+        return ""
+    normalized = _normalize_metadata_check(value)
+    index = normalized.find("videojuegos")
+    if index < 0:
+        index = normalized.find("diseno")
+    if index < 0:
+        return ""
+    start = max(0, index - 100)
+    end = min(len(value), index + 180)
+    return re.sub(r"\s+", " ", value[start:end]).strip()
+
+
+def _assert_no_contaminated_metadata(value: str, source: str, resource: str = "") -> None:
+    if _has_contaminated_metadata(value):
+        print("[Materials][Contamination]")
+        print(f"resource={resource or 'unknown'}")
+        print("phrase=metadata ajena de videojuegos")
+        print(f"source={source}")
+        print(f"excerpt={_contamination_excerpt(value)}")
+        raise ValueError(f"Metadata contaminada detectada en {source}; se aborta antes de guardar DOCX.")
 
 
 def generate_material_content(
@@ -1356,9 +1519,14 @@ def validate_material_prompts(prompt_text: str) -> List[str]:
     return missing
 
 
-def validate_material_content(nn: str, content: str) -> Tuple[str, List[str]]:
-    rule = MATERIAL_VALIDATION_RULES.get(nn)
-    if not rule:
+def validate_material_content(
+    nn: str,
+    content: str,
+    category_key: str | None = None,
+    material_nn: str | None = None,
+) -> Tuple[str, List[str]]:
+    minimals = _get_validation_minimals(category_key, nn, material_nn)
+    if not minimals:
         return "ok", []
     warnings = []
     table_rows = 0
@@ -1367,47 +1535,47 @@ def validate_material_content(nn: str, content: str) -> Tuple[str, List[str]]:
         if stripped.startswith("|") and stripped.endswith("|") and "---" not in stripped:
             table_rows += 1
 
-    mat_type = rule["type"]
+    mat_type = minimals.get("type", "")
     if mat_type == "fichas":
-        expected_rows = rule["min_fichas"] + 1
+        expected_rows = minimals.get("min_fichas", 5) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"FICHAS: se esperaban al menos {rule['min_fichas']} fichas (filas de tabla). "
+                f"FICHAS: se esperaban al menos {minimals['min_fichas']} fichas (filas de tabla). "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "glosario":
-        expected_rows = rule["min_terminos"] + 1
+        expected_rows = minimals.get("min_terminos", 12) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"GLOSARIO: se esperaban al menos {rule['min_terminos']} terminos. "
+                f"GLOSARIO: se esperaban al menos {minimals['min_terminos']} terminos. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "revista":
-        expected_rows = rule["min_bloques"] + 1
+        expected_rows = minimals.get("min_bloques", 14) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"REVISTA: se esperaban al menos {rule['min_bloques']} bloques. "
+                f"REVISTA: se esperaban al menos {minimals['min_bloques']} bloques. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "infografia":
-        expected_rows = rule["min_bloques"] + 1
+        expected_rows = minimals.get("min_bloques", 7) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"INFOGRAFIA: se esperaban al menos {rule['min_bloques']} bloques. "
+                f"INFOGRAFIA: se esperaban al menos {minimals['min_bloques']} bloques. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "podcast":
-        expected_rows = rule["min_segmentos"] + 1
+        expected_rows = minimals.get("min_segmentos", 9) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"PODCAST: se esperaban al menos {rule['min_segmentos']} segmentos. "
+                f"PODCAST: se esperaban al menos {minimals['min_segmentos']} segmentos. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
     elif mat_type == "video":
-        expected_rows = rule["min_escenas"] + 1
+        expected_rows = minimals.get("min_escenas", 7) + 1
         if table_rows < expected_rows:
             warnings.append(
-                f"VIDEO: se esperaban al menos {rule['min_escenas']} escenas. "
+                f"VIDEO: se esperaban al menos {minimals['min_escenas']} escenas. "
                 f"Se detectaron {max(0, table_rows - 1)} filas de contenido."
             )
 
@@ -1423,10 +1591,8 @@ def generate_all_materiales(
     max_tokens: int,
     temperature: float,
 ) -> dict:
-    if OpenAI is None:
-        raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
+    if not model:
+        model = get_openai_model("materials")
 
     print(f"\n{'=' * 60}")
     print(f"=== FASE 3: GENERACION DE MATERIALES DE ESPECIALIZACION ===")
@@ -1492,7 +1658,13 @@ def generate_all_materiales(
     print(f"Materiales por granulo: {len(materiales_config)}")
     print(f"Total de materiales a generar: {len(granules) * len(materiales_config)}")
 
-    client = OpenAI()
+    plan_metadata = _load_required_plan_metadata(generated_dir, output_base)
+    print("[Materials][MetadataSource]")
+    print(f"program from=plan_curso.json value={plan_metadata.get('program', '')}")
+    print(f"subject from=plan_curso.json value={plan_metadata.get('subject', '')}")
+    print(f"level from=plan_curso.json value={plan_metadata.get('level', '')}")
+
+    client = get_openai_client()
     errors = []
     manifest_entries = []
     summary = {
@@ -1531,6 +1703,7 @@ def generate_all_materiales(
         granule_output_dir = output_base / folder_name
         granule_output_dir.mkdir(parents=True, exist_ok=True)
         print(f"  Carpeta de salida: {granule_output_dir}")
+        print(f"granule from=filename/docx value={granule_code} {tema}")
 
         granule_summary = {"status": "ok", "materiales": {}}
         granule_errors = []
@@ -1553,8 +1726,12 @@ def generate_all_materiales(
                     tema=tema,
                     tema_corto=tema_corto,
                     version=VERSION_DEFECTO,
+                    program=plan_metadata.get("program", ""),
+                    subject=plan_metadata.get("subject", ""),
+                    level=plan_metadata.get("level", ""),
                 )
 
+                client = get_openai_client()
                 content = generate_material_content(
                     client=client,
                     model=model,
@@ -1564,6 +1741,8 @@ def generate_all_materiales(
                     temperature=temperature,
                 )
 
+                _assert_no_contaminated_metadata(content, "raw_content", f"{granule_code} {material.nombre}")
+
                 if not content or len(content) < MIN_RESPONSE_CHARS:
                     raise ValueError(
                         f"Respuesta insuficiente ({len(content)} chars). Minimo: {MIN_RESPONSE_CHARS}."
@@ -1572,7 +1751,7 @@ def generate_all_materiales(
                 layout_nn = resolve_layout_renderer_key("especializacion", material.nn, material.nombre)
                 if not layout_nn:
                     raise ValueError(f"No se resolvió layout para especialización material {material.nn} {material.nombre}")
-                val_status, val_warnings = validate_material_content(layout_nn, content)
+                val_status, val_warnings = validate_material_content(layout_nn, content, "especializacion", material.nn)
                 if val_warnings:
                     for w in val_warnings:
                         print(f"    ADVERTENCIA: {w}")
@@ -1586,6 +1765,9 @@ def generate_all_materiales(
                     tema=tema,
                     category_key="especializacion",
                     material_nn=material.nn,
+                    program=plan_metadata.get("program", ""),
+                    subject=plan_metadata.get("subject", ""),
+                    level=plan_metadata.get("level", ""),
                 )
 
                 if not material_output_path.exists() or material_output_path.stat().st_size == 0:
@@ -1662,7 +1844,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--job-id", required=True, help="ID del job")
     parser.add_argument("--generated-dir", required=True, help="Directorio con granulos G1-G5")
     parser.add_argument("--output-dir", required=True, help="Directorio base para materiales")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL_MATERIALS > OPENAI_MODEL > gemini-2.5-flash)")
     parser.add_argument("--max-tokens", type=int, default=8000, help="Maximo de tokens por material")
     parser.add_argument("--temperature", type=float, default=0.5, help="Creatividad de generacion")
     return parser.parse_args()

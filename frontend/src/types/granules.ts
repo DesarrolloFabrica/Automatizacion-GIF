@@ -131,6 +131,29 @@ export interface JobStatusResponse {
   syllabusOriginalName?: string | null
   syllabusStoredName?: string | null
   syllabusGcsPath?: string | null
+  metrics?: GranulesMetrics | null
+}
+
+export interface GranuleTiming {
+  startedAt?: string
+  finishedAt?: string
+  durationSeconds?: number
+  durationHuman?: string
+  success?: boolean
+  sections?: Record<string, { durationSeconds?: number; durationHuman?: string }>
+}
+
+export interface GranulesMetrics {
+  jobId?: string
+  total?: {
+    parseSeconds?: number
+    parseHuman?: string
+    granulesSeconds?: number
+    granulesHuman?: string
+  }
+  mode?: 'sequential' | 'parallel'
+  maxWorkers?: number
+  granules?: Record<string, GranuleTiming>
 }
 
 export interface DriveUploadResponse {

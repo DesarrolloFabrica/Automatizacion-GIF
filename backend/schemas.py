@@ -32,6 +32,7 @@ class JobStatusResponse(BaseModel):
     syllabusOriginalName: str | None = None
     syllabusStoredName: str | None = None
     syllabusGcsPath: str | None = None
+    metrics: dict | None = None
 
 
 class PreviewTopic(BaseModel):
@@ -127,3 +128,21 @@ class DrivePackageUploadResponse(BaseModel):
     filesSkipped: int
     foldersCreated: int
     foldersReused: int
+
+
+class ModularJobSummary(BaseModel):
+    jobId: str
+    category: str
+    syllabusName: str | None
+    granulesCount: int
+    pipelineFilesCount: int
+    materialsCount: int
+    granulesStatus: str
+    pipelineLocalStatus: str
+    materialsStatus: str
+    createdAt: str | None
+    updatedAt: str | None
+
+
+class ModularRecentResponse(BaseModel):
+    jobs: list[ModularJobSummary]

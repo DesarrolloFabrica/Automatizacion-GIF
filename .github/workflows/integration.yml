@@ -242,7 +242,11 @@ jobs:
             --cpu=2
             --timeout=3600
             --concurrency=1
-            --max-instances=3
+            # Mientras los jobs vivan en memoria o /tmp, Cloud Run debe usar una sola instancia
+            # para evitar 404 entre instancias. Un job creado en la instancia A no existe en B.
+            # Fase 2: GCS_BUCKET habilita persistencia de archivos; multi-instancia se activa en Fase 5.
+            --min-instances=1
+            --max-instances=1
             ${{ env.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT != '' && format('--service-account={0}', env.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT) || '' }}
           env_vars: |
             OPENAI_MODEL=${{ env.OPENAI_MODEL }}
