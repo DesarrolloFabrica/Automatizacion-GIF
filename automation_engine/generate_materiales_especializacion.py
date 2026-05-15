@@ -489,7 +489,7 @@ def _setup_document(doc: Document) -> None:
         hp.line_spacing = 1.15
 
 
-def _add_cover_page(doc, material_nombre, granule_code, tema):
+def _add_cover_page(doc, material_nombre, granule_code, tema, *, program: str, subject: str, level: str):
     _add_styled_para(doc, "", space_before=60, space_after=0)
     _add_styled_para(doc, material_nombre.replace("_", " "),
                       size=COVER_TITLE_SIZE, bold=True, color=COLOR_NAVY,
@@ -498,9 +498,15 @@ def _add_cover_page(doc, material_nombre, granule_code, tema):
     _add_styled_para(doc, f"{granule_code} \u2014 {tema.replace('-', ' ').title()}",
                       size=COVER_SUBTITLE_SIZE, color=COLOR_BLUE,
                       alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=14, space_after=6)
-    _add_styled_para(doc, "Especializacion en Diseno y Desarrollo de Videojuegos",
+    _add_styled_para(doc, f"Programa: {program}",
                       size=COVER_META_SIZE, italic=True, color=COLOR_MED_GRAY,
-                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=4, space_after=40)
+                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=4, space_after=2)
+    _add_styled_para(doc, f"Asignatura: {subject}",
+                      size=COVER_META_SIZE, italic=True, color=COLOR_MED_GRAY,
+                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=2, space_after=2)
+    _add_styled_para(doc, f"Nivel: {level}",
+                      size=COVER_META_SIZE, italic=True, color=COLOR_MED_GRAY,
+                      alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=2, space_after=40)
     doc.add_page_break()
 
 
@@ -1194,11 +1200,29 @@ def save_docx_with_structure(
     *,
     category_key: str | None = None,
     material_nn: str | None = None,
+    program: str = "",
+    subject: str = "",
+    level: str = "",
 ) -> None:
     cleaned = clean_ai_response(content)
+    cover_metadata = f"Programa: {program}\nAsignatura: {subject}\nNivel: {level}"
+    print("[Materials][CoverMetadata]")
+    print(f"program={program}")
+    print(f"subject={subject}")
+    print(f"level={level}")
+    if not (program or "").strip() or not (subject or "").strip() or not (level or "").strip():
+        raise ValueError(
+            "Metadata de portada incompleta: "
+            f"program={program!r}, subject={subject!r}, level={level!r}. "
+            "Se aborta antes de renderizar."
+        )
+    resource = f"{granule_code} {material_nombre}"
+    _assert_no_contaminated_metadata(content, "raw_content", resource)
+    _assert_no_contaminated_metadata(cleaned, "cleaned_content", resource)
+    _assert_no_contaminated_metadata(cover_metadata, "cover metadata", resource)
     doc = Document()
     _setup_document(doc)
-    _add_cover_page(doc, material_nombre, granule_code, tema)
+    _add_cover_page(doc, material_nombre, granule_code, tema, program=program, subject=subject, level=level)
     chars_after_cover = count_visible_docx_chars(doc)
 
     tables = _parse_markdown_tables(cleaned)
@@ -1294,8 +1318,18 @@ def build_user_prompt(
     tema: str,
     tema_corto: str,
     version: str,
+    program: str,
+    subject: str,
+    level: str,
 ) -> str:
-    return f"""Quiero generar un material derivado para ESPECIALIZACION.
+    return f"""Programa oficial: {program}
+Asignatura oficial: {subject}
+Nivel oficial: {level}
+Granulo oficial: {granule_code} - {tema}
+
+Esta prohibido mencionar cualquier programa, asignatura o especializacion distinta.
+
+Quiero generar un material derivado para {level.upper()}.
 
 Pego a continuacion el GUION MAESTRO aprobado del tema:
 
@@ -1341,6 +1375,80 @@ def clean_ai_response(content: str) -> str:
     lines = [line for line in cleaned.splitlines() if line.strip()]
     cleaned = "\n".join(lines).strip()
     return cleaned
+
+
+def _find_plan_curso(generated_dir: Path, output_base: Path) -> Path | None:
+    candidates = [
+        generated_dir / "plan_curso.json",
+        generated_dir.parent / "plan_curso.json",
+        output_base / "plan_curso.json",
+        output_base.parent / "plan_curso.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_required_plan_metadata(generated_dir: Path, output_base: Path) -> dict:
+    plan_path = _find_plan_curso(generated_dir, output_base)
+    if not plan_path:
+        searched = [
+            generated_dir / "plan_curso.json",
+            generated_dir.parent / "plan_curso.json",
+            output_base / "plan_curso.json",
+            output_base.parent / "plan_curso.json",
+        ]
+        raise FileNotFoundError(
+            "plan_curso.json es obligatorio para generar materiales. Buscado en: "
+            + "; ".join(str(path) for path in searched)
+        )
+    data = json.loads(plan_path.read_text(encoding="utf-8"))
+    print(f"plan keys={sorted(data.keys())}")
+    return {
+        "path": str(plan_path),
+        "program": data.get("programa", ""),
+        "subject": data.get("asignatura", ""),
+        "level": data.get("nivel", data.get("categoria", "")),
+        "topics": data.get("temas", []),
+    }
+
+
+def _normalize_metadata_check(value: str) -> str:
+    value = (value or "").lower()
+    replacements = str.maketrans("áéíóúüñ", "aeiouun")
+    value = value.translate(replacements)
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def _has_contaminated_metadata(value: str) -> bool:
+    normalized = _normalize_metadata_check(value)
+    return "videojuegos" in normalized or all(token in normalized for token in ("diseno", "desarrollo", "videojuegos"))
+
+
+def _contamination_excerpt(value: str) -> str:
+    if not value:
+        return ""
+    normalized = _normalize_metadata_check(value)
+    index = normalized.find("videojuegos")
+    if index < 0:
+        index = normalized.find("diseno")
+    if index < 0:
+        return ""
+    start = max(0, index - 100)
+    end = min(len(value), index + 180)
+    return re.sub(r"\s+", " ", value[start:end]).strip()
+
+
+def _assert_no_contaminated_metadata(value: str, source: str, resource: str = "") -> None:
+    if _has_contaminated_metadata(value):
+        print("[Materials][Contamination]")
+        print(f"resource={resource or 'unknown'}")
+        print("phrase=metadata ajena de videojuegos")
+        print(f"source={source}")
+        print(f"excerpt={_contamination_excerpt(value)}")
+        raise ValueError(f"Metadata contaminada detectada en {source}; se aborta antes de guardar DOCX.")
 
 
 def generate_material_content(
@@ -1550,6 +1658,12 @@ def generate_all_materiales(
     print(f"Materiales por granulo: {len(materiales_config)}")
     print(f"Total de materiales a generar: {len(granules) * len(materiales_config)}")
 
+    plan_metadata = _load_required_plan_metadata(generated_dir, output_base)
+    print("[Materials][MetadataSource]")
+    print(f"program from=plan_curso.json value={plan_metadata.get('program', '')}")
+    print(f"subject from=plan_curso.json value={plan_metadata.get('subject', '')}")
+    print(f"level from=plan_curso.json value={plan_metadata.get('level', '')}")
+
     client = get_openai_client()
     errors = []
     manifest_entries = []
@@ -1589,6 +1703,7 @@ def generate_all_materiales(
         granule_output_dir = output_base / folder_name
         granule_output_dir.mkdir(parents=True, exist_ok=True)
         print(f"  Carpeta de salida: {granule_output_dir}")
+        print(f"granule from=filename/docx value={granule_code} {tema}")
 
         granule_summary = {"status": "ok", "materiales": {}}
         granule_errors = []
@@ -1611,8 +1726,12 @@ def generate_all_materiales(
                     tema=tema,
                     tema_corto=tema_corto,
                     version=VERSION_DEFECTO,
+                    program=plan_metadata.get("program", ""),
+                    subject=plan_metadata.get("subject", ""),
+                    level=plan_metadata.get("level", ""),
                 )
 
+                client = get_openai_client()
                 content = generate_material_content(
                     client=client,
                     model=model,
@@ -1621,6 +1740,8 @@ def generate_all_materiales(
                     max_tokens=max_tokens,
                     temperature=temperature,
                 )
+
+                _assert_no_contaminated_metadata(content, "raw_content", f"{granule_code} {material.nombre}")
 
                 if not content or len(content) < MIN_RESPONSE_CHARS:
                     raise ValueError(
@@ -1644,6 +1765,9 @@ def generate_all_materiales(
                     tema=tema,
                     category_key="especializacion",
                     material_nn=material.nn,
+                    program=plan_metadata.get("program", ""),
+                    subject=plan_metadata.get("subject", ""),
+                    level=plan_metadata.get("level", ""),
                 )
 
                 if not material_output_path.exists() or material_output_path.stat().st_size == 0:
