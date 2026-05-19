@@ -117,3 +117,92 @@ export function saveDriveSession(data: Partial<DriveSessionData> & { jobId: stri
 export function clearDriveSession() {
   clearSession(DRIVE_PACKAGE_SESSION_KEY)
 }
+
+const SCRIPTS_MODULAR_SESSION_KEY = 'scriptsModularSession.v1'
+const SCRIPTS_MODULAR_TTL_MS = 24 * 60 * 60 * 1000
+
+export type ScriptModuleId = 'granules' | 'txtdocx' | 'materials'
+
+export interface ScriptsModularModuleState {
+  jobId: string | null
+  status: string
+  files: string[]
+  logs: string[]
+  message: string
+  selectedFileName: string | null
+  nivel: string | null
+  asignatura: string | null
+  programa: string | null
+  completedAt: string | null
+  error: string | null
+}
+
+export interface ScriptsModularSessionData {
+  createdAt: number
+  updatedAt: number
+  activeModule: ScriptModuleId
+  modules: Record<ScriptModuleId, ScriptsModularModuleState>
+}
+
+function isScriptsModularExpired(data: ScriptsModularSessionData): boolean {
+  return Date.now() - data.updatedAt > SCRIPTS_MODULAR_TTL_MS
+}
+
+function defaultModuleState(): ScriptsModularModuleState {
+  return {
+    jobId: null,
+    status: 'pendiente',
+    files: [],
+    logs: [],
+    message: '',
+    selectedFileName: null,
+    nivel: null,
+    asignatura: null,
+    programa: null,
+    completedAt: null,
+    error: null,
+  }
+}
+
+export function loadScriptsModularSession(): ScriptsModularSessionData | null {
+  try {
+    const raw = sessionStorage.getItem(SCRIPTS_MODULAR_SESSION_KEY)
+    if (!raw) return null
+    const data = JSON.parse(raw) as ScriptsModularSessionData
+    if (!data?.modules) return null
+    if (isScriptsModularExpired(data)) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+export function saveScriptsModularSession(
+  module: ScriptModuleId,
+  state: Partial<ScriptsModularModuleState>,
+  activeModule?: ScriptModuleId,
+) {
+  const existing = loadScriptsModularSession()
+  const now = Date.now()
+  const moduleState = {
+    ...defaultModuleState(),
+    ...(existing?.modules?.[module] ?? {}),
+    ...state,
+  }
+  const entry: ScriptsModularSessionData = {
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    activeModule: activeModule ?? existing?.activeModule ?? 'granules',
+    modules: {
+      granules: existing?.modules?.granules ?? defaultModuleState(),
+      txtdocx: existing?.modules?.txtdocx ?? defaultModuleState(),
+      materials: existing?.modules?.materials ?? defaultModuleState(),
+      [module]: moduleState,
+    },
+  }
+  sessionStorage.setItem(SCRIPTS_MODULAR_SESSION_KEY, JSON.stringify(entry))
+}
+
+export function clearScriptsModularSession() {
+  sessionStorage.removeItem(SCRIPTS_MODULAR_SESSION_KEY)
+}

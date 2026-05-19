@@ -20,7 +20,7 @@ import {
   useRunPipelineLocal,
   useSyllabusPreview,
 } from '../queries/jobs'
-import type { AvailableNextAction, CategoryConfig, GenerationStatus, GranuleMaterials, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
+import type { AvailableNextAction, CategoryConfig, GenerationStatus, GranuleMaterials, GranulesMetrics, JobStatusResponse, PromptType, SyllabusPreviewResponse } from '../types/granules'
 
 interface GranulesViewProps {
   onBack: () => void
@@ -145,6 +145,8 @@ function GranulesView({ onBack }: GranulesViewProps) {
   const jobLogs = jobData?.logs ?? []
   const generatedDocuments = jobData?.files ?? []
   const jobId = hydratedJobId
+  const metrics = (jobData?.metrics ?? null) as GranulesMetrics | null
+  const [metricsOpen, setMetricsOpen] = useState(false)
 
   const materialesByGranule = useMemo(() => {
     const filesFromStatus = phaseStatus?.specializationMaterials?.files ?? []
@@ -353,6 +355,30 @@ function GranulesView({ onBack }: GranulesViewProps) {
         }, 3000)
       })
       await runMaterialsMutation.mutateAsync(created.jobId)
+      await new Promise<void>((resolve, reject) => {
+        const check = setInterval(async () => {
+          try {
+            const resp = await apiFetch(`/api/jobs/${created.jobId}`)
+            if (!resp.ok) { clearInterval(check); reject(new Error('Job perdido.')); return }
+            const payload = (await resp.json()) as JobStatusResponse
+            const materialsStatus = payload.phaseStatus?.specializationMaterials?.status
+            if (materialsStatus === 'completed') {
+              clearInterval(check)
+              resolve()
+              return
+            }
+            if (materialsStatus === 'failed' || payload.status === 'failed') {
+              clearInterval(check)
+              reject(new Error('Error en fase 3.'))
+              return
+            }
+            if (materialsStatus === 'cancelled' || payload.status === 'cancelled') {
+              clearInterval(check)
+              reject(new Error('Cancelado.'))
+            }
+          } catch (e) { clearInterval(check); reject(e) }
+        }, 3000)
+      })
       setGenerationMessage('Paquete completo listo. Puedes descargar el ZIP final institucional.')
     } catch (error) {
       setGenerationMessage(error instanceof Error ? error.message : 'Error ejecutando el flujo completo.')
@@ -418,6 +444,18 @@ function GranulesView({ onBack }: GranulesViewProps) {
       setSyllabusFileName(jobData.syllabusOriginalName)
     }
   }, [jobData?.syllabusOriginalName])
+
+  useEffect(() => {
+    if (!jobData?.phaseStatus) return
+    const anyPhaseRunning =
+      jobData.phaseStatus.granules?.status === 'running' ||
+      jobData.phaseStatus.pipelineLocal?.status === 'running' ||
+      jobData.phaseStatus.specializationMaterials?.status === 'running' ||
+      jobData.phaseStatus.uploadDrive?.status === 'running'
+    setIsGenerating(anyPhaseRunning)
+    const fullPipelineRunning = anyPhaseRunning && jobData.status === 'running'
+    setIsFullPipelineRunning(fullPipelineRunning)
+  }, [jobData?.phaseStatus, jobData?.status])
 
   const consoleStatus = status === 'error'
     ? 'Error'
@@ -656,6 +694,56 @@ function GranulesView({ onBack }: GranulesViewProps) {
                 onGenerateSpecializationMaterials={handleGenerateMaterials}
                 category={selectedCategory}
               />
+
+              {metrics && metrics.total && (
+                <details className="metrics-panel" open={metricsOpen} onToggle={(e) => setMetricsOpen((e.target as HTMLDetailsElement).open)}>
+                  <summary className="metrics-summary">
+                    <span className="metrics-summary-icon">⏱</span>
+                    Métricas de tiempo
+                    <span className="metrics-badge">
+                      {metrics.mode === 'parallel' ? `Paralelo (${metrics.maxWorkers}w)` : 'Secuencial'}
+                    </span>
+                    <span className="metrics-total">{metrics.total.granulesHuman ?? '—'}</span>
+                  </summary>
+                  <div className="metrics-content">
+                    <div className="metrics-row">
+                      <span className="metrics-label">Parse sílabo:</span>
+                      <span className="metrics-value">{metrics.total.parseHuman ?? '—'}</span>
+                    </div>
+                    <div className="metrics-row">
+                      <span className="metrics-label">Total gránulos:</span>
+                      <span className="metrics-value">{metrics.total.granulesHuman ?? '—'}</span>
+                    </div>
+                    {metrics.granules && Object.keys(metrics.granules).length > 0 && (
+                      <div className="metrics-granules-list">
+                        {Object.entries(metrics.granules)
+                          .sort(([a], [b]) => a.localeCompare(b))
+                          .map(([code, g]) => (
+                            <div key={code} className={`metrics-granule-item ${g.success === false ? 'metrics-granule-failed' : ''}`}>
+                              <span className="metrics-granule-code">{code}</span>
+                              <span className="metrics-granule-duration">{g.durationHuman ?? '—'}</span>
+                              {g.success === false && <span className="metrics-granule-status">✗</span>}
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                    {metrics.granules && metrics.total.granulesSeconds && (
+                      <div className="metrics-row metrics-avg">
+                        <span className="metrics-label">Promedio por gránulo:</span>
+                        <span className="metrics-value">
+                          {(() => {
+                            const times = Object.values(metrics.granules!).filter(g => g.success !== false).map(g => g.durationSeconds ?? 0)
+                            const avg = times.length > 0 ? times.reduce((a, b) => a + b, 0) / times.length : 0
+                            const mins = Math.floor(avg / 60)
+                            const secs = Math.round(avg % 60)
+                            return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
+                          })()}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </details>
+              )}
             </section>
           </aside>
         </section>

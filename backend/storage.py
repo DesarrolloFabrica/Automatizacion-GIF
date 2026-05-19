@@ -138,7 +138,6 @@ def save_job_metadata(
     if drive_parent_folder_id:
         pid = drive_parent_folder_id.strip()
         payload["driveParentFolderId"] = pid
-        # Raíz estable del paquete en Drive (no sobrescribir con subcarpetas en merges posteriores).
         payload["driveWorkspaceFolderId"] = pid
     effective_sync = drive_phased_sync if drive_phased_sync is not None else bool(drive_parent_folder_id)
     if effective_sync and payload.get("driveParentFolderId"):
@@ -456,8 +455,16 @@ def update_phase_status(job_id: str, phase_key: str, *, status: str | None = Non
         if status == "running":
             phase["startedAt"] = _utc_now()
             phase["finishedAt"] = None
+            phase.pop("durationSeconds", None)
         if status in {"completed", "failed", "skipped", "cancelled"}:
             phase["finishedAt"] = _utc_now()
+            if phase.get("startedAt") and phase.get("finishedAt"):
+                try:
+                    start_dt = datetime.fromisoformat(phase["startedAt"])
+                    finish_dt = datetime.fromisoformat(phase["finishedAt"])
+                    phase["durationSeconds"] = round((finish_dt - start_dt).total_seconds(), 1)
+                except (ValueError, TypeError):
+                    pass
     if files is not None:
         phase["files"] = files
     return write_phase_status(job_id, payload)
@@ -471,6 +478,143 @@ def refresh_phase_files(job_id: str) -> dict:
     payload["materials"] = payload["specializationMaterials"]
     payload.setdefault("uploadDrive", _empty_phase("pending"))
     return write_phase_status(job_id, payload)
+
+
+def reconcile_phase_status_with_disk(job_id: str) -> dict:
+    """Reconcile phase_status.json with actual files on disk.
+
+    If a phase says 'completed' but no output files exist, mark it as 'pending'.
+    This prevents stale states after manual file deletion or corruption.
+    """
+    payload = read_phase_status(job_id)
+    paths = get_job_paths(job_id)
+    changed = False
+
+    # Check granules phase
+    if payload["granules"]["status"] == "completed":
+        actual_files = list_generated_docx(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] Granules phase says completed but no files on disk. Resetting to pending.")
+            payload["granules"] = _empty_phase("pending")
+            changed = True
+
+    # Check pipelineLocal phase
+    if payload["pipelineLocal"]["status"] == "completed":
+        actual_files = list_pipeline_local_relative_files(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] PipelineLocal phase says completed but no files on disk. Resetting to pending.")
+            payload["pipelineLocal"] = _empty_phase("pending")
+            # Also reset downstream phases since pipelineLocal outputs are missing
+            payload["specializationMaterials"] = _empty_phase("pending")
+            payload["uploadDrive"] = _empty_phase("pending")
+            changed = True
+
+    # Check specializationMaterials phase
+    if payload["specializationMaterials"]["status"] == "completed":
+        actual_files = list_material_relative_files(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] SpecializationMaterials phase says completed but no files on disk. Resetting to pending.")
+            payload["specializationMaterials"] = _empty_phase("pending")
+            payload["uploadDrive"] = _empty_phase("pending")
+            changed = True
+
+    if changed:
+        write_phase_status(job_id, payload)
+
+    return payload
+
+
+def reset_job_state(job_id: str, reset_from: str = "granules") -> dict:
+    """Full job state reset: clears phase status, removes output files, resets runtime state.
+
+    Preserves: syllabus, job_metadata, detected granules info.
+    Removes: all generated outputs, metrics, locks, stale references.
+
+    Args:
+        job_id: The job identifier
+        reset_from: Phase to reset from ('granules', 'pipelineLocal', 'specializationMaterials')
+
+    Returns:
+        Updated phase_status payload
+    """
+    paths = get_job_paths(job_id)
+    order = ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")
+    if reset_from not in order:
+        raise ValueError(f"reset_from invalid: {reset_from}")
+
+    # Clean up output directories based on reset point
+    idx = order.index(reset_from)
+
+    if idx <= 0 and paths["generated_dir"].exists():
+        shutil.rmtree(paths["generated_dir"], ignore_errors=True)
+        paths["generated_dir"].mkdir(parents=True, exist_ok=True)
+
+    if idx <= 1 and paths["pipeline_local_dir"].exists():
+        shutil.rmtree(paths["pipeline_local_dir"], ignore_errors=True)
+        paths["pipeline_local_dir"].mkdir(parents=True, exist_ok=True)
+
+    if idx <= 2:
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            shutil.rmtree(materials_dir, ignore_errors=True)
+            materials_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clean up metrics and logs for affected phases
+    metrics_path = paths["state_dir"] / "metrics.json"
+    if metrics_path.exists():
+        metrics_path.unlink(missing_ok=True)
+
+    # Reset phase status
+    payload = read_phase_status(job_id)
+    for key in order[idx:]:
+        payload[key] = _empty_phase("pending")
+
+    # Clear stale runtime state
+    from jobs import _JOBS, _LOCK, _ACTIVE_SUBPROCESSES, _CANCEL_REQUESTED
+    with _LOCK:
+        if job_id in _JOBS:
+            record = _JOBS[job_id]
+            if record.status == "running":
+                record.status = "cancelled"
+                record.progress_step = "reset"
+        _ACTIVE_SUBPROCESSES.pop(job_id, None)
+        _CANCEL_REQUESTED.discard(job_id)
+
+    return write_phase_status(job_id, payload)
+
+
+def cleanup_phase_outputs(job_id: str, phase_key: str) -> None:
+    """Remove output files for a specific phase without resetting state.
+
+    Used before regeneration to ensure clean slate.
+    """
+    paths = get_job_paths(job_id)
+
+    if phase_key == "granules" and paths["generated_dir"].exists():
+        for f in paths["generated_dir"].glob("*.docx"):
+            f.unlink(missing_ok=True)
+
+    if phase_key == "pipelineLocal" and paths["pipeline_local_dir"].exists():
+        for f in paths["pipeline_local_dir"].glob("*.txt"):
+            f.unlink(missing_ok=True)
+        for f in paths["pipeline_local_dir"].glob("*.docx"):
+            f.unlink(missing_ok=True)
+        for f in paths["pipeline_local_dir"].glob("*.json"):
+            if f.name != "phase_status.json":
+                f.unlink(missing_ok=True)
+
+    if phase_key == "specializationMaterials":
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            for f in materials_dir.rglob("*.docx"):
+                f.unlink(missing_ok=True)
+            # Remove empty subdirectories
+            for d in sorted(materials_dir.iterdir(), key=lambda x: str(x), reverse=True):
+                if d.is_dir():
+                    try:
+                        d.rmdir()
+                    except OSError:
+                        pass
 
 
 def get_available_next_action(phase_status: dict, job_status: str) -> str:
@@ -575,7 +719,7 @@ def _short_material_arcname(path: Path, fallback_index: int) -> str:
     parts = path.parts
     haystack = "_".join(parts).upper()
     granule_match = re.search(r"\bG([1-5])\b|G([1-5])_", haystack)
-    material_match = re.search(r"(?:^|_)(0[2-7])(?:_|\b)", path.name.upper())
+    material_match = re.search(r"(?:^|_)(0[1-7])(?:_|\b)", path.name.upper())
     granule = f"G{granule_match.group(1) or granule_match.group(2)}" if granule_match else f"G{fallback_index}"
     material = material_match.group(1) if material_match else f"{fallback_index:02d}"
     return f"Materiales/{granule}_{material}{path.suffix.lower()}"

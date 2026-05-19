@@ -182,3 +182,107 @@
     border-right-color: var(--border);
   }
 }
+
+.metrics-panel {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg, #fff);
+}
+
+.metrics-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  list-style: none;
+  user-select: none;
+}
+
+.metrics-summary::-webkit-details-marker {
+  display: none;
+}
+
+.metrics-summary-icon {
+  font-size: 16px;
+}
+
+.metrics-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--accent-bg, #e8f0fe);
+  color: var(--accent, #1a73e8);
+}
+
+.metrics-total {
+  font-size: 13px;
+  color: var(--text-secondary, #666);
+  font-weight: 400;
+  margin-left: 8px;
+}
+
+.metrics-content {
+  padding: 8px 16px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.metrics-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.metrics-label {
+  color: var(--text-secondary, #666);
+}
+
+.metrics-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics-avg {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+
+.metrics-granules-list {
+  margin: 8px 0;
+}
+
+.metrics-granule-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.metrics-granule-code {
+  font-weight: 600;
+  min-width: 28px;
+  color: var(--accent, #1a73e8);
+}
+
+.metrics-granule-duration {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary, #666);
+}
+
+.metrics-granule-failed {
+  opacity: 0.6;
+}
+
+.metrics-granule-status {
+  color: #d32f2f;
+  font-weight: 700;
+  margin-left: auto;
+}

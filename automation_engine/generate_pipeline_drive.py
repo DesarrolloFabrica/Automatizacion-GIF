@@ -47,7 +47,6 @@ except ImportError:  # pragma: no cover
 from automation_engine.generate_guiones import (
     extract_docx_text,
     extract_pdf_text,
-    generate_document,
     word_count,
 )
 
@@ -65,6 +64,7 @@ from automation_engine.generate_txt_from_guiones import (
     DEFAULT_PROMPT_PATH as DEFAULT_TXT_PROMPT_PATH,
     build_corpus,
     build_user_prompt as build_user_prompt_txt,
+    call_txt_openai,
     output_filename,
     parse_titles,
     save_txt,
@@ -83,6 +83,7 @@ from automation_engine.generate_documentos_academicos import (
     split_response,
     validate_blocks,
 )
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -362,19 +363,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("OPENAI_MODEL", "gpt-4o"),
-        help="Modelo OpenAI a utilizar para ambas fases",
+        default=None,
+        help="Modelo (fallback: OPENAI_MODEL > gemini-2.5-flash)",
     )
     parser.add_argument(
         "--max-tokens-txt",
         type=int,
-        default=3500,
+        default=16000,
         help="Maximo de tokens por TXT generado",
     )
     parser.add_argument(
         "--max-tokens-docx",
         type=int,
-        default=6000,
+        default=24000,
         help="Maximo de tokens en la respuesta unica del flujo DOCX",
     )
     parser.add_argument(
@@ -502,14 +503,10 @@ def main() -> None:
             )
             return
 
-        if OpenAI is None:
-            raise RuntimeError(
-                "Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt"
-            )
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno o en .env")
+        if not args.model:
+            args.model = get_openai_model()
 
-        client = OpenAI()
+        client = get_openai_client()
 
         txt_uploads: List[Dict[str, str]] = []
         docx_uploads: List[Dict[str, str]] = []
@@ -524,7 +521,7 @@ def main() -> None:
             try:
                 for index, title in enumerate(titles, start=1):
                     print(f"\nGenerando TXT {index}/{len(titles)}: {title}")
-                    result = generate_document(
+                    result = call_txt_openai(
                         client=client,
                         model=args.model,
                         system_prompt=txt_system_prompt,

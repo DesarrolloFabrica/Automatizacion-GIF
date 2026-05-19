@@ -10,14 +10,8 @@ from job_store_gcs import GCSFileStore
 def get_job_store() -> JobStore:
     """Factory para obtener la implementacion de JobStore.
 
-    Por defecto usa LocalDiskJobStore.
-    Si USE_FIRESTORE=1 en el futuro, retornara FirestoreJobStore.
+    Usa LocalDiskJobStore para desarrollo local.
     """
-    if os.getenv("USE_FIRESTORE") == "1":
-        raise NotImplementedError(
-            "FirestoreJobStore no esta implementado aun. "
-            "Configura USE_FIRESTORE=0 o deja la variable sin definir."
-        )
     return LocalDiskJobStore()
 
 
