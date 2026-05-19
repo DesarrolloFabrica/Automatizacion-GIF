@@ -287,8 +287,16 @@ jobs:
       - name: Show Cloud Run logs on failure
         if: failure() && env.GOOGLE_GHA_CREDS_PATH != ''
         run: |
+          echo "=== Latest Cloud Run revisions ==="
+          gcloud run revisions list \
+            --service "${SERVICE_NAME}" \
+            --region "${REGION}" \
+            --project "${PROJECT_ID}" \
+            --limit 5
+
+          echo "=== Cloud Run logs ==="
           gcloud logging read \
             "resource.type=cloud_run_revision AND resource.labels.service_name=${SERVICE_NAME}" \
             --project "${PROJECT_ID}" \
-            --limit 50 \
-            --format "value(timestamp,severity,textPayload)"
+            --limit 100 \
+            --format "table(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,protoPayload.status.message)"
