@@ -57,11 +57,14 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp_path, path)
+    sync_job_state_file_to_gcs(path)
 
 
 def _read_json_or_none(path: Path) -> dict | None:
     if not path.exists():
-        return None
+        restore_job_state_file_from_gcs(path)
+        if not path.exists():
+            return None
     try:
         text = path.read_text(encoding="utf-8").strip()
         if not text:
@@ -300,9 +303,12 @@ def save_granule_source_file(job_id: str, source_file, original_name: str) -> Pa
 
 def list_generated_docx(job_id: str) -> list[str]:
     paths = get_job_paths(job_id)
-    if not paths["generated_dir"].exists():
-        return []
-    return sorted(path.name for path in paths["generated_dir"].glob("*.docx"))
+    files = []
+    if paths["generated_dir"].exists():
+        files = sorted(path.name for path in paths["generated_dir"].glob("*.docx"))
+    if files:
+        return files
+    return sorted(Path(path).name for path in list_files_in_gcs(job_id, "generated") if path.lower().endswith(".docx"))
 
 
 def list_especializacion_files(job_id: str) -> list[dict[str, str]]:
@@ -313,18 +319,31 @@ def list_material_files(job_id: str) -> list[dict[str, str]]:
     paths = get_job_paths(job_id)
     category = get_category(get_job_category(job_id))
     materiales_dir = get_materials_dir(job_id)
-    if not materiales_dir.exists():
-        return []
     files = []
-    for docx_file in sorted(materiales_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materiales_dir)).lower()):
-        if not docx_file.is_file():
+    if materiales_dir.exists():
+        for docx_file in sorted(materiales_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materiales_dir)).lower()):
+            if not docx_file.is_file():
+                continue
+            relative_path = docx_file.relative_to(materiales_dir)
+            granule_folder = relative_path.parts[0] if len(relative_path.parts) > 1 else ""
+            files.append({
+                "granule": granule_folder,
+                "name": docx_file.name,
+                "relative_path": f"{category.materials_dir}/{relative_path.as_posix()}",
+            })
+    if files:
+        return files
+    for gcs_path in list_files_in_gcs(job_id, "materials"):
+        if not gcs_path.lower().endswith(".docx"):
             continue
-        relative_path = docx_file.relative_to(materiales_dir)
-        granule_folder = relative_path.parts[0] if len(relative_path.parts) > 1 else ""
+        relative = Path(gcs_path)
+        parts = relative.parts[1:] if relative.parts and relative.parts[0] == "materials" else relative.parts
+        if not parts:
+            continue
         files.append({
-            "granule": granule_folder,
-            "name": docx_file.name,
-            "relative_path": f"{category.materials_dir}/{relative_path.as_posix()}",
+            "granule": parts[0] if len(parts) > 1 else "",
+            "name": parts[-1],
+            "relative_path": f"{category.materials_dir}/{'/'.join(parts)}",
         })
     return files
 
@@ -340,10 +359,16 @@ def list_material_relative_files(job_id: str) -> list[str]:
 def list_pipeline_local_files(job_id: str) -> list[Path]:
     paths = get_job_paths(job_id)
     pipeline_dir = paths["pipeline_local_dir"]
-    if not pipeline_dir.exists():
-        return []
+    files = []
+    if pipeline_dir.exists():
+        files = sorted(
+            [path for path in pipeline_dir.iterdir() if path.is_file() and path.suffix.lower() in {".docx", ".txt"}],
+            key=lambda item: item.name.lower(),
+        )
+    if files:
+        return files
     return sorted(
-        [path for path in pipeline_dir.iterdir() if path.is_file() and path.suffix.lower() in {".docx", ".txt"}],
+        [pipeline_dir / Path(path).name for path in list_files_in_gcs(job_id, "pipeline_local") if Path(path).suffix.lower() in {".docx", ".txt"}],
         key=lambda item: item.name.lower(),
     )
 
@@ -482,6 +507,7 @@ def get_current_phase(phase_status: dict) -> str:
 
 
 def create_docs_zip(job_id: str) -> Path:
+    restore_job_content_from_gcs(job_id, ("generated",))
     paths = get_job_paths(job_id)
     docx_files = sorted(paths["generated_dir"].glob("*.docx"))
     with ZipFile(paths["zip_path"], "w", compression=ZIP_DEFLATED) as zip_file:
@@ -491,6 +517,7 @@ def create_docs_zip(job_id: str) -> Path:
 
 
 def create_full_outputs_zip(job_id: str) -> Path:
+    restore_job_content_from_gcs(job_id)
     paths = get_job_paths(job_id)
     zip_path = paths["content_root"] / "full_outputs.zip"
     package_files = _collect_academic_package_files(paths)
@@ -556,6 +583,7 @@ def _short_material_arcname(path: Path, fallback_index: int) -> str:
 
 def create_local_full_outputs_zip(job_id: str) -> Path:
     """ZIP local compatible con Windows: nombres internos cortos, sin tocar archivos originales ni Drive."""
+    restore_job_content_from_gcs(job_id)
     paths = get_job_paths(job_id)
     zip_path = paths["content_root"] / "full_outputs_local_safe.zip"
     used: set[str] = set()
@@ -583,6 +611,7 @@ def create_local_full_outputs_zip(job_id: str) -> Path:
 
 
 def collect_academic_package_files(job_id: str) -> list[tuple[Path, str]]:
+    restore_job_content_from_gcs(job_id)
     return _collect_academic_package_files(get_job_paths(job_id))
 
 
@@ -656,6 +685,7 @@ def _collect_academic_package_files(paths: dict[str, Path]) -> list[tuple[Path, 
 
 def collect_partial_package_files_for_drive_phase(job_id: str, phase: str) -> list[tuple[Path, str]]:
     """Archivos locales existentes para una fase Drive (sin exigir paquete completo)."""
+    restore_job_content_from_gcs(job_id)
     paths = get_job_paths(job_id)
     phase_norm = (phase or "").strip().lower()
     package_files: list[tuple[Path, str]] = []
@@ -776,6 +806,12 @@ def academic_package_filename(program_name: str | None = None) -> str:
 
 
 def create_phase_zip(job_id: str, phase: str) -> Path:
+    if phase == "granules":
+        restore_job_content_from_gcs(job_id, ("generated",))
+    elif phase == "pipeline_local":
+        restore_job_content_from_gcs(job_id, ("pipeline_local",))
+    elif phase in {"materiales_especializacion", "materials"}:
+        restore_job_content_from_gcs(job_id, ("materials",))
     paths = get_job_paths(job_id)
     zip_path = paths["content_root"] / f"{phase}.zip"
     used: set[str] = set()
@@ -856,6 +892,42 @@ def _get_gcs_store() -> GCSFileStore:
         from job_store_factory import get_gcs_store
         _gcs_store_cache = get_gcs_store()
     return _gcs_store_cache
+
+
+def _job_state_gcs_path(path: Path) -> tuple[str, str] | None:
+    try:
+        relative = path.resolve().relative_to(JOBS_ROOT.resolve())
+    except ValueError:
+        return None
+    if len(relative.parts) < 2:
+        return None
+    job_id = relative.parts[0]
+    state_path = "/".join(("state", *relative.parts[1:]))
+    return job_id, state_path
+
+
+def sync_job_state_file_to_gcs(path: Path) -> str | None:
+    """Persist runtime state files (metadata, phase status, logs) in GCS."""
+    mapping = _job_state_gcs_path(path)
+    if mapping is None or not path.exists() or not path.is_file():
+        return None
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    job_id, gcs_path = mapping
+    return gcs.upload_file(job_id, path, gcs_path)
+
+
+def restore_job_state_file_from_gcs(path: Path) -> bool:
+    """Restore one runtime state file from GCS if this instance lacks it."""
+    mapping = _job_state_gcs_path(path)
+    if mapping is None:
+        return False
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return False
+    job_id, gcs_path = mapping
+    return gcs.download_file(job_id, gcs_path, path)
 
 
 def sync_phase_files_to_gcs(job_id: str, phase_key: str) -> list[str]:
@@ -949,3 +1021,48 @@ def file_exists_in_gcs(job_id: str, gcs_path: str) -> bool:
     """Verifica si un archivo existe en GCS."""
     gcs = _get_gcs_store()
     return gcs.file_exists(job_id, gcs_path)
+
+
+def list_files_in_gcs(job_id: str, prefix: str = "") -> list[str]:
+    """Lista archivos persistidos en GCS para un job."""
+    gcs = _get_gcs_store()
+    return gcs.list_files(job_id, prefix)
+
+
+def _content_local_path_for_gcs(job_id: str, gcs_path: str) -> Path | None:
+    paths = get_job_paths(job_id)
+    parts = Path(gcs_path).parts
+    if not parts:
+        return None
+    prefix = parts[0]
+    rest = Path(*parts[1:]) if len(parts) > 1 else None
+    if rest is None:
+        return None
+    if prefix == "input":
+        return paths["input_dir"] / rest
+    if prefix == "generated":
+        return paths["generated_dir"] / rest
+    if prefix == "pipeline_local":
+        return paths["pipeline_local_dir"] / rest
+    if prefix == "materials":
+        return get_materials_dir(job_id) / rest
+    return None
+
+
+def restore_job_content_from_gcs(
+    job_id: str,
+    prefixes: tuple[str, ...] = ("input", "generated", "pipeline_local", "materials"),
+) -> list[Path]:
+    """Descarga a /tmp los archivos del job que existan en GCS y falten localmente."""
+    restored: list[Path] = []
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return restored
+    for prefix in prefixes:
+        for gcs_path in gcs.list_files(job_id, prefix):
+            local_path = _content_local_path_for_gcs(job_id, gcs_path)
+            if local_path is None or local_path.exists():
+                continue
+            if gcs.download_file(job_id, gcs_path, local_path):
+                restored.append(local_path)
+    return restored

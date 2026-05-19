@@ -53,6 +53,7 @@ from storage import (
     get_materials_dir,
     init_phase_status,
     list_all_job_files,
+    list_files_in_gcs,
     list_generated_docx,
     list_generated_files,
     list_material_files,
@@ -921,11 +922,12 @@ def download_generated_file(job_id: str, filename: str) -> FileResponse:
             f"generated/{filename}",
             f"pipeline_local/{filename}",
         ]
-        # Buscar en materiales
-        for gcs_prefix in ("materials",):
-            gcs_path = f"{gcs_prefix}/{filename}"
+        gcs_paths.extend(
+            path for path in list_files_in_gcs(job_id, "materials") if Path(path).name == filename
+        )
+        for gcs_path in gcs_paths:
             if file_exists_in_gcs(job_id, gcs_path):
-                tmp_path = paths["state_dir"] / "gcs_fallback" / filename
+                tmp_path = paths["state_dir"] / "gcs_fallback" / Path(gcs_path).name
                 if download_file_from_gcs(job_id, gcs_path, tmp_path):
                     file_path = tmp_path
                     break
