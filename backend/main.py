@@ -57,7 +57,7 @@ from storage import (
     get_materials_dir,
     init_phase_status,
     list_all_job_files,
-    list_gcs_job_files,
+    list_files_in_gcs,
     list_generated_docx,
     list_generated_files,
     list_material_files,
@@ -1096,24 +1096,19 @@ def download_generated_file(job_id: str, filename: str) -> FileResponse:
 
     # Fallback a GCS si el archivo no existe localmente
     if not file_path.exists() or not file_path.is_file():
-        candidate_paths = [f"generated/{filename}", f"pipeline_local/{filename}", f"materials/{filename}"]
-        selected_gcs_path = next((gcs_path for gcs_path in candidate_paths if file_exists_in_gcs(job_id, gcs_path)), None)
-        if selected_gcs_path is None:
-            nested_matches = sorted(
-                gcs_path
-                for gcs_path in list_gcs_job_files(job_id)
-                if gcs_path.startswith("materials/") and Path(gcs_path).name == filename
-            )
-            if nested_matches:
-                selected_gcs_path = nested_matches[0]
-                append_log(
-                    job_id,
-                    f"GCS fallback materiales: {len(nested_matches)} coincidencia(s) para {filename}; usando {selected_gcs_path}",
-                )
-        if selected_gcs_path:
-            tmp_path = paths["state_dir"] / "gcs_fallback" / filename
-            if download_file_from_gcs(job_id, selected_gcs_path, tmp_path):
-                file_path = tmp_path
+        gcs_paths = [
+            f"generated/{filename}",
+            f"pipeline_local/{filename}",
+        ]
+        gcs_paths.extend(
+            path for path in list_files_in_gcs(job_id, "materials") if Path(path).name == filename
+        )
+        for gcs_path in gcs_paths:
+            if file_exists_in_gcs(job_id, gcs_path):
+                tmp_path = paths["state_dir"] / "gcs_fallback" / Path(gcs_path).name
+                if download_file_from_gcs(job_id, gcs_path, tmp_path):
+                    file_path = tmp_path
+                    break
 
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Archivo no encontrado.")

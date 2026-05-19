@@ -11,7 +11,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from storage import get_job_paths, list_generated_docx, read_job_metadata, read_phase_status, write_phase_status
+from storage import (
+    get_job_paths,
+    list_generated_docx,
+    read_job_metadata,
+    read_phase_status,
+    restore_job_state_file_from_gcs,
+    sync_job_state_file_to_gcs,
+    write_phase_status,
+)
 
 
 MAX_LOG_LINES = 1000
@@ -76,6 +84,9 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
     from storage import get_job_paths, read_phase_status, write_phase_status, reconcile_phase_status_with_disk, list_generated_docx, list_pipeline_local_relative_files, list_material_relative_files
 
     paths = get_job_paths(job_id)
+    restore_job_state_file_from_gcs(paths["metadata_path"])
+    restore_job_state_file_from_gcs(paths["phase_status_path"])
+    restore_job_state_file_from_gcs(paths["log_path"])
     if not paths["metadata_path"].exists() or not paths["phase_status_path"].exists():
         return None
 
@@ -107,14 +118,27 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
                     is_orphaned = True
             except (ValueError, TypeError):
                 is_orphaned = True
-        for phase_key in running_phases:
-            phase_status[phase_key]["status"] = "failed"
-            phase_status[phase_key]["finishedAt"] = now
-        write_phase_status(job_id, phase_status)
         if is_orphaned:
+            for phase_key in running_phases:
+                phase_status[phase_key]["status"] = "failed"
+                phase_status[phase_key]["finishedAt"] = now
+            write_phase_status(job_id, phase_status)
             logs.append("=== El proceso quedo incompleto por reinicio o perdida de instancia (mas de 1 hora sin actividad). ===")
         else:
-            logs.append("=== Job marcado como fallido: el servidor se reinicio mientras habia una fase en ejecucion ===")
+            record = JobRecord(
+                job_id=job_id,
+                status="running",
+                progress_step=running_phases[0],
+                log_path=paths["log_path"],
+                generated_dir=paths["generated_dir"],
+                job_kind="granules_academic_package",
+                logs=logs,
+            )
+            with _LOCK:
+                if job_id in _JOBS:
+                    return _JOBS[job_id]
+                _JOBS[job_id] = record
+            return record
 
     # Detect stale completed states (phase says completed but no output files)
     stale_corrections = []
@@ -136,8 +160,9 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
         logs.append(f"=== Estados corregidos: fases marcadas como completadas pero sin archivos: {', '.join(stale_corrections)} ===")
 
     phases = [phase_status.get(key, {}) for key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")]
-    status = "failed" if running_phases or any(phase.get("status") == "failed" for phase in phases) else "completed"
-    progress_step = "error" if status == "failed" else "finalizado"
+    phase_states = [phase.get("status") for phase in phases]
+    status = "failed" if running_phases or any(state == "failed" for state in phase_states) else "queued" if all(state == "pending" for state in phase_states) else "completed"
+    progress_step = "error" if status == "failed" else "pendiente" if status == "queued" else "finalizado"
 
     record = JobRecord(
         job_id=job_id,
@@ -196,6 +221,7 @@ def append_log(job_id: str, line: str) -> None:
     record.log_path.parent.mkdir(parents=True, exist_ok=True)
     with record.log_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{line}\n")
+    sync_job_state_file_to_gcs(record.log_path)
 
 
 def update_progress_from_log(job_id: str, line: str, progress_map: dict[str, str] | None = None) -> None:
@@ -305,6 +331,8 @@ def _write_subprocess_failure_artifacts(
     logs_dir.mkdir(parents=True, exist_ok=True)
     (logs_dir / "stdout.log").write_text(stdout_text, encoding="utf-8")
     (logs_dir / "stderr.log").write_text(stderr_text, encoding="utf-8")
+    sync_job_state_file_to_gcs(logs_dir / "stdout.log")
+    sync_job_state_file_to_gcs(logs_dir / "stderr.log")
 
     def mask_secret(val: str) -> str:
         s = str(val)
@@ -339,6 +367,7 @@ def _write_subprocess_failure_artifacts(
         parts.extend(["", "=== host-side exception ===", host_traceback])
     err_path = logs_dir / "error.log"
     err_path.write_text("\n".join(parts), encoding="utf-8")
+    sync_job_state_file_to_gcs(err_path)
     return err_path
 
 
