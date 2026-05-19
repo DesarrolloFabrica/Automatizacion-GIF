@@ -227,6 +227,25 @@ def get_drive_sync_snapshot(job_id: str) -> dict:
     return out
 
 
+def _job_metrics_path(job_id: str) -> Path:
+    return JOBS_ROOT / job_id / "metrics.json"
+
+
+def read_job_metrics(job_id: str) -> dict | None:
+    """Lee metricas agregadas del job, restaurandolas desde GCS si hace falta."""
+    return _read_json_or_none(_job_metrics_path(job_id))
+
+
+def merge_phase_metrics(job_id: str, phase_key: str, metrics: dict) -> dict:
+    """Agrega o reemplaza metricas de una fase dentro de metrics.json."""
+    payload = read_job_metrics(job_id) or {"jobId": job_id, "phases": {}}
+    phases = payload.setdefault("phases", {})
+    phases[phase_key] = metrics
+    payload["updatedAt"] = _utc_now()
+    _write_json_atomic(_job_metrics_path(job_id), payload)
+    return payload
+
+
 def get_job_category(job_id: str) -> str:
     return str(read_job_metadata(job_id).get("category") or "especializacion")
 
@@ -1147,6 +1166,22 @@ def sync_zip_to_gcs(job_id: str, zip_path: Path, zip_name: str) -> str | None:
     return url
 
 
+def sync_metrics_to_gcs(job_id: str) -> str | None:
+    """Sube metrics.json a GCS si existe."""
+    return sync_job_state_file_to_gcs(_job_metrics_path(job_id))
+
+
+def sync_metadata_to_gcs(job_id: str) -> list[str]:
+    """Sube archivos de estado del job a GCS."""
+    paths = get_job_paths(job_id)
+    uploaded: list[str] = []
+    for path in (paths["metadata_path"], paths["phase_status_path"], paths["log_path"], _job_metrics_path(job_id)):
+        url = sync_job_state_file_to_gcs(path)
+        if url:
+            uploaded.append(url)
+    return uploaded
+
+
 def download_file_from_gcs(job_id: str, gcs_path: str, local_path: Path) -> bool:
     """Descarga un archivo desde GCS a ruta local (fallback para descargas)."""
     gcs = _get_gcs_store()
@@ -1210,3 +1245,66 @@ def restore_job_content_from_gcs(
             if gcs.download_file(job_id, gcs_path, local_path):
                 restored.append(local_path)
     return restored
+
+
+def reconstruct_job_from_gcs(job_id: str) -> dict | None:
+    """Reconstruye estado suficiente de un job desde GCS para responder polling/descargas."""
+    paths = get_job_paths(job_id)
+    restored_state = [
+        restore_job_state_file_from_gcs(paths["metadata_path"]),
+        restore_job_state_file_from_gcs(paths["phase_status_path"]),
+        restore_job_state_file_from_gcs(paths["log_path"]),
+        restore_job_state_file_from_gcs(_job_metrics_path(job_id)),
+    ]
+    restored_content = restore_job_content_from_gcs(job_id)
+    if not any(restored_state) and not restored_content and not list_files_in_gcs(job_id, ""):
+        return None
+
+    meta = read_job_metadata(job_id)
+    phase_status = read_phase_status(job_id)
+    files = list_all_job_files(job_id)
+    logs: list[str] = []
+    if paths["log_path"].exists():
+        try:
+            logs = paths["log_path"].read_text(encoding="utf-8").splitlines()[-1000:]
+        except OSError:
+            logs = []
+
+    phases = [phase_status.get(key, {}) for key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")]
+    phase_states = [phase.get("status") for phase in phases]
+    if any(state == "running" for state in phase_states):
+        status = "running"
+        progress_step = get_current_phase(phase_status)
+    elif any(state == "failed" for state in phase_states):
+        status = "failed"
+        progress_step = "error"
+    elif any(state == "completed" for state in phase_states):
+        status = "completed"
+        progress_step = "finalizado"
+    else:
+        status = "queued"
+        progress_step = "pendiente"
+
+    syllabus_original_name = meta.get("syllabusOriginalName")
+    return {
+        "job_id": job_id,
+        "status": status,
+        "progress_step": progress_step,
+        "phase_status": phase_status,
+        "files": files,
+        "logs": logs,
+        "category": meta.get("category"),
+        "syllabus_original_name": syllabus_original_name,
+        "syllabus_stored_name": "syllabus.docx" if syllabus_original_name else None,
+        "syllabus_gcs_path": f"jobs/{job_id}/input/syllabus.docx" if syllabus_original_name else None,
+        "metrics": read_job_metrics(job_id),
+    }
+
+
+def cleanup_old_gcs_jobs(max_age_hours: int = 48) -> list[str]:
+    """Placeholder seguro: la limpieza fina por edad requiere metadatos de blobs.
+
+    Se mantiene como no-op para no borrar contenido por error desde el endpoint admin.
+    """
+    LOGGER.info("cleanup_old_gcs_jobs omitido: max_age_hours=%s", max_age_hours)
+    return []
