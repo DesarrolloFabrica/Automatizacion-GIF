@@ -1014,6 +1014,106 @@ button.script-command-card:hover,
   color: #7c3aed;
 }
 
+.script-command-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.module-status-badge {
+  margin-top: auto;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  align-self: flex-start;
+}
+
+.module-status--ready {
+  background: #d1fae5;
+  color: #047857;
+}
+
+.module-status--outputs {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.module-status--active {
+  background: #fef3c7;
+  color: #b45309;
+  animation: module-pulse 2s ease-in-out infinite;
+}
+
+.module-status--error {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.module-status--detected {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+@keyframes module-pulse {
+  0%, 100% { opacity: 1 }
+  50% { opacity: 0.75 }
+}
+
+.module-card-desc {
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.module-pipeline-hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
+  color: #475569;
+  line-height: 1.5;
+}
+
+.module-pipeline-hint code {
+  background: rgba(99, 102, 241, 0.08);
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #4338ca;
+}
+
+.scripts-module-info {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 16px;
+  background: rgba(241, 245, 249, 0.6);
+  flex-wrap: wrap;
+}
+
+.module-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 120px;
+}
+
+.module-info-label {
+  font-size: 0.7rem;
+  font-weight: 900;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.module-info-value {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text-title);
+}
+
 .scripts-workspace-card,
 .drive-soon-section {
   margin-bottom: 1.25rem;
@@ -1838,6 +1938,8 @@ h2 {
 .file-input-label,
 .primary-button,
 .secondary-button {
+  position: relative;
+  overflow: hidden;
   border: 0;
   border-radius: 10px;
   padding: 0.65rem 1rem;
@@ -1888,6 +1990,7 @@ h2 {
 .primary-button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+  filter: grayscale(0.12);
 }
 
 .preview-grid {
@@ -3504,6 +3607,7 @@ h2 {
   transform: translateX(-120%);
   background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
   transition: transform 0.52s ease;
+  pointer-events: none;
 }
 
 .flow-card-button:hover::after,
@@ -4830,6 +4934,15 @@ h2 {
   transform: translateY(-1px);
   border-color: rgba(49,87,213,0.24);
   background: rgba(239,246,255,0.72);
+}
+
+.console-advanced-action {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.console-advanced-action .secondary-button {
+  width: 100%;
 }
 
 .syllabus-preview-rows {
@@ -6410,6 +6523,155 @@ h2 {
 @media (max-width: 520px) {
   .drive-mode-toggle {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Final Drive layout guardrails. These rules intentionally live last because
+   the Drive view has several legacy visual layers above. */
+.generation-console,
+.generation-console > *,
+.config-console-panel,
+.status-console-panel,
+.config-console-shell,
+.status-console-shell,
+.config-console-shell *,
+.status-console-shell * {
+  min-width: 0;
+}
+
+.generation-console {
+  grid-template-columns: minmax(340px, 0.78fr) minmax(540px, 1.22fr);
+}
+
+.config-console-panel,
+.config-console-shell,
+.config-console-shell .granule-card,
+.config-console-shell .action-card,
+.syllabus-dropzone,
+.drive-mode-card,
+.drive-package-actions {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+.config-console-shell p,
+.config-console-shell span,
+.config-console-shell strong,
+.config-console-shell code,
+.config-console-shell label,
+.config-console-shell button,
+.config-console-shell select,
+.config-console-shell input,
+.status-console-shell p,
+.status-console-shell code {
+  overflow-wrap: anywhere;
+}
+
+.prompt-console-card .config-choice-content,
+.prompt-console-card .config-choice-content p {
+  padding-right: 0;
+  max-width: 100%;
+}
+
+.file-input-label,
+.primary-button,
+.secondary-button,
+.drive-mode-option,
+.select-input,
+.config-choice-select,
+.file-pill {
+  width: 100%;
+  max-width: 100%;
+}
+
+.file-input-label,
+.primary-button,
+.secondary-button,
+.drive-mode-option {
+  white-space: normal;
+  line-height: 1.25;
+}
+
+.drive-package-actions .primary-button,
+.drive-package-actions .secondary-button {
+  flex: 1 1 220px;
+}
+
+/* Hover stability for the local and Drive side panels. Older theme layers still
+   target these cards; keeping transforms out prevents layout re-entry flicker. */
+.config-console-shell .prompt-console-card,
+.config-console-shell .syllabus-console-card,
+.config-console-shell .syllabus-compact-preview,
+.config-console-shell .console-primary-action,
+.config-console-shell .console-hint-card,
+.config-console-shell .file-input-label,
+.config-console-shell .primary-button,
+.config-console-shell .secondary-button,
+.config-console-shell .drive-mode-card,
+.config-console-shell .drive-mode-option {
+  transform: none;
+  will-change: auto;
+}
+
+.config-console-shell .prompt-console-card:hover,
+.config-console-shell .syllabus-console-card:hover,
+.config-console-shell .syllabus-compact-preview:hover,
+.config-console-shell .console-primary-action:hover,
+.config-console-shell .console-hint-card:hover,
+.config-console-shell .file-input-label:hover,
+.config-console-shell .primary-button:not(:disabled):hover,
+.config-console-shell .secondary-button:not(:disabled):hover,
+.config-console-shell .drive-mode-card:hover,
+.config-console-shell .drive-mode-option:hover {
+  transform: none;
+}
+
+.config-console-shell .file-input-label,
+.config-console-shell .primary-button,
+.config-console-shell .secondary-button {
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, filter 180ms ease;
+}
+
+.drive-service-account-alert {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.85rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(217, 119, 6, 0.24);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 251, 235, 0.96), rgba(255, 247, 237, 0.82));
+  color: #92400e;
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.drive-service-account-alert strong {
+  color: #78350f;
+  font-size: 0.74rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.drive-service-account-alert code {
+  display: block;
+  width: 100%;
+  padding: 0.48rem 0.58rem;
+  border: 1px solid rgba(217, 119, 6, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.76);
+  color: #78350f;
+  font-family: Consolas, 'SFMono-Regular', monospace;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 1100px) {
+  .generation-console {
+    grid-template-columns: 1fr;
+  }
+
+  .status-console-panel {
+    position: static;
   }
 }
 

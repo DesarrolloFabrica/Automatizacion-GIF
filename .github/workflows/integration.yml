@@ -26,6 +26,7 @@ env:
   SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE || 'automatizacion-gif-integration' }}
   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
   OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o' }}
+  GCS_BUCKET: ${{ vars.GCS_BUCKET }}
   IMAGE_NAME: automatizacion-gif/app
 
 jobs:
@@ -46,13 +47,16 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_DRIVE_TOKEN_JSON: ${{ secrets.GOOGLE_DRIVE_TOKEN_JSON }}
         run: |
           set -euo pipefail
 
           required_vars=(
             PROJECT_ID
+            GCS_BUCKET
             GCP_SA_KEY
             OPENAI_API_KEY
+            GOOGLE_DRIVE_TOKEN_JSON
           )
 
           for name in "${required_vars[@]}"; do
@@ -97,6 +101,11 @@ jobs:
             exit 1
           fi
 
+          if [[ "${GOOGLE_DRIVE_TOKEN_JSON}" == "{"* ]]; then
+            echo "::error::GOOGLE_DRIVE_TOKEN_JSON must contain the Secret Manager secret name, not the OAuth token JSON value."
+            exit 1
+          fi
+
       - name: Normalize deployment variables
         run: |
           trim_value() {
@@ -110,10 +119,13 @@ jobs:
             echo "SERVICE_NAME=$(trim_value "${SERVICE_NAME}")"
             echo "CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=$(trim_value "${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT}")"
             echo "OPENAI_MODEL=$(trim_value "${OPENAI_MODEL}")"
+            echo "GCS_BUCKET=$(trim_value "${GCS_BUCKET}")"
             echo "OPENAI_SECRET_NAME=$(trim_value "${OPENAI_SECRET_NAME}")"
+            echo "GOOGLE_DRIVE_TOKEN_SECRET_NAME=$(trim_value "${GOOGLE_DRIVE_TOKEN_SECRET_NAME}")"
           } >> "$GITHUB_ENV"
         env:
           OPENAI_SECRET_NAME: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_DRIVE_TOKEN_SECRET_NAME: ${{ secrets.GOOGLE_DRIVE_TOKEN_JSON }}
 
       - name: Resolve image version
         env:
@@ -198,6 +210,22 @@ jobs:
             --repository-format=docker \
             --description="Cloud Run container images"
 
+      - name: Ensure Cloud Storage bucket exists
+        run: |
+          gcloud storage buckets describe "gs://${GCS_BUCKET}" \
+            --project="${PROJECT_ID}" \
+          || gcloud storage buckets create "gs://${GCS_BUCKET}" \
+            --project="${PROJECT_ID}" \
+            --location="${REGION}" \
+            --uniform-bucket-level-access
+
+          if [ -n "${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT}" ]; then
+            gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
+              --member="serviceAccount:${CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT}" \
+              --role="roles/storage.objectAdmin" \
+              --quiet
+          fi
+
       - name: Build image
         run: |
           IMAGE_BASE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
@@ -232,15 +260,28 @@ jobs:
             --memory=2Gi
             --cpu=2
             --timeout=3600
-            --concurrency=1
-            --max-instances=3
             ${{ env.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT != '' && format('--service-account={0}', env.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT) || '' }}
           env_vars: |
             OPENAI_MODEL=${{ env.OPENAI_MODEL }}
+            GCS_BUCKET=${{ vars.GCS_BUCKET }}
             AUTOMATIZACION_GIF_JOBS_ROOT=/tmp/automatizacion-gif/jobs
             AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT=/tmp/automatizacion-gif/drive_content
+            GRANULES_PARALLEL=${{ vars.GRANULES_PARALLEL }}
+            GRANULES_MAX_WORKERS=${{ vars.GRANULES_MAX_WORKERS }}
+            PIPELINE_LOCAL_PARALLEL=${{ vars.PIPELINE_LOCAL_PARALLEL }}
+            PIPELINE_LOCAL_MAX_WORKERS=${{ vars.PIPELINE_LOCAL_MAX_WORKERS }}
+            MATERIALS_PARALLEL=${{ vars.MATERIALS_PARALLEL }}
+            MATERIALS_MAX_WORKERS=${{ vars.MATERIALS_MAX_WORKERS }}
+            MATERIALS_API_RETRIES=${{ vars.MATERIALS_API_RETRIES }}
+            MATERIALS_REPAIR_ATTEMPTS=${{ vars.MATERIALS_REPAIR_ATTEMPTS }}
+            OPENAI_BASE_URL=${{ vars.OPENAI_BASE_URL }}
+            OPENAI_MODEL_DOCX=${{ vars.OPENAI_MODEL_DOCX }}
+            OPENAI_MODEL_MATERIALS=${{ vars.OPENAI_MODEL_MATERIALS }}
+            OPENAI_MODEL_REPAIR=${{ vars.OPENAI_MODEL_REPAIR }}
+            OPENAI_MODEL_TXT=${{ vars.OPENAI_MODEL_TXT }}
           secrets: |
             OPENAI_API_KEY=${{ env.OPENAI_SECRET_NAME }}:latest
+            GOOGLE_DRIVE_TOKEN_JSON=${{ env.GOOGLE_DRIVE_TOKEN_SECRET_NAME }}:latest
 
       - name: Show service URL
         run: |
@@ -259,8 +300,16 @@ jobs:
       - name: Show Cloud Run logs on failure
         if: failure() && env.GOOGLE_GHA_CREDS_PATH != ''
         run: |
+          echo "=== Latest Cloud Run revisions ==="
+          gcloud run revisions list \
+            --service "${SERVICE_NAME}" \
+            --region "${REGION}" \
+            --project "${PROJECT_ID}" \
+            --limit 5
+
+          echo "=== Cloud Run logs ==="
           gcloud logging read \
             "resource.type=cloud_run_revision AND resource.labels.service_name=${SERVICE_NAME}" \
             --project "${PROJECT_ID}" \
-            --limit 50 \
-            --format "value(timestamp,severity,textPayload)"
+            --limit 100 \
+            --format "table(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,protoPayload.status.message)"

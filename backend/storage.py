@@ -8,9 +8,13 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zipfile import ZIP_DEFLATED, ZipFile
 import re
 import unicodedata
+
+if TYPE_CHECKING:
+    from job_store_gcs import GCSFileStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -53,11 +57,14 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp_path, path)
+    sync_job_state_file_to_gcs(path)
 
 
 def _read_json_or_none(path: Path) -> dict | None:
     if not path.exists():
-        return None
+        restore_job_state_file_from_gcs(path)
+        if not path.exists():
+            return None
     try:
         text = path.read_text(encoding="utf-8").strip()
         if not text:
@@ -131,7 +138,6 @@ def save_job_metadata(
     if drive_parent_folder_id:
         pid = drive_parent_folder_id.strip()
         payload["driveParentFolderId"] = pid
-        # Raíz estable del paquete en Drive (no sobrescribir con subcarpetas en merges posteriores).
         payload["driveWorkspaceFolderId"] = pid
     effective_sync = drive_phased_sync if drive_phased_sync is not None else bool(drive_parent_folder_id)
     if effective_sync and payload.get("driveParentFolderId"):
@@ -221,6 +227,25 @@ def get_drive_sync_snapshot(job_id: str) -> dict:
     return out
 
 
+def _job_metrics_path(job_id: str) -> Path:
+    return JOBS_ROOT / job_id / "metrics.json"
+
+
+def read_job_metrics(job_id: str) -> dict | None:
+    """Lee metricas agregadas del job, restaurandolas desde GCS si hace falta."""
+    return _read_json_or_none(_job_metrics_path(job_id))
+
+
+def merge_phase_metrics(job_id: str, phase_key: str, metrics: dict) -> dict:
+    """Agrega o reemplaza metricas de una fase dentro de metrics.json."""
+    payload = read_job_metrics(job_id) or {"jobId": job_id, "phases": {}}
+    phases = payload.setdefault("phases", {})
+    phases[phase_key] = metrics
+    payload["updatedAt"] = _utc_now()
+    _write_json_atomic(_job_metrics_path(job_id), payload)
+    return payload
+
+
 def get_job_category(job_id: str) -> str:
     return str(read_job_metadata(job_id).get("category") or "especializacion")
 
@@ -296,9 +321,12 @@ def save_granule_source_file(job_id: str, source_file, original_name: str) -> Pa
 
 def list_generated_docx(job_id: str) -> list[str]:
     paths = get_job_paths(job_id)
-    if not paths["generated_dir"].exists():
-        return []
-    return sorted(path.name for path in paths["generated_dir"].glob("*.docx"))
+    files = []
+    if paths["generated_dir"].exists():
+        files = sorted(path.name for path in paths["generated_dir"].glob("*.docx"))
+    if files:
+        return files
+    return sorted(Path(path).name for path in list_files_in_gcs(job_id, "generated") if path.lower().endswith(".docx"))
 
 
 def list_especializacion_files(job_id: str) -> list[dict[str, str]]:
@@ -309,18 +337,31 @@ def list_material_files(job_id: str) -> list[dict[str, str]]:
     paths = get_job_paths(job_id)
     category = get_category(get_job_category(job_id))
     materiales_dir = get_materials_dir(job_id)
-    if not materiales_dir.exists():
-        return []
     files = []
-    for docx_file in sorted(materiales_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materiales_dir)).lower()):
-        if not docx_file.is_file():
+    if materiales_dir.exists():
+        for docx_file in sorted(materiales_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materiales_dir)).lower()):
+            if not docx_file.is_file():
+                continue
+            relative_path = docx_file.relative_to(materiales_dir)
+            granule_folder = relative_path.parts[0] if len(relative_path.parts) > 1 else ""
+            files.append({
+                "granule": granule_folder,
+                "name": docx_file.name,
+                "relative_path": f"{category.materials_dir}/{relative_path.as_posix()}",
+            })
+    if files:
+        return files
+    for gcs_path in list_files_in_gcs(job_id, "materials"):
+        if not gcs_path.lower().endswith(".docx"):
             continue
-        relative_path = docx_file.relative_to(materiales_dir)
-        granule_folder = relative_path.parts[0] if len(relative_path.parts) > 1 else ""
+        relative = Path(gcs_path)
+        parts = relative.parts[1:] if relative.parts and relative.parts[0] == "materials" else relative.parts
+        if not parts:
+            continue
         files.append({
-            "granule": granule_folder,
-            "name": docx_file.name,
-            "relative_path": f"{category.materials_dir}/{relative_path.as_posix()}",
+            "granule": parts[0] if len(parts) > 1 else "",
+            "name": parts[-1],
+            "relative_path": f"{category.materials_dir}/{'/'.join(parts)}",
         })
     return files
 
@@ -336,10 +377,16 @@ def list_material_relative_files(job_id: str) -> list[str]:
 def list_pipeline_local_files(job_id: str) -> list[Path]:
     paths = get_job_paths(job_id)
     pipeline_dir = paths["pipeline_local_dir"]
-    if not pipeline_dir.exists():
-        return []
+    files = []
+    if pipeline_dir.exists():
+        files = sorted(
+            [path for path in pipeline_dir.iterdir() if path.is_file() and path.suffix.lower() in {".docx", ".txt"}],
+            key=lambda item: item.name.lower(),
+        )
+    if files:
+        return files
     return sorted(
-        [path for path in pipeline_dir.iterdir() if path.is_file() and path.suffix.lower() in {".docx", ".txt"}],
+        [pipeline_dir / Path(path).name for path in list_files_in_gcs(job_id, "pipeline_local") if Path(path).suffix.lower() in {".docx", ".txt"}],
         key=lambda item: item.name.lower(),
     )
 
@@ -427,8 +474,16 @@ def update_phase_status(job_id: str, phase_key: str, *, status: str | None = Non
         if status == "running":
             phase["startedAt"] = _utc_now()
             phase["finishedAt"] = None
-        if status in {"completed", "failed", "skipped"}:
+            phase.pop("durationSeconds", None)
+        if status in {"completed", "failed", "skipped", "cancelled"}:
             phase["finishedAt"] = _utc_now()
+            if phase.get("startedAt") and phase.get("finishedAt"):
+                try:
+                    start_dt = datetime.fromisoformat(phase["startedAt"])
+                    finish_dt = datetime.fromisoformat(phase["finishedAt"])
+                    phase["durationSeconds"] = round((finish_dt - start_dt).total_seconds(), 1)
+                except (ValueError, TypeError):
+                    pass
     if files is not None:
         phase["files"] = files
     return write_phase_status(job_id, payload)
@@ -442,6 +497,143 @@ def refresh_phase_files(job_id: str) -> dict:
     payload["materials"] = payload["specializationMaterials"]
     payload.setdefault("uploadDrive", _empty_phase("pending"))
     return write_phase_status(job_id, payload)
+
+
+def reconcile_phase_status_with_disk(job_id: str) -> dict:
+    """Reconcile phase_status.json with actual files on disk.
+
+    If a phase says 'completed' but no output files exist, mark it as 'pending'.
+    This prevents stale states after manual file deletion or corruption.
+    """
+    payload = read_phase_status(job_id)
+    paths = get_job_paths(job_id)
+    changed = False
+
+    # Check granules phase
+    if payload["granules"]["status"] == "completed":
+        actual_files = list_generated_docx(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] Granules phase says completed but no files on disk. Resetting to pending.")
+            payload["granules"] = _empty_phase("pending")
+            changed = True
+
+    # Check pipelineLocal phase
+    if payload["pipelineLocal"]["status"] == "completed":
+        actual_files = list_pipeline_local_relative_files(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] PipelineLocal phase says completed but no files on disk. Resetting to pending.")
+            payload["pipelineLocal"] = _empty_phase("pending")
+            # Also reset downstream phases since pipelineLocal outputs are missing
+            payload["specializationMaterials"] = _empty_phase("pending")
+            payload["uploadDrive"] = _empty_phase("pending")
+            changed = True
+
+    # Check specializationMaterials phase
+    if payload["specializationMaterials"]["status"] == "completed":
+        actual_files = list_material_relative_files(job_id)
+        if not actual_files:
+            LOGGER.warning(f"[{job_id}] SpecializationMaterials phase says completed but no files on disk. Resetting to pending.")
+            payload["specializationMaterials"] = _empty_phase("pending")
+            payload["uploadDrive"] = _empty_phase("pending")
+            changed = True
+
+    if changed:
+        write_phase_status(job_id, payload)
+
+    return payload
+
+
+def reset_job_state(job_id: str, reset_from: str = "granules") -> dict:
+    """Full job state reset: clears phase status, removes output files, resets runtime state.
+
+    Preserves: syllabus, job_metadata, detected granules info.
+    Removes: all generated outputs, metrics, locks, stale references.
+
+    Args:
+        job_id: The job identifier
+        reset_from: Phase to reset from ('granules', 'pipelineLocal', 'specializationMaterials')
+
+    Returns:
+        Updated phase_status payload
+    """
+    paths = get_job_paths(job_id)
+    order = ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")
+    if reset_from not in order:
+        raise ValueError(f"reset_from invalid: {reset_from}")
+
+    # Clean up output directories based on reset point
+    idx = order.index(reset_from)
+
+    if idx <= 0 and paths["generated_dir"].exists():
+        shutil.rmtree(paths["generated_dir"], ignore_errors=True)
+        paths["generated_dir"].mkdir(parents=True, exist_ok=True)
+
+    if idx <= 1 and paths["pipeline_local_dir"].exists():
+        shutil.rmtree(paths["pipeline_local_dir"], ignore_errors=True)
+        paths["pipeline_local_dir"].mkdir(parents=True, exist_ok=True)
+
+    if idx <= 2:
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            shutil.rmtree(materials_dir, ignore_errors=True)
+            materials_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clean up metrics and logs for affected phases
+    metrics_path = paths["state_dir"] / "metrics.json"
+    if metrics_path.exists():
+        metrics_path.unlink(missing_ok=True)
+
+    # Reset phase status
+    payload = read_phase_status(job_id)
+    for key in order[idx:]:
+        payload[key] = _empty_phase("pending")
+
+    # Clear stale runtime state
+    from jobs import _JOBS, _LOCK, _ACTIVE_SUBPROCESSES, _CANCEL_REQUESTED
+    with _LOCK:
+        if job_id in _JOBS:
+            record = _JOBS[job_id]
+            if record.status == "running":
+                record.status = "cancelled"
+                record.progress_step = "reset"
+        _ACTIVE_SUBPROCESSES.pop(job_id, None)
+        _CANCEL_REQUESTED.discard(job_id)
+
+    return write_phase_status(job_id, payload)
+
+
+def cleanup_phase_outputs(job_id: str, phase_key: str) -> None:
+    """Remove output files for a specific phase without resetting state.
+
+    Used before regeneration to ensure clean slate.
+    """
+    paths = get_job_paths(job_id)
+
+    if phase_key == "granules" and paths["generated_dir"].exists():
+        for f in paths["generated_dir"].glob("*.docx"):
+            f.unlink(missing_ok=True)
+
+    if phase_key == "pipelineLocal" and paths["pipeline_local_dir"].exists():
+        for f in paths["pipeline_local_dir"].glob("*.txt"):
+            f.unlink(missing_ok=True)
+        for f in paths["pipeline_local_dir"].glob("*.docx"):
+            f.unlink(missing_ok=True)
+        for f in paths["pipeline_local_dir"].glob("*.json"):
+            if f.name != "phase_status.json":
+                f.unlink(missing_ok=True)
+
+    if phase_key == "specializationMaterials":
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            for f in materials_dir.rglob("*.docx"):
+                f.unlink(missing_ok=True)
+            # Remove empty subdirectories
+            for d in sorted(materials_dir.iterdir(), key=lambda x: str(x), reverse=True):
+                if d.is_dir():
+                    try:
+                        d.rmdir()
+                    except OSError:
+                        pass
 
 
 def get_available_next_action(phase_status: dict, job_status: str) -> str:
@@ -478,6 +670,7 @@ def get_current_phase(phase_status: dict) -> str:
 
 
 def create_docs_zip(job_id: str) -> Path:
+    restore_job_content_from_gcs(job_id, ("generated",))
     paths = get_job_paths(job_id)
     docx_files = sorted(paths["generated_dir"].glob("*.docx"))
     with ZipFile(paths["zip_path"], "w", compression=ZIP_DEFLATED) as zip_file:
@@ -487,6 +680,7 @@ def create_docs_zip(job_id: str) -> Path:
 
 
 def create_full_outputs_zip(job_id: str) -> Path:
+    restore_job_content_from_gcs(job_id)
     paths = get_job_paths(job_id)
     zip_path = paths["content_root"] / "full_outputs.zip"
     package_files = _collect_academic_package_files(paths)
@@ -498,7 +692,89 @@ def create_full_outputs_zip(job_id: str) -> Path:
     return zip_path
 
 
+def _unique_zip_name(used: set[str], arcname: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_./-]+", "_", arcname).replace("-", "_")
+    folder, name = safe.rsplit("/", 1) if "/" in safe else ("", safe)
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    candidate = f"{folder}/{stem}{suffix}" if folder else f"{stem}{suffix}"
+    counter = 2
+    while candidate in used:
+        numbered = f"{stem}_{counter}{suffix}"
+        candidate = f"{folder}/{numbered}" if folder else numbered
+        counter += 1
+    used.add(candidate)
+    return candidate
+
+
+def _granule_code_from_name(path: Path, fallback_index: int) -> str:
+    match = re.search(r"\bG([1-5])\b|^G([1-5])[_\-. ]", path.stem, re.IGNORECASE)
+    if match:
+        return f"G{match.group(1) or match.group(2)}".upper()
+    return f"G{fallback_index}"
+
+
+def _short_pipeline_arcname(path: Path, fallback_index: int) -> str:
+    normalized = re.sub(r"[^A-Z0-9]+", "_", path.stem.upper()).strip("_")
+    granule_match = re.search(r"\bG([1-5])\b", normalized)
+    granule = f"G{granule_match.group(1)}" if granule_match else f"G{fallback_index}"
+    if "PDA" in normalized:
+        kind = "PDA"
+    elif "QUIZ" in normalized:
+        quiz_match = re.search(r"QUIZ_?([1-3])", normalized)
+        kind = f"QUIZ{quiz_match.group(1)}" if quiz_match else "QUIZ"
+    elif "PRESENT" in normalized:
+        kind = "PRESENTACION"
+    elif "FORO" in normalized:
+        kind = "FORO"
+    elif "ACA" in normalized:
+        kind = "ACA"
+    else:
+        kind = f"ARCHIVO{fallback_index}"
+    return f"TXT_DOCX/{granule}_{kind}{path.suffix.lower()}"
+
+
+def _short_material_arcname(path: Path, fallback_index: int) -> str:
+    parts = path.parts
+    haystack = "_".join(parts).upper()
+    granule_match = re.search(r"\bG([1-5])\b|G([1-5])_", haystack)
+    material_match = re.search(r"(?:^|_)(0[1-7])(?:_|\b)", path.name.upper())
+    granule = f"G{granule_match.group(1) or granule_match.group(2)}" if granule_match else f"G{fallback_index}"
+    material = material_match.group(1) if material_match else f"{fallback_index:02d}"
+    return f"Materiales/{granule}_{material}{path.suffix.lower()}"
+
+
+def create_local_full_outputs_zip(job_id: str) -> Path:
+    """ZIP local compatible con Windows: nombres internos cortos, sin tocar archivos originales ni Drive."""
+    restore_job_content_from_gcs(job_id)
+    paths = get_job_paths(job_id)
+    zip_path = paths["content_root"] / "full_outputs_local_safe.zip"
+    used: set[str] = set()
+
+    with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zip_file:
+        syllabus_path = paths["input_dir"] / "syllabus.docx"
+        if syllabus_path.is_file():
+            zip_file.write(syllabus_path, arcname=_unique_zip_name(used, "Syllabus/syllabus.docx"))
+
+        for index, docx_file in enumerate(sorted(paths["generated_dir"].glob("*.docx"), key=lambda item: item.name.lower()), start=1):
+            code = _granule_code_from_name(docx_file, index)
+            zip_file.write(docx_file, arcname=_unique_zip_name(used, f"Granulos/{code}.docx"))
+
+        for index, output_file in enumerate(list_pipeline_local_files(job_id), start=1):
+            zip_file.write(output_file, arcname=_unique_zip_name(used, _short_pipeline_arcname(output_file, index)))
+
+        materials_dir = get_materials_dir(job_id)
+        if materials_dir.exists():
+            material_files = sorted(materials_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materials_dir)).lower())
+            for index, material_file in enumerate(material_files, start=1):
+                rel = material_file.relative_to(materials_dir)
+                zip_file.write(material_file, arcname=_unique_zip_name(used, _short_material_arcname(rel, index)))
+
+    return zip_path
+
+
 def collect_academic_package_files(job_id: str) -> list[tuple[Path, str]]:
+    restore_job_content_from_gcs(job_id)
     return _collect_academic_package_files(get_job_paths(job_id))
 
 
@@ -572,6 +848,7 @@ def _collect_academic_package_files(paths: dict[str, Path]) -> list[tuple[Path, 
 
 def collect_partial_package_files_for_drive_phase(job_id: str, phase: str) -> list[tuple[Path, str]]:
     """Archivos locales existentes para una fase Drive (sin exigir paquete completo)."""
+    restore_job_content_from_gcs(job_id)
     paths = get_job_paths(job_id)
     phase_norm = (phase or "").strip().lower()
     package_files: list[tuple[Path, str]] = []
@@ -692,24 +969,31 @@ def academic_package_filename(program_name: str | None = None) -> str:
 
 
 def create_phase_zip(job_id: str, phase: str) -> Path:
+    if phase == "granules":
+        restore_job_content_from_gcs(job_id, ("generated",))
+    elif phase == "pipeline_local":
+        restore_job_content_from_gcs(job_id, ("pipeline_local",))
+    elif phase in {"materiales_especializacion", "materials"}:
+        restore_job_content_from_gcs(job_id, ("materials",))
     paths = get_job_paths(job_id)
     zip_path = paths["content_root"] / f"{phase}.zip"
+    used: set[str] = set()
 
     with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zip_file:
         if phase == "granules":
-            for docx_file in sorted(paths["generated_dir"].glob("*.docx")):
-                zip_file.write(docx_file, arcname=f"generated/{docx_file.name}")
+            for index, docx_file in enumerate(sorted(paths["generated_dir"].glob("*.docx"), key=lambda item: item.name.lower()), start=1):
+                code = _granule_code_from_name(docx_file, index)
+                zip_file.write(docx_file, arcname=_unique_zip_name(used, f"Granulos/{code}.docx"))
         elif phase == "pipeline_local":
-            for output_file in sorted(paths["pipeline_local_dir"].iterdir()) if paths["pipeline_local_dir"].exists() else []:
+            for index, output_file in enumerate(sorted(paths["pipeline_local_dir"].iterdir(), key=lambda item: item.name.lower()) if paths["pipeline_local_dir"].exists() else [], start=1):
                 if output_file.is_file() and output_file.suffix.lower() in {".docx", ".txt"}:
-                    zip_file.write(output_file, arcname=f"pipeline_local/{output_file.name}")
+                    zip_file.write(output_file, arcname=_unique_zip_name(used, _short_pipeline_arcname(output_file, index)))
         elif phase in {"materiales_especializacion", "materials"}:
-            category = get_category(get_job_category(job_id))
             materials_dir = get_materials_dir(job_id)
-            for granule_dir in sorted(materials_dir.iterdir()) if materials_dir.exists() else []:
-                if granule_dir.is_dir():
-                    for docx_file in sorted(granule_dir.glob("*.docx")):
-                        zip_file.write(docx_file, arcname=f"{category.materials_dir}/{granule_dir.name}/{docx_file.name}")
+            material_files = sorted(materials_dir.rglob("*.docx"), key=lambda item: str(item.relative_to(materials_dir)).lower()) if materials_dir.exists() else []
+            for index, docx_file in enumerate(material_files, start=1):
+                rel = docx_file.relative_to(materials_dir)
+                zip_file.write(docx_file, arcname=_unique_zip_name(used, _short_material_arcname(rel, index)))
         else:
             raise ValueError(f"Fase no soportada: {phase}")
 
@@ -756,3 +1040,271 @@ def create_outputs_zip(job_id: str, suffixes: tuple[str, ...] = (".docx", ".txt"
         for file_path in files:
             zip_file.write(file_path, arcname=file_path.name)
     return paths["zip_path"]
+
+
+# ──────────────────────────────────────────────
+# GCS Sync helpers (Fase 2: persistencia opcional)
+# ──────────────────────────────────────────────
+
+_gcs_store_cache: GCSFileStore | None = None
+
+
+def _get_gcs_store() -> GCSFileStore:
+    global _gcs_store_cache
+    if _gcs_store_cache is None:
+        from job_store_factory import get_gcs_store
+        _gcs_store_cache = get_gcs_store()
+    return _gcs_store_cache
+
+
+def _job_state_gcs_path(path: Path) -> tuple[str, str] | None:
+    try:
+        relative = path.resolve().relative_to(JOBS_ROOT.resolve())
+    except ValueError:
+        return None
+    if len(relative.parts) < 2:
+        return None
+    job_id = relative.parts[0]
+    state_path = "/".join(("state", *relative.parts[1:]))
+    return job_id, state_path
+
+
+def sync_job_state_file_to_gcs(path: Path) -> str | None:
+    """Persist runtime state files (metadata, phase status, logs) in GCS."""
+    mapping = _job_state_gcs_path(path)
+    if mapping is None or not path.exists() or not path.is_file():
+        return None
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    job_id, gcs_path = mapping
+    return gcs.upload_file(job_id, path, gcs_path)
+
+
+def restore_job_state_file_from_gcs(path: Path) -> bool:
+    """Restore one runtime state file from GCS if this instance lacks it."""
+    mapping = _job_state_gcs_path(path)
+    if mapping is None:
+        return False
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return False
+    job_id, gcs_path = mapping
+    return gcs.download_file(job_id, gcs_path, path)
+
+
+def sync_phase_files_to_gcs(job_id: str, phase_key: str) -> list[str]:
+    """Sube archivos de una fase completada a GCS.
+
+    Retorna lista de URLs subidas (vacia si GCS no esta disponible).
+    """
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        LOGGER.info("GCS sync phase %s: GCS no disponible (GCS_BUCKET no configurado)", phase_key)
+        return []
+
+    LOGGER.info("GCS sync phase %s: iniciado para job %s", phase_key, job_id)
+    paths = get_job_paths(job_id)
+    uploaded = []
+
+    if phase_key == "granules":
+        local_dir = paths["generated_dir"]
+        gcs_prefix = "generated"
+    elif phase_key == "pipelineLocal":
+        local_dir = paths["pipeline_local_dir"]
+        gcs_prefix = "pipeline_local"
+    elif phase_key == "specializationMaterials":
+        local_dir = get_materials_dir(job_id)
+        gcs_prefix = "materials"
+    else:
+        LOGGER.warning("GCS sync phase %s: fase no soportada", phase_key)
+        return []
+
+    if local_dir is None or not local_dir.exists():
+        LOGGER.warning("GCS sync phase %s: directorio local no existe: %s", phase_key, local_dir)
+        return []
+
+    LOGGER.info("GCS sync phase %s: directorio local encontrado: %s", phase_key, local_dir)
+
+    uploaded = gcs.upload_directory(job_id, local_dir, gcs_prefix)
+    if uploaded:
+        LOGGER.info("GCS sync phase %s: %d archivos subidos para job %s", phase_key, len(uploaded), job_id)
+    else:
+        LOGGER.warning("GCS sync phase %s: no se subieron archivos para job %s", phase_key, job_id)
+    return uploaded
+
+
+def sync_syllabus_to_gcs(job_id: str) -> str | None:
+    """Sube el syllabus original a GCS."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    paths = get_job_paths(job_id)
+    syllabus_path = paths["input_dir"] / "syllabus.docx"
+    if not syllabus_path.exists():
+        LOGGER.warning("GCS sync syllabus: archivo no existe: %s", syllabus_path)
+        return None
+    LOGGER.info("GCS sync syllabus: subiendo para job %s", job_id)
+    url = gcs.upload_file(job_id, syllabus_path, "input/syllabus.docx")
+    if url:
+        LOGGER.info("GCS sync syllabus: subido exitosamente para job %s", job_id)
+    return url
+
+
+def sync_zip_to_gcs(job_id: str, zip_path: Path, zip_name: str) -> str | None:
+    """Sube un ZIP generado a GCS."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return None
+    if not zip_path.exists():
+        LOGGER.warning("GCS sync zip: archivo no existe: %s", zip_path)
+        return None
+    LOGGER.info("GCS sync zip: subiendo %s para job %s", zip_name, job_id)
+    url = gcs.upload_file(job_id, zip_path, f"zips/{zip_name}")
+    if url:
+        LOGGER.info("GCS sync zip: subido exitosamente %s para job %s", zip_name, job_id)
+    return url
+
+
+def sync_metrics_to_gcs(job_id: str) -> str | None:
+    """Sube metrics.json a GCS si existe."""
+    return sync_job_state_file_to_gcs(_job_metrics_path(job_id))
+
+
+def sync_metadata_to_gcs(job_id: str) -> list[str]:
+    """Sube archivos de estado del job a GCS."""
+    paths = get_job_paths(job_id)
+    uploaded: list[str] = []
+    for path in (paths["metadata_path"], paths["phase_status_path"], paths["log_path"], _job_metrics_path(job_id)):
+        url = sync_job_state_file_to_gcs(path)
+        if url:
+            uploaded.append(url)
+    return uploaded
+
+
+def download_file_from_gcs(job_id: str, gcs_path: str, local_path: Path) -> bool:
+    """Descarga un archivo desde GCS a ruta local (fallback para descargas)."""
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return False
+    LOGGER.info("GCS download fallback: intentando %s para job %s", gcs_path, job_id)
+    result = gcs.download_file(job_id, gcs_path, local_path)
+    if result:
+        LOGGER.info("GCS download fallback: exitoso %s -> %s", gcs_path, local_path.name)
+    else:
+        LOGGER.warning("GCS download fallback: fallo %s para job %s", gcs_path, job_id)
+    return result
+
+
+def file_exists_in_gcs(job_id: str, gcs_path: str) -> bool:
+    """Verifica si un archivo existe en GCS."""
+    gcs = _get_gcs_store()
+    return gcs.file_exists(job_id, gcs_path)
+
+
+def list_files_in_gcs(job_id: str, prefix: str = "") -> list[str]:
+    """Lista archivos persistidos en GCS para un job."""
+    gcs = _get_gcs_store()
+    return gcs.list_files(job_id, prefix)
+
+
+def _content_local_path_for_gcs(job_id: str, gcs_path: str) -> Path | None:
+    paths = get_job_paths(job_id)
+    parts = Path(gcs_path).parts
+    if not parts:
+        return None
+    prefix = parts[0]
+    rest = Path(*parts[1:]) if len(parts) > 1 else None
+    if rest is None:
+        return None
+    if prefix == "input":
+        return paths["input_dir"] / rest
+    if prefix == "generated":
+        return paths["generated_dir"] / rest
+    if prefix == "pipeline_local":
+        return paths["pipeline_local_dir"] / rest
+    if prefix == "materials":
+        return get_materials_dir(job_id) / rest
+    return None
+
+
+def restore_job_content_from_gcs(
+    job_id: str,
+    prefixes: tuple[str, ...] = ("input", "generated", "pipeline_local", "materials"),
+) -> list[Path]:
+    """Descarga a /tmp los archivos del job que existan en GCS y falten localmente."""
+    restored: list[Path] = []
+    gcs = _get_gcs_store()
+    if not gcs.is_available:
+        return restored
+    for prefix in prefixes:
+        for gcs_path in gcs.list_files(job_id, prefix):
+            local_path = _content_local_path_for_gcs(job_id, gcs_path)
+            if local_path is None or local_path.exists():
+                continue
+            if gcs.download_file(job_id, gcs_path, local_path):
+                restored.append(local_path)
+    return restored
+
+
+def reconstruct_job_from_gcs(job_id: str) -> dict | None:
+    """Reconstruye estado suficiente de un job desde GCS para responder polling/descargas."""
+    paths = get_job_paths(job_id)
+    restored_state = [
+        restore_job_state_file_from_gcs(paths["metadata_path"]),
+        restore_job_state_file_from_gcs(paths["phase_status_path"]),
+        restore_job_state_file_from_gcs(paths["log_path"]),
+        restore_job_state_file_from_gcs(_job_metrics_path(job_id)),
+    ]
+    restored_content = restore_job_content_from_gcs(job_id)
+    if not any(restored_state) and not restored_content and not list_files_in_gcs(job_id, ""):
+        return None
+
+    meta = read_job_metadata(job_id)
+    phase_status = read_phase_status(job_id)
+    files = list_all_job_files(job_id)
+    logs: list[str] = []
+    if paths["log_path"].exists():
+        try:
+            logs = paths["log_path"].read_text(encoding="utf-8").splitlines()[-1000:]
+        except OSError:
+            logs = []
+
+    phases = [phase_status.get(key, {}) for key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")]
+    phase_states = [phase.get("status") for phase in phases]
+    if any(state == "running" for state in phase_states):
+        status = "running"
+        progress_step = get_current_phase(phase_status)
+    elif any(state == "failed" for state in phase_states):
+        status = "failed"
+        progress_step = "error"
+    elif any(state == "completed" for state in phase_states):
+        status = "completed"
+        progress_step = "finalizado"
+    else:
+        status = "queued"
+        progress_step = "pendiente"
+
+    syllabus_original_name = meta.get("syllabusOriginalName")
+    return {
+        "job_id": job_id,
+        "status": status,
+        "progress_step": progress_step,
+        "phase_status": phase_status,
+        "files": files,
+        "logs": logs,
+        "category": meta.get("category"),
+        "syllabus_original_name": syllabus_original_name,
+        "syllabus_stored_name": "syllabus.docx" if syllabus_original_name else None,
+        "syllabus_gcs_path": f"jobs/{job_id}/input/syllabus.docx" if syllabus_original_name else None,
+        "metrics": read_job_metrics(job_id),
+    }
+
+
+def cleanup_old_gcs_jobs(max_age_hours: int = 48) -> list[str]:
+    """Placeholder seguro: la limpieza fina por edad requiere metadatos de blobs.
+
+    Se mantiene como no-op para no borrar contenido por error desde el endpoint admin.
+    """
+    LOGGER.info("cleanup_old_gcs_jobs omitido: max_age_hours=%s", max_age_hours)
+    return []

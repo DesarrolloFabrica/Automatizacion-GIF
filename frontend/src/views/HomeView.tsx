@@ -1,7 +1,7 @@
 ﻿import FlowCard from '../components/FlowCard'
 
 interface HomeViewProps {
-  onNavigate: (view: 'granules' | 'package-drive' | 'scripts') => void
+  onNavigate: (view: 'granules' | 'package-drive' | 'scripts', module?: string) => void
 }
 
 const scriptShortcuts = [
@@ -9,16 +9,19 @@ const scriptShortcuts = [
     title: 'Crear solo gránulos',
     description: 'Sube un syllabus y genera G1-G5.',
     status: 'Conectado localmente',
+    module: 'granules' as const,
   },
   {
     title: 'Crear TXT/DOCX desde gránulos',
     description: 'Sube gránulos existentes y ejecuta el pipeline local.',
     status: 'Conectado',
+    module: 'txtdocx' as const,
   },
   {
     title: 'Crear materiales por gránulo',
     description: 'Genera los 6 recursos editoriales por cada gránulo.',
-    status: 'Disponible dentro de paquete local',
+    status: 'Disponible',
+    module: 'materials' as const,
   },
 ]
 
@@ -93,7 +96,7 @@ function HomeView({ onNavigate }: HomeViewProps) {
           </div>
           <div className="home-script-shortcuts">
             {scriptShortcuts.map((item) => (
-              <button key={item.title} type="button" className="home-script-shortcut" onClick={() => onNavigate('scripts')}>
+              <button key={item.title} type="button" className="home-script-shortcut" onClick={() => onNavigate('scripts', item.module)}>
                 <strong>{item.title}</strong>
                 <span>{item.description}</span>
                 <small>{item.status}</small>

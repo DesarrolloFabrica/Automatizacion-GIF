@@ -34,17 +34,26 @@ try:
 except ImportError:  # pragma: no cover
     OpenAI = None
 
-from automation_engine.generate_guiones import generate_document, word_count
+from automation_engine.generate_guiones import word_count
 from automation_engine.generate_txt_from_guiones import (
     ENGINE_DIR,
     DEFAULT_PROMPT_PATH,
     build_corpus,
     build_user_prompt,
+    call_txt_openai,
     extract_metadata_from_corpus,
+    extract_gift_question_blocks,
+    generate_txt_by_blocks,
+    invalid_gift_question_numbers,
     output_filename,
     parse_titles,
+    repair_txt_invalid_blocks,
     save_txt,
+    TXT_TASKS,
+    TXT_MIN_OUTPUT_TOKENS,
+    validate_gift_format,
 )
+from automation_engine.utils.openai_client import get_openai_client, get_openai_model
 
 
 ENGINE_DIR = Path(__file__).resolve().parent
@@ -52,6 +61,7 @@ PROJECT_ROOT = ENGINE_DIR.parent
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 DEFAULT_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 DEFAULT_TOKEN_PATH = PROJECT_ROOT / "token_drive.json"
+TOKEN_JSON_ENV_NAMES = ("GOOGLE_DRIVE_TOKEN_JSON", "DRIVE_OAUTH_TOKEN_JSON")
 SUPPORTED_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/pdf": ".pdf",
@@ -63,8 +73,38 @@ def ensure_google_dependencies() -> None:
         raise RuntimeError("Faltan dependencias de Google Drive. Ejecuta: pip install -r requirements.txt")
 
 
+def _normalize_json_secret(value: str) -> str:
+    normalized = (value or "").strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"'", '"'}:
+        inner = normalized[1:-1].strip()
+        if inner.startswith("{"):
+            normalized = inner
+    return normalized
+
+
+def _credentials_from_env_token():
+    for env_name in TOKEN_JSON_ENV_NAMES:
+        raw = os.getenv(env_name)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(_normalize_json_secret(raw))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{env_name} no contiene un token OAuth JSON valido para Drive: {exc}") from exc
+        creds = Credentials.from_authorized_user_info(payload, SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return creds
+    return None
+
+
 def get_drive_service(credentials_path: Path, token_path: Path):
     ensure_google_dependencies()
+
+    oauth_creds = _credentials_from_env_token()
+    if oauth_creds is not None:
+        return build("drive", "v3", credentials=oauth_creds)
+
     service_account_path = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
         or os.getenv("DRIVE_SERVICE_ACCOUNT_FILE")
@@ -245,8 +285,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--titles", default="", help="Titulos/enfoques separados por punto y coma. Por defecto: PDA; QUIZ 1; QUIZ 2; QUIZ 3")
     parser.add_argument("--programa", default="", help="Programa que debe aparecer en el encabezado de cada TXT")
     parser.add_argument("--asignatura", default="", help="Asignatura que debe aparecer en el encabezado de cada TXT")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="Modelo OpenAI")
-    parser.add_argument("--max-tokens", type=int, default=3500, help="Maximo de tokens por TXT generado")
+    parser.add_argument("--model", default=None, help="Modelo (fallback: OPENAI_MODEL_TXT > OPENAI_MODEL > gemini-2.5-flash)")
+    parser.add_argument("--max-tokens", type=int, default=TXT_MIN_OUTPUT_TOKENS, help="Maximo de tokens por TXT generado")
     parser.add_argument("--temperature", type=float, default=0.45, help="Creatividad de generacion")
     parser.add_argument("--max-chars-per-file", type=int, default=45000, help="Maximo de caracteres leidos por archivo fuente")
     parser.add_argument("--dry-run", action="store_true", help="Lista Drive y valida configuracion, sin llamar a OpenAI ni subir TXT")
@@ -310,36 +350,86 @@ def main() -> None:
             print("\nDry-run activo. No se llamo a OpenAI ni se subieron archivos.")
             return
 
-        if OpenAI is None:
-            raise RuntimeError("Falta instalar el paquete openai. Ejecuta: pip install -r requirements.txt")
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno o en .env")
+        if not args.model:
+            args.model = get_openai_model("txt")
 
         output_folder_id = find_or_create_output_folder(service, args.drive_folder_id, args.output_folder_name)
         print(f"\nCarpeta Drive de salida: {args.output_folder_name} ({output_folder_id})")
 
-        client = OpenAI()
+        client = get_openai_client()
         system_prompt = prompt_path.read_text(encoding="utf-8")
         previous_outputs = ""
 
         for index, title in enumerate(titles, start=1):
             print(f"\nGenerando TXT {index}/{args.count}: {title}")
-            result = generate_document(
-                client=client,
-                model=args.model,
-                system_prompt=system_prompt,
-                user_prompt=build_user_prompt(
+            task_key = title.upper()
+            try:
+                result = call_txt_openai(
+                    client=client,
+                    model=args.model,
+                    system_prompt=system_prompt,
+                    user_prompt=build_user_prompt(
+                        corpus=corpus,
+                        title=title,
+                        index=index,
+                        count=args.count,
+                        previous_outputs=previous_outputs,
+                        programa=programa,
+                        asignatura=asignatura,
+                    ),
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                )
+            except RuntimeError as exc:
+                if task_key not in TXT_TASKS or "finish_reason=length" not in str(exc):
+                    raise
+                print(f"[TXT][{task_key}] finish_reason=length, regenerando por bloques")
+                result = generate_txt_by_blocks(
+                    client=client,
+                    model=args.model,
+                    task_key=task_key,
                     corpus=corpus,
-                    title=title,
-                    index=index,
-                    count=args.count,
-                    previous_outputs=previous_outputs,
                     programa=programa,
                     asignatura=asignatura,
-                ),
-                max_tokens=args.max_tokens,
-                temperature=args.temperature,
-            )
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                )
+            if task_key in TXT_TASKS:
+                warnings = validate_gift_format(result, task_key)
+                expected = TXT_TASKS[task_key]["questions"]
+                found = len(extract_gift_question_blocks(result))
+                print(f"[TXT][{task_key}] preguntas detectadas: {found}/{expected}")
+                if warnings:
+                    invalid_questions = invalid_gift_question_numbers(result)
+                    if found == expected and invalid_questions:
+                        result = repair_txt_invalid_blocks(
+                            text=result,
+                            client=client,
+                            model=args.model,
+                            task_key=task_key,
+                            corpus=corpus,
+                            programa=programa,
+                            asignatura=asignatura,
+                            max_tokens=args.max_tokens,
+                            temperature=args.temperature,
+                        )
+                    else:
+                        print(f"[TXT][{task_key}] validacion fallo, regenerando por bloques")
+                        result = generate_txt_by_blocks(
+                            client=client,
+                            model=args.model,
+                            task_key=task_key,
+                            corpus=corpus,
+                            programa=programa,
+                            asignatura=asignatura,
+                            max_tokens=args.max_tokens,
+                            temperature=args.temperature,
+                        )
+                    warnings = validate_gift_format(result, task_key)
+                    found = len(extract_gift_question_blocks(result))
+                    print(f"[TXT][{task_key}] preguntas detectadas tras bloques: {found}/{expected}")
+                if warnings:
+                    raise RuntimeError("Validacion TXT final fallo: " + " | ".join(warnings[:8]))
             local_output = temp_dir / output_filename(title, index)
             save_txt(result, local_output)
             uploaded = upload_txt(service, output_folder_id, local_output)

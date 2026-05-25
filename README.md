@@ -120,6 +120,8 @@ npm install
 npm run dev
 ```
 
+En desarrollo Vite proxifica `/api` hacia `http://localhost:8000`, por lo que puedes dejar `VITE_API_BASE_URL` vacío. Si sirves frontend y backend por separado en otro host, define `VITE_API_BASE_URL` con la URL del backend. En la imagen monolítica de deploy, `VITE_API_BASE_URL` puede quedar vacío porque FastAPI sirve frontend y API desde el mismo origen.
+
 ## Ejecutar con Docker
 
 La imagen Docker es monolitica: compila el frontend React y lo sirve desde FastAPI junto con la API en el puerto `8000`.
@@ -161,6 +163,8 @@ La estrategia de ramas es:
 - `integration`: desarrollo/integracion y despliegue automatico a Cloud Run de integracion.
 
 El workflow `.github/workflows/integration.yml` se llama `integration`. Construye la imagen monolitica, la sube a Artifact Registry y despliega Cloud Run cuando hay push a la rama `integration`.
+
+Nota operativa: mientras los jobs vivan en memoria y `/tmp`, Cloud Run debe preferir `max-instances=1` para evitar que el polling consulte una instancia distinta a la que creó el job. El frontend maneja `404/410` como estado recuperable, pero el almacenamiento compartido sigue siendo la solución definitiva para escalar múltiples instancias.
 
 Configura estas variables en GitHub Actions:
 
@@ -254,3 +258,92 @@ Salida: TXT y DOCX descargables.
 - `automation_engine/generate_txt_from_guiones.py` conserva defaults historicos para uso CLI, pero la app web usa rutas temporales generadas por el backend.
 - `automation_engine/generate_documentos_academicos.py` conserva defaults historicos para uso CLI, pero los pipelines web le pasan archivos explicitamente.
 - `outputs/jobs/` se crea en tiempo de ejecucion y esta ignorado por Git.
+
+## Arquitectura de Persistencia (Fase 2)
+
+### Estado Actual
+
+El backend usa un modelo de persistencia en dos niveles:
+
+| Nivel | Proposito | Ubicacion |
+|---|---|---|
+| **Memoria** | Estado en vivo de jobs activos | `jobs.py: _JOBS` |
+| **/tmp (staging)** | Archivos durante generacion | `/tmp/automatizacion-gif/jobs/{job_id}/` |
+| **GCS (opcional)** | Persistencia de archivos generados | `gs://GCS_BUCKET/jobs/{job_id}/` |
+
+### /tmp como Staging
+
+`/tmp` se usa exclusivamente como espacio de trabajo temporal durante la generacion:
+
+- Los subprocesses escriben archivos aqui mientras trabajan
+- Al completar cada fase, los archivos se sincronizan a GCS (si esta configurado)
+- `/tmp` se limpia automaticamente en cada reinicio de Cloud Run
+- **No es almacenamiento principal**, solo staging
+
+### GCS como Persistencia Opcional de Archivos
+
+Si la variable `GCS_BUCKET` esta configurada, el backend sube automaticamente:
+
+- Syllabus original al crear el job
+- Archivos generados al completar cada fase (granules, pipeline_local, materials)
+- ZIPs generados para descargas
+
+Si `GCS_BUCKET` no esta configurado, el sistema funciona exactamente igual usando solo almacenamiento local.
+
+Estructura en GCS:
+
+```text
+gs://GCS_BUCKET/
+└── jobs/
+    └── {job_id}/
+        ├── input/syllabus.docx
+        ├── generated/*.docx
+        ├── pipeline_local/*.txt, *.docx
+        ├── materials/**/*.docx
+        └── zips/*.zip
+```
+
+### Descargas con Fallback
+
+Los endpoints de descarga siguen esta logica:
+
+1. Intentar leer archivo localmente (mas rapido)
+2. Si no existe localmente y GCS_BUCKET esta configurado, descargar desde GCS a tmp
+3. Si no existe en ningun lado, responder error 404 claro
+
+### Firestore (Fase Futura)
+
+La metadata de jobs (status, phase_status, logs, etc.) sigue almacenada en disco local via `LocalDiskJobStore`.
+
+En la siguiente fase se implementara `FirestoreJobStore` para:
+
+- Persistir metadata en Firestore (multi-instancia)
+- TTL automatico para cleanup de jobs expirados
+- Habilitar `max-instances > 1` en Cloud Run
+
+### Multi-Instancia
+
+Actualmente Cloud Run usa `max-instances=1` porque:
+
+- Los jobs viven en memoria y `/tmp`
+- Un job creado en instancia A no existe en instancia B
+
+Multi-instancia se activara en Fase 5, despues de migrar metadata a Firestore.
+
+### Variables de Persistencia
+
+| Variable | Valor | Descripcion |
+|---|---|---|
+| `GCS_BUCKET` | `automatizacion-gif-jobs` | Bucket de GCS para persistencia de archivos (opcional) |
+| `USE_FIRESTORE` | `0` | Preparado para futura fase, no implementar todavia |
+| `AUTOMATIZACION_GIF_JOBS_ROOT` | `/tmp/automatizacion-gif/jobs` | Directorio local de staging |
+| `AUTOMATIZACION_GIF_DRIVE_CONTENT_ROOT` | `/tmp/automatizacion-gif/drive_content` | Directorio temporal para Drive |
+
+### Capas de Almacenamiento
+
+```
+backend/job_store.py            → Interfaz abstracta JobStore
+backend/job_store_local.py      → Implementacion LocalDiskJobStore (actual)
+backend/job_store_gcs.py        → GCSFileStore para archivos
+backend/job_store_factory.py    → Factory para seleccionar implementacion
+```

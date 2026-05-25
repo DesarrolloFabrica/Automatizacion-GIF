@@ -11,7 +11,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from storage import get_job_paths, list_generated_docx, read_job_metadata, read_phase_status, write_phase_status
+from storage import (
+    get_job_paths,
+    list_generated_docx,
+    read_job_metadata,
+    read_phase_status,
+    restore_job_state_file_from_gcs,
+    sync_job_state_file_to_gcs,
+    write_phase_status,
+)
 
 
 MAX_LOG_LINES = 1000
@@ -53,8 +61,8 @@ class JobRecord:
 
 _JOBS: dict[str, JobRecord] = {}
 _LOCK = threading.Lock()
-# Subprocesos activos (granulos / fases) para poder cancelar sin reiniciar el servidor.
 _ACTIVE_SUBPROCESSES: dict[str, subprocess.Popen] = {}
+_CANCEL_REQUESTED: set[str] = set()
 
 
 def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str = "granules") -> JobRecord:
@@ -72,10 +80,16 @@ def create_job(job_id: str, log_path: Path, generated_dir: Path, job_kind: str =
 
 
 def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
-    """Reconstruye el JobRecord tras reinicio del servidor o pérdida de memoria, desde disco."""
+    """Reconstruye el JobRecord tras reinicio del servidor o perdida de memoria, desde disco."""
+    from storage import get_job_paths, read_phase_status, write_phase_status, reconcile_phase_status_with_disk, list_generated_docx, list_pipeline_local_relative_files, list_material_relative_files
+
     paths = get_job_paths(job_id)
+    restore_job_state_file_from_gcs(paths["metadata_path"])
+    restore_job_state_file_from_gcs(paths["phase_status_path"])
+    restore_job_state_file_from_gcs(paths["log_path"])
     if not paths["metadata_path"].exists() or not paths["phase_status_path"].exists():
         return None
+
     logs: list[str] = []
     if paths["log_path"].exists():
         try:
@@ -83,7 +97,10 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
             logs = text.splitlines()[-MAX_LOG_LINES:]
         except OSError:
             logs = []
-    phase_status = read_phase_status(job_id)
+
+    # First reconcile phase status with actual disk state
+    phase_status = reconcile_phase_status_with_disk(job_id)
+
     running_phases = [
         phase_key
         for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")
@@ -91,15 +108,61 @@ def hydrate_job_from_disk(job_id: str) -> JobRecord | None:
     ]
     if running_phases:
         now = datetime.utcnow().isoformat()
-        for phase_key in running_phases:
-            phase_status[phase_key]["status"] = "failed"
-            phase_status[phase_key]["finishedAt"] = now
+        started_at = phase_status[running_phases[0]].get("startedAt")
+        is_orphaned = False
+        if started_at:
+            try:
+                started_dt = datetime.fromisoformat(started_at)
+                elapsed = (datetime.utcnow() - started_dt).total_seconds()
+                if elapsed > 3600:
+                    is_orphaned = True
+            except (ValueError, TypeError):
+                is_orphaned = True
+        if is_orphaned:
+            for phase_key in running_phases:
+                phase_status[phase_key]["status"] = "failed"
+                phase_status[phase_key]["finishedAt"] = now
+            write_phase_status(job_id, phase_status)
+            logs.append("=== El proceso quedo incompleto por reinicio o perdida de instancia (mas de 1 hora sin actividad). ===")
+        else:
+            record = JobRecord(
+                job_id=job_id,
+                status="running",
+                progress_step=running_phases[0],
+                log_path=paths["log_path"],
+                generated_dir=paths["generated_dir"],
+                job_kind="granules_academic_package",
+                logs=logs,
+            )
+            with _LOCK:
+                if job_id in _JOBS:
+                    return _JOBS[job_id]
+                _JOBS[job_id] = record
+            return record
+
+    # Detect stale completed states (phase says completed but no output files)
+    stale_corrections = []
+    if phase_status["granules"]["status"] == "completed" and not list_generated_docx(job_id):
+        phase_status["granules"]["status"] = "pending"
+        stale_corrections.append("granules")
+    if phase_status["pipelineLocal"]["status"] == "completed" and not list_pipeline_local_relative_files(job_id):
+        phase_status["pipelineLocal"]["status"] = "pending"
+        phase_status["specializationMaterials"]["status"] = "pending"
+        phase_status["uploadDrive"]["status"] = "pending"
+        stale_corrections.append("pipelineLocal")
+    if phase_status["specializationMaterials"]["status"] == "completed" and not list_material_relative_files(job_id):
+        phase_status["specializationMaterials"]["status"] = "pending"
+        phase_status["uploadDrive"]["status"] = "pending"
+        stale_corrections.append("specializationMaterials")
+
+    if stale_corrections:
         write_phase_status(job_id, phase_status)
-        logs.append("=== Job marcado como fallido: el servidor se reinicio mientras habia una fase en ejecucion ===")
+        logs.append(f"=== Estados corregidos: fases marcadas como completadas pero sin archivos: {', '.join(stale_corrections)} ===")
 
     phases = [phase_status.get(key, {}) for key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive")]
-    status = "failed" if running_phases or any(phase.get("status") == "failed" for phase in phases) else "completed"
-    progress_step = "error" if status == "failed" else "finalizado"
+    phase_states = [phase.get("status") for phase in phases]
+    status = "failed" if running_phases or any(state == "failed" for state in phase_states) else "queued" if all(state == "pending" for state in phase_states) else "completed"
+    progress_step = "error" if status == "failed" else "pendiente" if status == "queued" else "finalizado"
 
     record = JobRecord(
         job_id=job_id,
@@ -127,8 +190,15 @@ def get_job(job_id: str) -> JobRecord | None:
 
 def terminate_job_subprocess(job_id: str) -> bool:
     """Intenta detener el proceso del job (SIGTERM). Devuelve True si había proceso activo."""
+    _CANCEL_REQUESTED.add(job_id)
     proc = _ACTIVE_SUBPROCESSES.get(job_id)
     if proc is None:
+        with _LOCK:
+            record = _JOBS.get(job_id)
+            if record is not None:
+                record.status = "cancelled"
+                record.progress_step = "cancelado"
+                record.finished_at = datetime.utcnow().isoformat()
         return False
     try:
         proc.terminate()
@@ -151,6 +221,7 @@ def append_log(job_id: str, line: str) -> None:
     record.log_path.parent.mkdir(parents=True, exist_ok=True)
     with record.log_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{line}\n")
+    sync_job_state_file_to_gcs(record.log_path)
 
 
 def update_progress_from_log(job_id: str, line: str, progress_map: dict[str, str] | None = None) -> None:
@@ -189,8 +260,9 @@ def set_job_running(job_id: str, initial_progress_step: str = "leyendo syllabus"
 def set_job_finished(job_id: str, success: bool, files_listing_fn: Callable[[str], list[str]] | None = None) -> None:
     with _LOCK:
         record = _JOBS[job_id]
-        record.status = "completed" if success else "failed"
-        record.progress_step = "finalizado" if success else "error"
+        was_cancelled = job_id in _CANCEL_REQUESTED
+        record.status = "cancelled" if was_cancelled else "completed" if success else "failed"
+        record.progress_step = "cancelado" if was_cancelled else "finalizado" if success else "error"
         if files_listing_fn is not None:
             record.files = files_listing_fn(job_id)
         elif record.job_kind == "granules":
@@ -198,6 +270,14 @@ def set_job_finished(job_id: str, success: bool, files_listing_fn: Callable[[str
         else:
             record.files = []
         record.finished_at = datetime.utcnow().isoformat()
+    if was_cancelled:
+        phase_status = read_phase_status(job_id)
+        for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive"):
+            if phase_status.get(phase_key, {}).get("status") in {"running", "failed"}:
+                phase_status[phase_key]["status"] = "cancelled"
+                phase_status[phase_key]["finishedAt"] = datetime.utcnow().isoformat()
+        write_phase_status(job_id, phase_status)
+    _CANCEL_REQUESTED.discard(job_id)
 
 
 def set_job_failed_with_message(job_id: str, message: str) -> None:
@@ -251,6 +331,8 @@ def _write_subprocess_failure_artifacts(
     logs_dir.mkdir(parents=True, exist_ok=True)
     (logs_dir / "stdout.log").write_text(stdout_text, encoding="utf-8")
     (logs_dir / "stderr.log").write_text(stderr_text, encoding="utf-8")
+    sync_job_state_file_to_gcs(logs_dir / "stdout.log")
+    sync_job_state_file_to_gcs(logs_dir / "stderr.log")
 
     def mask_secret(val: str) -> str:
         s = str(val)
@@ -285,6 +367,7 @@ def _write_subprocess_failure_artifacts(
         parts.extend(["", "=== host-side exception ===", host_traceback])
     err_path = logs_dir / "error.log"
     err_path.write_text("\n".join(parts), encoding="utf-8")
+    sync_job_state_file_to_gcs(err_path)
     return err_path
 
 
@@ -374,6 +457,11 @@ def _run_command_and_stream_logs(
         job_id,
         f"Entorno subprocess: PYTHONUTF8={merged_env.get('PYTHONUTF8', '')} PYTHONIOENCODING={merged_env.get('PYTHONIOENCODING', '')}",
     )
+    pipeline_env = {k: v for k, v in merged_env.items() if k.startswith("PIPELINE_")}
+    if pipeline_env:
+        append_log(job_id, f"PIPELINE vars: {pipeline_env}")
+    else:
+        append_log(job_id, "PIPELINE vars: NONE (no PIPELINE_* variables found in environment)")
     host_tb: str | None = None
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []

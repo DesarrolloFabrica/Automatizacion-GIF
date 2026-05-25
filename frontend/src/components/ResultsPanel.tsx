@@ -168,23 +168,21 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
               </details>
             )}
 
-            {granulesStatus === 'completed' && pipelineStatus !== 'completed' && (
+            {granulesStatus === 'completed' && pipelineStatus !== 'completed' && !isGenerating && availableNextAction !== 'none' && (
               <button
                 type="button"
                 className="primary-button"
                 onClick={onGeneratePipelineLocal}
-                disabled={isGenerating || availableNextAction === 'none'}
               >
                 Generar TXT/DOCX
               </button>
             )}
 
-            {pipelineStatus === 'completed' && materialsStatus !== 'completed' && (
+            {pipelineStatus === 'completed' && materialsStatus !== 'completed' && !isGenerating && availableNextAction !== 'none' && (
               <button
                 type="button"
                 className="primary-button"
                 onClick={onGenerateSpecializationMaterials}
-                disabled={isGenerating || availableNextAction === 'none'}
               >
                 Generar materiales por gránulo
               </button>
@@ -207,10 +205,8 @@ const ResultsPanel = forwardRef<HTMLElement, ResultsPanelProps>(function Results
               </>
             )}
 
-            {(hasDocs || hasMateriales) && !canDownloadFullPackage && (
-              <button type="button" className="primary-button results-package-button" disabled>
-                Disponible cuando finalicen todas las fases.
-              </button>
+            {(hasDocs || hasMateriales) && !canDownloadFullPackage && materialsStatus !== 'completed' && (
+              <p className="empty-state results-pending-note">El ZIP final aparecerá cuando gránulos, TXT/DOCX y recursos estén completos.</p>
             )}
           </>
         )}

@@ -67,6 +67,9 @@ def get_authenticated_drive_service():
     load_dotenv(PROJECT_ROOT / ".env")
     _ensure_google_dependencies()
 
+    if os.getenv("GOOGLE_DRIVE_TOKEN_JSON") or os.getenv("DRIVE_OAUTH_TOKEN_JSON"):
+        return get_drive_service(DEFAULT_CREDENTIALS_PATH, DEFAULT_TOKEN_PATH)
+
     service_account_path = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
         or os.getenv("DRIVE_SERVICE_ACCOUNT_FILE")
@@ -95,7 +98,8 @@ def get_authenticated_drive_service():
 
     raise FileNotFoundError(
         "No hay credenciales Drive configuradas. Define GOOGLE_SERVICE_ACCOUNT_FILE en .env, "
-        "configura credentials.json + token_drive.json, o ejecuta en Cloud Run con una service account con acceso a Drive."
+        "GOOGLE_DRIVE_TOKEN_JSON como token OAuth, credentials.json + token_drive.json, "
+        "o ejecuta en Cloud Run con una service account con acceso a Drive."
     )
 
 

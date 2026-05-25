@@ -15,6 +15,9 @@ export type GenerationStatus =
   | 'organizando archivos'
   | 'finalizado'
   | 'error'
+  | 'cancelado'
+  | 'missing_job'
+  | 'recoverable_error'
 
 export interface GranuleTopic {
   id: string
@@ -44,8 +47,8 @@ export interface SyllabusPreviewResponse {
   selectedCourse?: DetectedCourse | null
 }
 
-export type BackendJobStatus = 'queued' | 'running' | 'completed' | 'failed'
-export type PhaseStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+export type BackendJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type PhaseStatus = 'pending' | 'ready' | 'running' | 'completed' | 'failed' | 'cancelled' | 'stale' | 'skipped'
 export type AvailableNextAction =
   | 'generate_granules'
   | 'generate_pipeline_local'
@@ -125,6 +128,32 @@ export interface JobStatusResponse {
   phaseStatus: JobPhaseStatus | null
   driveSync?: DriveSyncSnapshot | null
   categoryKey?: PromptType | string | null
+  syllabusOriginalName?: string | null
+  syllabusStoredName?: string | null
+  syllabusGcsPath?: string | null
+  metrics?: GranulesMetrics | null
+}
+
+export interface GranuleTiming {
+  startedAt?: string
+  finishedAt?: string
+  durationSeconds?: number
+  durationHuman?: string
+  success?: boolean
+  sections?: Record<string, { durationSeconds?: number; durationHuman?: string }>
+}
+
+export interface GranulesMetrics {
+  jobId?: string
+  total?: {
+    parseSeconds?: number
+    parseHuman?: string
+    granulesSeconds?: number
+    granulesHuman?: string
+  }
+  mode?: 'sequential' | 'parallel'
+  maxWorkers?: number
+  granules?: Record<string, GranuleTiming>
 }
 
 export interface DriveUploadResponse {

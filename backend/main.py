@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,8 @@ from schemas import (
     JobCreateResponse,
     JobStatusResponse,
     LocalGeneratedFile,
+    ModularJobSummary,
+    ModularRecentResponse,
     ScriptsLocalJobCreateResponse,
     ScriptsLocalJobStatusResponse,
     ScriptsJobCreateResponse,
@@ -34,14 +37,18 @@ from storage import (
     PROJECT_ROOT,
     academic_package_filename,
     cleanup_drive_job_content_root,
+    cleanup_phase_outputs,
     collect_academic_package_files,
     collect_partial_package_files_for_drive_phase,
     create_docs_zip,
     create_full_outputs_zip,
+    create_local_full_outputs_zip,
     create_outputs_zip,
     create_phase_zip,
     default_drive_phase_status,
+    download_file_from_gcs,
     ensure_job_dirs,
+    file_exists_in_gcs,
     get_available_next_action,
     get_current_phase,
     get_drive_sync_snapshot,
@@ -50,21 +57,33 @@ from storage import (
     get_materials_dir,
     init_phase_status,
     list_all_job_files,
+    list_files_in_gcs,
     list_generated_docx,
     list_generated_files,
     list_material_files,
     list_pipeline_local_files,
     merge_job_metadata,
+    merge_phase_metrics,
     read_job_metadata,
+    read_job_metrics,
     read_phase_status,
+    reconcile_phase_status_with_disk,
     refresh_phase_files,
     reset_job_phases_from,
+    reset_job_state,
     accumulate_drive_counters,
     save_job_metadata,
     save_granule_source_file,
     save_local_granules,
     save_syllabus_file,
     set_drive_phase_record,
+    sync_metrics_to_gcs,
+    sync_phase_files_to_gcs,
+    sync_syllabus_to_gcs,
+    sync_zip_to_gcs,
+    sync_metadata_to_gcs,
+    reconstruct_job_from_gcs,
+    cleanup_old_gcs_jobs,
     update_phase_status,
 )
 from drive_service import (  # noqa: E402
@@ -81,6 +100,19 @@ from automation_engine.generate_guiones import extract_course_plan, parse_syllab
 from automation_engine.config.categories import CATEGORIES, get_category, public_categories_payload, validate_category_prompts  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
+
+# Diagnostic: verify PIPELINE_* variables are loaded from .env
+_pipeline_parallel = os.getenv("PIPELINE_LOCAL_PARALLEL", "NOT_LOADED")
+_pipeline_workers = os.getenv("PIPELINE_LOCAL_MAX_WORKERS", "NOT_LOADED")
+print(f"[Backend] .env loaded from {PROJECT_ROOT / '.env'}")
+print(f"[Backend] PIPELINE_LOCAL_PARALLEL={_pipeline_parallel}")
+print(f"[Backend] PIPELINE_LOCAL_MAX_WORKERS={_pipeline_workers}")
+
+
+_openai_api_key = os.getenv("OPENAI_API_KEY")
+if _openai_api_key:
+    os.environ["OPENAI_API_KEY"] = _openai_api_key.strip()
+    print("[OpenAI] API key detected")
 
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
@@ -120,6 +152,23 @@ GRANULES_PROGRESS_MAP = {
     "nivel seleccionado": "preparando prompts",
     "generando documento": "generando documentos",
     "guardado:": "generando gránulos",
+    "modo paralelo activado": "generando gránulos en paralelo",
+    "[g1] iniciado": "generando gránulos",
+    "[g2] iniciado": "generando gránulos",
+    "[g3] iniciado": "generando gránulos",
+    "[g4] iniciado": "generando gránulos",
+    "[g5] iniciado": "generando gránulos",
+    "[g1] completado": "generando gránulos",
+    "[g2] completado": "generando gránulos",
+    "[g3] completado": "generando gránulos",
+    "[g4] completado": "generando gránulos",
+    "[g5] completado": "generando gránulos",
+    "[g1] failed": "generando gránulos",
+    "[g2] failed": "generando gránulos",
+    "[g3] failed": "generando gránulos",
+    "[g4] failed": "generando gránulos",
+    "[g5] failed": "generando gránulos",
+    "resumen:": "finalizando gránulos",
 }
 
 ESPECIALIZACION_PROGRESS_MAP = {
@@ -144,6 +193,23 @@ ESPECIALIZACION_PROGRESS_MAP = {
     "=== resumen ===": "finalizado",
     "gránulos procesados:": "finalizado",
     "materiales generados:": "finalizado",
+    "modo paralelo activado": "generando gránulos en paralelo",
+    "[g1] iniciado": "generando gránulos",
+    "[g2] iniciado": "generando gránulos",
+    "[g3] iniciado": "generando gránulos",
+    "[g4] iniciado": "generando gránulos",
+    "[g5] iniciado": "generando gránulos",
+    "[g1] completado": "generando gránulos",
+    "[g2] completado": "generando gránulos",
+    "[g3] completado": "generando gránulos",
+    "[g4] completado": "generando gránulos",
+    "[g5] completado": "generando gránulos",
+    "[g1] failed": "generando gránulos",
+    "[g2] failed": "generando gránulos",
+    "[g3] failed": "generando gránulos",
+    "[g4] failed": "generando gránulos",
+    "[g5] failed": "generando gránulos",
+    "resumen:": "finalizando gránulos",
 }
 
 ACADEMIC_PACKAGE_PROGRESS_MAP = {
@@ -281,24 +347,59 @@ def run_phased_drive_sync(job_id: str, drive_phase: str) -> None:
 
 
 def _phase_complete_callback(phase_key: str, files_fn):
-    """Tras terminar la generación local de una fase: sube a Drive y luego marca la fase completada.
-
-    Así los archivos solo aparecen en Drive cuando esa fase ya terminó de generarse (no durante el proceso).
-    """
+    """Tras terminar la generacion local de una fase: sube a Drive, sync a GCS, luego marca la fase completada."""
 
     def _callback(job_id: str, success: bool) -> None:
         refresh_phase_files(job_id)
         if success:
-            append_log(job_id, "=== Sincronización con Drive: la subida ocurre solo después de terminar esta fase en local ===")
+            append_log(job_id, "=== Sincronizacion con Drive: la subida ocurre solo despues de terminar esta fase en local ===")
             if phase_key == "granules":
                 run_phased_drive_sync(job_id, "granules")
             elif phase_key == "pipelineLocal":
                 run_phased_drive_sync(job_id, "activities")
             elif phase_key == "specializationMaterials":
                 run_phased_drive_sync(job_id, "resources")
+
+            # Fase 2: persistir archivos de fase en GCS
+            sync_phase_files_to_gcs(job_id, phase_key)
+
+            _merge_completed_phase_metrics(job_id, phase_key)
+
+        # Fase 2b: persistir metrics en GCS si existen
+        sync_metrics_to_gcs(job_id)
+
         update_phase_status(job_id, phase_key, status="completed" if success else "failed", files=files_fn(job_id))
 
+        # Fase 3: persistir metadata en GCS para recovery
+        sync_metadata_to_gcs(job_id)
+
     return _callback
+
+
+def _read_json_file_or_none(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _merge_completed_phase_metrics(job_id: str, phase_key: str) -> None:
+    paths = get_job_paths(job_id)
+    metrics_path_by_phase = {
+        "granules": paths["state_dir"] / "metrics" / "metrics.json",
+        "pipelineLocal": paths["pipeline_local_dir"] / "metrics.json",
+        "specializationMaterials": paths["content_root"] / "metrics.json",
+    }
+    metrics_path = metrics_path_by_phase.get(phase_key)
+    if metrics_path is None:
+        return
+    metrics = _read_json_file_or_none(metrics_path)
+    if not metrics:
+        return
+    merge_phase_metrics(job_id, phase_key, metrics)
 
 
 def _ensure_job_exists(job_id: str):
@@ -422,6 +523,12 @@ def _env_for_academic_subprocess(job_id: str) -> dict[str, str]:
     meta = read_job_metadata(job_id)
     if meta.get("drivePhasedSync") and meta.get("driveParentFolderId"):
         env["AUTOMATIZACION_GIF_JOB_ID"] = job_id
+    # Diagnostic: log PIPELINE_* vars being passed to subprocess
+    pipeline_vars = {k: v for k, v in env.items() if k.startswith("PIPELINE_")}
+    if pipeline_vars:
+        print(f"[Backend._env_for_academic_subprocess] PIPELINE vars for job {job_id}: {pipeline_vars}")
+    else:
+        print(f"[Backend._env_for_academic_subprocess] WARNING: No PIPELINE_* vars found for job {job_id}")
     return env
 
 
@@ -544,6 +651,9 @@ async def create_generation_job(
     paths = ensure_job_dirs(job_id)
     save_syllabus_file(job_id, syllabus.file)
 
+    # Fase 2: persistir syllabus en GCS si esta configurado
+    sync_syllabus_to_gcs(job_id)
+
     job_kind = "granules_academic_package"
 
     create_job(job_id=job_id, log_path=paths["log_path"], generated_dir=paths["generated_dir"], job_kind=job_kind)
@@ -599,21 +709,31 @@ def retry_granules_generation(job_id: str) -> JobCreateResponse:
     if not syllabus_path.is_file():
         raise HTTPException(status_code=400, detail="No hay syllabus guardado en este job; crea un job nuevo con el archivo.")
 
-    phase_status = read_phase_status(job_id)
+    # Reconcile phase status with actual disk state
+    phase_status = reconcile_phase_status_with_disk(job_id)
     granule_state = phase_status.get("granules", {}).get("status", "pending")
     if granule_state == "running":
         raise HTTPException(status_code=409, detail="La fase de gránulos está en ejecución. Cancela o espera a que termine.")
-    if granule_state not in ("failed", "completed"):
+    if granule_state not in ("failed", "completed", "pending"):
         raise HTTPException(
             status_code=400,
-            detail=f"Solo se puede reintentar gránulos si la fase falló o ya terminó (estado actual: {granule_state}).",
+            detail=f"Solo se puede reintentar gránulos si la fase falló, terminó o está pendiente (estado actual: {granule_state}).",
         )
 
+    # Clean up existing outputs before regeneration
+    cleanup_phase_outputs(job_id, "granules")
     reset_job_phases_from(job_id, "granules")
+
     category_key = get_job_category(job_id)
     category = get_category(category_key)
     if not category.enabled_for_package:
         raise HTTPException(status_code=400, detail=category.disabled_reason or f"{category.label} no tiene prompt de materiales configurado.")
+
+    # Validate prompts before starting
+    try:
+        validate_category_prompts(category)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=f"Error de configuración: {exc}")
 
     command = [
         sys.executable,
@@ -649,14 +769,53 @@ def retry_granules_generation(job_id: str) -> JobCreateResponse:
 @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str) -> JobStatusResponse:
     job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    is_academic = job is not None and job.job_kind == "granules_academic_package"
 
-    phase_status = refresh_phase_files(job_id) if job.job_kind == "granules_academic_package" else read_phase_status(job_id)
-    files = list_all_job_files(job_id) if job.job_kind == "granules_academic_package" else job.files
+    if job is None:
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state is None:
+            raise HTTPException(status_code=404, detail="Job no encontrado.")
+        return _build_response_from_gcs_state(job_id, gcs_state)
 
-    drive_sync = get_drive_sync_snapshot(job.job_id) if job.job_kind == "granules_academic_package" else None
-    category_key = get_job_category(job.job_id) if job.job_kind == "granules_academic_package" else None
+    if is_academic:
+        # Reconcile phase status with actual disk state before refreshing
+        phase_status = reconcile_phase_status_with_disk(job_id)
+        phase_status = refresh_phase_files(job_id)
+        files = list_all_job_files(job_id)
+        drive_sync = get_drive_sync_snapshot(job.job_id)
+        category_key = get_job_category(job.job_id)
+        meta = read_job_metadata(job_id)
+    else:
+        phase_status = read_phase_status(job_id)
+        files = job.files
+        drive_sync = None
+        category_key = None
+        meta = {}
+
+    syllabus_original_name = meta.get("syllabusOriginalName")
+    syllabus_stored_name = "syllabus.docx" if syllabus_original_name else None
+    syllabus_gcs_path = f"jobs/{job_id}/input/syllabus.docx" if syllabus_original_name else None
+
+    if is_academic and not syllabus_original_name:
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state:
+            syllabus_original_name = gcs_state.get("syllabus_original_name")
+            syllabus_stored_name = gcs_state.get("syllabus_stored_name") or syllabus_stored_name
+            syllabus_gcs_path = gcs_state.get("syllabus_gcs_path") or syllabus_gcs_path
+            if not category_key:
+                category_key = gcs_state.get("category")
+
+    if is_academic and not phase_status.get("granules"):
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state:
+            phase_status = gcs_state["phase_status"]
+
+    if is_academic and not files:
+        gcs_state = reconstruct_job_from_gcs(job_id)
+        if gcs_state:
+            files = gcs_state["files"] or job.files
+
+    metrics = read_job_metrics(job_id) if is_academic else None
 
     return JobStatusResponse(
         jobId=job.job_id,
@@ -673,6 +832,45 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         phaseStatus=phase_status,
         driveSync=drive_sync,
         categoryKey=category_key,
+        syllabusOriginalName=syllabus_original_name,
+        syllabusStoredName=syllabus_stored_name,
+        syllabusGcsPath=syllabus_gcs_path,
+        metrics=metrics,
+    )
+
+
+def _build_response_from_gcs_state(job_id: str, gcs_state: dict) -> JobStatusResponse:
+    """Construye JobStatusResponse desde estado reconstruido de GCS."""
+    phase_status = gcs_state["phase_status"]
+    files = gcs_state["files"]
+    status = gcs_state["status"]
+    progress_step = gcs_state["progress_step"]
+    category_key = gcs_state.get("category")
+    syllabus_original_name = gcs_state.get("syllabus_original_name")
+    syllabus_stored_name = gcs_state.get("syllabus_stored_name")
+    syllabus_gcs_path = gcs_state.get("syllabus_gcs_path")
+
+    metrics = gcs_state.get("metrics")
+
+    return JobStatusResponse(
+        jobId=job_id,
+        status=status,
+        progressStep=progress_step,
+        logs=gcs_state.get("logs", []),
+        files=files,
+        granulesStatus=phase_status["granules"]["status"],
+        pipelineLocalStatus=phase_status["pipelineLocal"]["status"],
+        specializationMaterialsStatus=phase_status["specializationMaterials"]["status"],
+        uploadDriveStatus=phase_status.get("uploadDrive", {"status": "pending"})["status"],
+        currentPhase=get_current_phase(phase_status),
+        availableNextAction=get_available_next_action(phase_status, status),
+        phaseStatus=phase_status,
+        driveSync=None,
+        categoryKey=category_key,
+        syllabusOriginalName=syllabus_original_name,
+        syllabusStoredName=syllabus_stored_name,
+        syllabusGcsPath=syllabus_gcs_path,
+        metrics=metrics,
     )
 
 
@@ -684,6 +882,10 @@ def cancel_generation_job(job_id: str) -> JobCancelResponse:
     if job.job_kind != "granules_academic_package":
         raise HTTPException(status_code=400, detail="Este endpoint solo aplica a jobs de paquete académico.")
     terminated = terminate_job_subprocess(job_id)
+    phase_status = read_phase_status(job_id)
+    for phase_key in ("granules", "pipelineLocal", "specializationMaterials", "uploadDrive"):
+        if phase_status.get(phase_key, {}).get("status") == "running":
+            update_phase_status(job_id, phase_key, status="cancelled", files=phase_status.get(phase_key, {}).get("files", []))
     append_log(job_id, "=== Cancelación solicitada por el usuario ===")
     msg = (
         "Proceso local detenido. Puedes reanudar más tarde desde la misma carpeta del job si las fases siguen pendientes."
@@ -738,20 +940,24 @@ def retry_pipeline_local_phase(job_id: str) -> JobCreateResponse:
     if len(list_generated_docx(job_id)) == 0:
         raise HTTPException(status_code=400, detail="No hay gránulos generados. Ejecuta primero la Fase 1.")
 
-    phase_status = read_phase_status(job_id)
+    # Reconcile phase status with actual disk state
+    phase_status = reconcile_phase_status_with_disk(job_id)
     if phase_status["granules"]["status"] != "completed":
         raise HTTPException(status_code=400, detail="La Fase 1 debe estar completada antes de regenerar actividades.")
 
     pl_status = phase_status.get("pipelineLocal", {}).get("status", "pending")
     if pl_status == "running":
         raise HTTPException(status_code=409, detail="La fase de actividades está en ejecución.")
-    if pl_status not in ("failed", "completed"):
+    if pl_status not in ("failed", "completed", "pending"):
         raise HTTPException(
             status_code=400,
-            detail=f"Solo se puede reiniciar actividades si la fase falló o ya terminó (estado actual: {pl_status}).",
+            detail=f"Solo se puede reiniciar actividades si la fase falló, terminó o está pendiente (estado actual: {pl_status}).",
         )
 
+    # Clean up existing outputs before regeneration
+    cleanup_phase_outputs(job_id, "pipelineLocal")
     reset_job_phases_from(job_id, "pipelineLocal")
+
     append_log(job_id, "=== REINTENTO: FASE 2 PIPELINE LOCAL (mismo job) ===")
     start_job_thread(
         job_id=job_id,
@@ -828,20 +1034,30 @@ def retry_materials_phase_endpoint(job_id: str) -> JobCreateResponse:
     if len(list_generated_docx(job_id)) == 0:
         raise HTTPException(status_code=400, detail="No hay gránulos generados. Ejecuta primero la Fase 1.")
 
-    phase_status = read_phase_status(job_id)
+    # Reconcile phase status with actual disk state
+    phase_status = reconcile_phase_status_with_disk(job_id)
     if phase_status["pipelineLocal"]["status"] != "completed":
         raise HTTPException(status_code=400, detail=f"La Fase 2 debe estar completada antes de regenerar materiales de {category.label}.")
 
     mat_status = phase_status.get("specializationMaterials", {}).get("status", "pending")
     if mat_status == "running":
         raise HTTPException(status_code=409, detail="La fase de materiales está en ejecución.")
-    if mat_status not in ("failed", "completed"):
+    if mat_status not in ("failed", "completed", "pending"):
         raise HTTPException(
             status_code=400,
-            detail=f"Solo se puede reiniciar materiales si la fase falló o ya terminó (estado actual: {mat_status}).",
+            detail=f"Solo se puede reiniciar materiales si la fase falló, terminó o está pendiente (estado actual: {mat_status}).",
         )
 
+    # Clean up existing outputs before regeneration
+    cleanup_phase_outputs(job_id, "specializationMaterials")
     reset_job_phases_from(job_id, "specializationMaterials")
+
+    # Validate prompts before starting
+    try:
+        validate_category_prompts(category)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=f"Error de configuración: {exc}")
+
     append_log(job_id, "=== REINTENTO: FASE 3 MATERIALES (mismo job) ===")
     start_job_thread(
         job_id=job_id,
@@ -862,7 +1078,7 @@ def retry_materials_phase_endpoint(job_id: str) -> JobCreateResponse:
 @app.get("/api/jobs/{job_id}/files/{filename}")
 def download_generated_file(job_id: str, filename: str) -> FileResponse:
     if "/" in filename or "\\" in filename:
-        raise HTTPException(status_code=400, detail="Nombre de archivo inválido.")
+        raise HTTPException(status_code=400, detail="Nombre de archivo invalido.")
 
     job = get_job(job_id)
     if not job:
@@ -877,6 +1093,23 @@ def download_generated_file(job_id: str, filename: str) -> FileResponse:
         matches = [path for path in materials_dir.glob(f"*/{filename}") if path.is_file()]
         if matches:
             file_path = matches[0]
+
+    # Fallback a GCS si el archivo no existe localmente
+    if not file_path.exists() or not file_path.is_file():
+        gcs_paths = [
+            f"generated/{filename}",
+            f"pipeline_local/{filename}",
+        ]
+        gcs_paths.extend(
+            path for path in list_files_in_gcs(job_id, "materials") if Path(path).name == filename
+        )
+        for gcs_path in gcs_paths:
+            if file_exists_in_gcs(job_id, gcs_path):
+                tmp_path = paths["state_dir"] / "gcs_fallback" / Path(gcs_path).name
+                if download_file_from_gcs(job_id, gcs_path, tmp_path):
+                    file_path = tmp_path
+                    break
+
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Archivo no encontrado.")
 
@@ -1116,13 +1349,21 @@ def download_all_generated_files(job_id: str) -> FileResponse:
 
     if job.job_kind == "granules_academic_package":
         try:
-            zip_path = create_full_outputs_zip(job_id)
+            zip_path = create_local_full_outputs_zip(job_id)
         except AcademicPackageError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         package_name = academic_package_filename(infer_program_name_for_package(job_id))
+
+        # Fase 2: persistir ZIP en GCS
+        sync_zip_to_gcs(job_id, zip_path, package_name)
+
         return FileResponse(path=zip_path, filename=package_name, media_type="application/zip")
 
     zip_path = create_docs_zip(job_id)
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, f"granulos_{job_id}.zip")
+
     return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
 
 
@@ -1253,8 +1494,12 @@ def upload_package_to_drive(
 def download_granules_phase(job_id: str) -> FileResponse:
     _ensure_job_exists(job_id)
     if not list_generated_docx(job_id):
-        raise HTTPException(status_code=404, detail="No hay gránulos para descargar.")
+        raise HTTPException(status_code=404, detail="No hay granulos para descargar.")
     zip_path = create_phase_zip(job_id, "granules")
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, "granules.zip")
+
     return FileResponse(path=zip_path, filename=f"granulos_{job_id}.zip", media_type="application/zip")
 
 
@@ -1262,8 +1507,12 @@ def download_granules_phase(job_id: str) -> FileResponse:
 def download_pipeline_local_phase(job_id: str) -> FileResponse:
     _ensure_job_exists(job_id)
     if not list_pipeline_local_files(job_id):
-        raise HTTPException(status_code=404, detail="No hay archivos TXT/DOCX académicos para descargar.")
+        raise HTTPException(status_code=404, detail="No hay archivos TXT/DOCX academicos para descargar.")
     zip_path = create_phase_zip(job_id, "pipeline_local")
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, "pipeline_local.zip")
+
     return FileResponse(path=zip_path, filename=f"pipeline_local_{job_id}.zip", media_type="application/zip")
 
 
@@ -1279,7 +1528,93 @@ def download_materials_phase(job_id: str) -> FileResponse:
     if not list_material_files(job_id):
         raise HTTPException(status_code=404, detail=f"No hay materiales de {category.label} para descargar.")
     zip_path = create_phase_zip(job_id, "materials")
+
+    # Fase 2: persistir ZIP en GCS
+    sync_zip_to_gcs(job_id, zip_path, "materials.zip")
+
     return FileResponse(path=zip_path, filename=f"{category.materials_dir}_{job_id}.zip", media_type="application/zip")
+
+
+@app.get("/api/scripts/modular/recent", response_model=ModularRecentResponse)
+def list_recent_modular_jobs(limit: int = 10) -> ModularRecentResponse:
+    """Lista jobs recientes compatibles con el laboratorio modular.
+
+    Escanea outputs/jobs y devuelve resumen de cada job con conteo de outputs.
+    """
+    from storage import JOBS_ROOT
+
+    jobs: list[ModularJobSummary] = []
+
+    if not JOBS_ROOT.exists():
+        return ModularRecentResponse(jobs=[])
+
+    entries = sorted(
+        JOBS_ROOT.iterdir(),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,
+    )
+
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        job_id = entry.name
+
+        try:
+            meta = read_job_metadata(job_id)
+            ps = read_phase_status(job_id)
+        except Exception:
+            continue
+
+        granules_count = len(list_generated_docx(job_id))
+        pipeline_count = len(list_pipeline_local_files(job_id))
+        materials_count = len(list_material_files(job_id))
+
+        granules_status = ps.get("granules", {}).get("status", "pending")
+        pipeline_status = ps.get("pipelineLocal", {}).get("status", "pending")
+        materials_status = ps.get("specializationMaterials", {}).get("status", "pending")
+
+        meta_created = meta.get("createdAt") or meta.get("created_at")
+        meta_updated = meta.get("updatedAt") or meta.get("updated_at")
+
+        if granules_status == "running" or pipeline_status == "running" or materials_status == "running":
+            continue
+
+        if granules_count == 0 and pipeline_count == 0 and materials_count == 0:
+            continue
+
+        jobs.append(ModularJobSummary(
+            jobId=job_id,
+            category=meta.get("category", "especializacion"),
+            syllabusName=meta.get("syllabusOriginalName"),
+            granulesCount=granules_count,
+            pipelineFilesCount=pipeline_count,
+            materialsCount=materials_count,
+            granulesStatus=granules_status,
+            pipelineLocalStatus=pipeline_status,
+            materialsStatus=materials_status,
+            createdAt=meta_created,
+            updatedAt=meta_updated,
+        ))
+
+        if len(jobs) >= limit:
+            break
+
+    return ModularRecentResponse(jobs=jobs)
+
+
+@app.post("/api/admin/cleanup-old-jobs")
+def cleanup_old_jobs(max_age_hours: int = 48) -> dict:
+    """Elimina jobs de GCS mas antiguos que max_age_hours.
+
+    Solo elimina archivos del bucket, no metadata local.
+    """
+    validate_required_api_key()
+    deleted = cleanup_old_gcs_jobs(max_age_hours=max_age_hours)
+    return {
+        "deletedJobs": deleted,
+        "count": len(deleted),
+        "maxAgeHours": max_age_hours,
+    }
 
 
 @app.get("/", include_in_schema=False)
