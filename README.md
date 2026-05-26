@@ -82,6 +82,22 @@ $env:OPENAI_API_KEY="TU_API_KEY"
 $env:OPENAI_MODEL="gpt-4o"
 ```
 
+Para usar Ollama en vez de Gemini/OpenAI:
+
+```powershell
+$env:LLM_PROVIDER="ollama"
+$env:OLLAMA_BASE_URL="http://localhost:11434/v1"
+$env:OLLAMA_MODEL="qwen2.5:3b"
+```
+
+Ollama no requiere API key real; el backend usa automaticamente una clave placeholder si `LLM_PROVIDER=ollama`. Si el backend esta desplegado en nube y Ollama corre en tu PC, `OLLAMA_BASE_URL` debe apuntar a una URL alcanzable desde la nube, por ejemplo un tunel seguro o una VPN:
+
+```powershell
+$env:LLM_PROVIDER="ollama"
+$env:OLLAMA_BASE_URL="https://tu-tunel-seguro.example.com/v1"
+$env:OLLAMA_MODEL="qwen2.5:3b"
+```
+
 Para Google Drive, en desarrollo local se usan:
 
 - `credentials.json`
@@ -138,6 +154,17 @@ Ejecutar un contenedor:
 docker run --rm -p 8000:8000 `
   -e OPENAI_API_KEY="TU_API_KEY" `
   -e OPENAI_MODEL="gpt-4o" `
+  -v "${PWD}\outputs:/tmp/automatizacion-gif" `
+  automatizacion-gif:latest
+```
+
+Ejecutar con Ollama local:
+
+```powershell
+docker run --rm -p 8000:8000 `
+  -e LLM_PROVIDER="ollama" `
+  -e OLLAMA_BASE_URL="http://host.docker.internal:11434/v1" `
+  -e OLLAMA_MODEL="qwen2.5:3b" `
   -v "${PWD}\outputs:/tmp/automatizacion-gif" `
   automatizacion-gif:latest
 ```

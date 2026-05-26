@@ -98,6 +98,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from automation_engine.generate_guiones import extract_course_plan, parse_syllabus_docx  # noqa: E402
 from automation_engine.config.categories import CATEGORIES, get_category, public_categories_payload, validate_category_prompts  # noqa: E402
+from automation_engine.utils.openai_client import is_ollama_enabled  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -113,6 +114,9 @@ _openai_api_key = os.getenv("OPENAI_API_KEY")
 if _openai_api_key:
     os.environ["OPENAI_API_KEY"] = _openai_api_key.strip()
     print("[OpenAI] API key detected")
+elif is_ollama_enabled():
+    os.environ["OPENAI_API_KEY"] = "ollama"
+    print("[LLM] Ollama mode detected; using placeholder OPENAI_API_KEY")
 
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
@@ -511,7 +515,7 @@ def validate_local_granule_filename(file_name: str) -> None:
 
 
 def validate_required_api_key() -> None:
-    if not os.getenv("OPENAI_API_KEY"):
+    if not os.getenv("OPENAI_API_KEY") and not is_ollama_enabled():
         raise HTTPException(status_code=400, detail="Falta configurar la API key en el .env (OPENAI_API_KEY).")
 
 
